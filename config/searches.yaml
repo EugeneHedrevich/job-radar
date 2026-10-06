@@ -1,0 +1,137 @@
+# SAP Job Radar - collection configuration.
+#
+# Geography is configured PER SOURCE on purpose:
+#   * LinkedIn searches globally and understands only `location` (free text).
+#   * Indeed and Glassdoor REQUIRE `country_indeed`; `location` only narrows it.
+#   * Glassdoor supports a smaller country list than Indeed.
+# Verified against python-jobspy 1.2.0.
+
+defaults:
+  hours_old: 96 # freshness window; deliberately wider than the 3h cycle so
+                # cycles overlap and nothing is lost to a failed run
+  results_wanted: 25
+  description_format: markdown
+  distance: 50
+  job_type: null # do NOT pre-filter on contract: most postings omit this field
+  is_remote: false # do NOT pre-filter on remote: most postings omit this field
+
+keywords:
+  - "SAP BTP Developer"
+  - "SAP CAP Developer"
+  - "SAP CAPM Developer"
+  - "SAP CPI Developer"
+  - "SAP Integration Suite Developer"
+  - "SAP UI5 Developer"
+  - "SAP Fiori Developer"
+  - "SAP BTP Architect"
+  - "SAP AI Developer"
+
+sources:
+  linkedin:
+    enabled: true
+    # LinkedIn ignores country_indeed. Only free-text `location` works.
+    geos:
+      eu: { id: eu, location: "European Union" }
+      de: { id: de, location: "Germany" }
+      nl: { id: nl, location: "Netherlands" }
+      ch: { id: ch, location: "Switzerland" }
+      bg: { id: bg, location: "Bulgaria" }
+      uk: { id: uk, location: "United Kingdom" }
+    results_wanted: 25
+    # LinkedIn rate limits aggressively; keep requests slow and few.
+    delay_between_tasks_seconds: 8
+    task_timeout_seconds: 240
+    supports_description_fetch: true
+    search_results_include_description: false
+
+  indeed:
+    enabled: true
+    # country_indeed is mandatory and must use JobSpy's exact spelling.
+    geos:
+      de: { id: de, country_indeed: "Germany", location: "Germany" }
+      nl: { id: nl, country_indeed: "Netherlands", location: "Netherlands" }
+      ch: { id: ch, country_indeed: "Switzerland", location: "Switzerland" }
+      at: { id: at, country_indeed: "Austria", location: "Austria" }
+      bg: { id: bg, country_indeed: "Bulgaria", location: "Bulgaria" }
+      pl: { id: pl, country_indeed: "Poland", location: "Poland" }
+      uk: { id: uk, country_indeed: "UK", location: "United Kingdom" }
+      ie: { id: ie, country_indeed: "Ireland", location: "Ireland" }
+    results_wanted: 30
+    delay_between_tasks_seconds: 2
+    task_timeout_seconds: 180
+    supports_description_fetch: true
+    # Indeed already returns descriptions in search results.
+    search_results_include_description: true
+
+  glassdoor:
+    enabled: true
+    # Only countries marked with * in the JobSpy README support Glassdoor.
+    geos:
+      de: { id: de, country_indeed: "Germany", location: "Germany" }
+      nl: { id: nl, country_indeed: "Netherlands", location: "Netherlands" }
+      ch: { id: ch, country_indeed: "Switzerland", location: "Switzerland" }
+      at: { id: at, country_indeed: "Austria", location: "Austria" }
+      uk: { id: uk, country_indeed: "UK", location: "United Kingdom" }
+      ie: { id: ie, country_indeed: "Ireland", location: "Ireland" }
+    results_wanted: 20
+    # Glassdoor blocks after roughly 30 requests per IP.
+    delay_between_tasks_seconds: 6
+    task_timeout_seconds: 180
+    supports_description_fetch: true
+    search_results_include_description: false
+
+# A small rotating batch runs every cycle. Never every keyword x every country.
+rotation:
+  interval_hours: 3
+  batches:
+    - key: "btp-core"
+      keywords: ["SAP BTP Developer", "SAP CAP Developer", "SAP CAPM Developer"]
+      targets:
+        linkedin: [eu, de]
+        indeed: [de, nl]
+        glassdoor: [de]
+
+    - key: "integration"
+      keywords: ["SAP CPI Developer", "SAP Integration Suite Developer"]
+      targets:
+        linkedin: [eu, nl]
+        indeed: [de, ch, at]
+        glassdoor: [nl]
+
+    - key: "frontend"
+      keywords: ["SAP UI5 Developer", "SAP Fiori Developer"]
+      targets:
+        linkedin: [eu, ch]
+        indeed: [de, pl, bg]
+        glassdoor: [ch]
+
+    - key: "architect-ai"
+      keywords: ["SAP BTP Architect", "SAP AI Developer"]
+      targets:
+        linkedin: [eu, uk]
+        indeed: [uk, ie, nl]
+        glassdoor: [uk, ie]
+
+# Descriptions cost one extra HTTP request per job and are the fastest way to
+# get blocked. They are therefore budgeted per run.
+# A job collected without a description stays incomplete - it is never given an
+# invented assessment.
+description_budget:
+  max_tasks_per_run: 2
+  # Sources that already ship descriptions in search results are skipped here.
+  prefer_sources: ["linkedin", "glassdoor"]
+
+resilience:
+  max_tasks_per_run: 18
+  max_retries_per_task: 1
+  retry_delay_seconds: 20
+  # Consecutive failures of a source before it is put on cooldown.
+  failure_threshold: 3
+  cooldown_minutes:
+    rate_limit: 120
+    blocked: 720
+    timeout: 30
+    network: 15
+    error: 30
+  # Overall wall clock budget for the collector subprocess.
+  process_timeout_seconds: 1800

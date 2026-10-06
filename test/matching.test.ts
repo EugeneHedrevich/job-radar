@@ -1,0 +1,209 @@
+import { describe, expect, it } from 'vitest';
+import { loadConfig } from '../src/config/index.js';
+import { assessWithRules, prescreen, suggestCvVariant } from '../src/matching/rules.js';
+import { jobText } from '../src/matching/signals.js';
+import type { MatchableJob } from '../src/matching/types.js';
+
+const config = loadConfig();
+
+function job(overrides: Partial<MatchableJob> = {}): MatchableJob {
+  return {
+    ID: 'test',
+    title: 'Senior SAP BTP Developer',
+    company: 'Northwind Cloud Consulting GmbH',
+    location: 'Remote, Germany, DE',
+    locationCountry: 'Germany',
+    isRemote: true,
+    jobType: 'contract',
+    salaryMin: 60,
+    salaryMax: 75,
+    salaryInterval: 'hourly',
+    salaryCurrency: 'EUR',
+    description:
+      'Freelance engagement, fully remote within the EU. Build CAP services with Node.js, TypeScript and CDS, expose OData V4, deploy to Cloud Foundry with XSUAA. Must have: CAP, Node.js, SAP HANA Cloud. Nice to have: SAPUI5, Integration Suite. English speaking team.',
+    descriptionHash: 'hash',
+    primaryUrl: 'https://example.com/job',
+    datePosted: '2026-10-04',
+    ...overrides,
+  };
+}
+
+describe('deterministic matching (no LLM key required)', () => {
+  it('scores a strong, remote, contract BTP role highly and recommends Apply', () => {
+    const result = assessWithRules(config, job());
+    expect(result.engine).toBe('rules');
+    expect(result.model).toBeNull();
+    expect(result.fitScore).toBeGreaterThanOrEqual(config.scoring.thresholds.apply);
+    expect(result.recommendation).toBe('Apply');
+    expect(result.strongMatches).toContain('CAP');
+    expect(result.hardReject).toBe(false);
+  });
+
+  it('is deterministic: the same input always produces the same score', () => {
+    expect(assessWithRules(config, job()).fitScore).toBe(assessWithRules(config, job()).fitScore);
+  });
+});
+
+describe('mandatory-gap filtering', () => {
+  it('rejects an ABAP-only role even when the title mentions SAP', () => {
+    const result = assessWithRules(
+      config,
+      job({
+        title: 'Senior ABAP Developer',
+        description:
+          'Permanent position only. Extensive experience with ABAP OO and the RAP framework is mandatory. Fully on-site in Walldorf. No freelancers.',
+        jobType: 'fulltime',
+        isRemote: false,
+      }),
+    );
+    expect(result.hardReject).toBe(true);
+    expect(result.recommendation).toBe('Skip');
+    expect(result.fitScore).toBeLessThanOrEqual(config.scoring.hard_rejects.score_cap);
+    expect(result.mandatoryGaps.join(' ')).toMatch(/ABAP/i);
+  });
+
+  it('rejects a predominantly functional role', () => {
+    const result = assessWithRules(
+      config,
+      job({
+        title: 'SAP IS-U Functional Consultant',
+        description: 'Deep IS-U functional expertise is mandatory. Mostly on-site in Warsaw. Fluent Polish is required.',
+        jobType: 'fulltime',
+        isRemote: null,
+      }),
+    );
+    expect(result.hardReject).toBe(true);
+    expect(result.recommendation).toBe('Skip');
+  });
+
+  it('rejects a role that makes an unheld language mandatory', () => {
+    const result = assessWithRules(
+      config,
+      job({
+        description:
+          'Freelance engagement, fully remote. Build CAP services with Node.js and TypeScript. Verhandlungssichere Deutschkenntnisse sind erforderlich.',
+      }),
+    );
+    expect(result.hardReject).toBe(true);
+    expect(String(result.hardRejectReason)).toMatch(/language/i);
+  });
+
+  it('keeps a mixed BTP/ABAP role in play instead of hard-rejecting it', () => {
+    const result = assessWithRules(
+      config,
+      job({
+        title: 'SAP BTP Developer with ABAP background',
+        description:
+          'You will build CAP applications on SAP BTP with Node.js and TypeScript. ABAP developer knowledge is nice to have for reading existing code. Freelance, fully remote.',
+      }),
+    );
+    expect(result.hardReject).toBe(false);
+    expect(result.recommendation).not.toBe('Skip');
+  });
+
+  it('separates mandatory gaps from preferred ones', () => {
+    const mandatory = assessWithRules(
+      config,
+      job({ description: `${job().description} SAP IS-U functional consulting is mandatory for this role.` }),
+    );
+    expect(mandatory.mandatoryGaps.some((gap) => /IS-U/i.test(gap))).toBe(true);
+
+    const preferred = assessWithRules(
+      config,
+      job({ description: `${job().description} SAP IS-U functional consulting is nice to have.` }),
+    );
+    expect(preferred.preferredGaps.some((gap) => /IS-U/i.test(gap))).toBe(true);
+    expect(preferred.mandatoryGaps.some((gap) => /IS-U/i.test(gap))).toBe(false);
+  });
+});
+
+describe('uncertainty handling', () => {
+  it('never recommends Apply for a job whose description was not retrieved', () => {
+    const result = assessWithRules(config, job({ description: null, descriptionHash: null }));
+    expect(result.recommendation).not.toBe('Apply');
+    expect(result.fitScore).toBeLessThanOrEqual(config.scoring.uncertainty.cap_without_description);
+    expect(result.missingInformation.join(' ')).toMatch(/description/i);
+  });
+
+  it('reports an unknown rate as missing information rather than rejecting or accepting', () => {
+    const result = assessWithRules(
+      config,
+      job({ salaryMin: null, salaryMax: null, salaryInterval: null, salaryCurrency: null }),
+    );
+    expect(result.missingInformation).toContain('rate not stated');
+    expect(result.hardReject).toBe(false);
+  });
+
+  it('reports an unknown contract type and work mode without rejecting the job', () => {
+    const unknown = job({
+      jobType: null,
+      isRemote: null,
+      description: 'SAP BTP role. CAP and Node.js are used. No further details provided.',
+    });
+    const result = assessWithRules(config, unknown);
+    expect(result.missingInformation.join(' ')).toMatch(/contract type not stated/);
+    expect(result.missingInformation.join(' ')).toMatch(/work mode/);
+    expect(result.hardReject).toBe(false);
+
+    // Unknown must sit between a clearly bad and a clearly good posting,
+    // never collapse to either extreme.
+    const bad = assessWithRules(
+      config,
+      job({
+        jobType: 'fulltime',
+        isRemote: false,
+        description: 'SAP BTP role. CAP and Node.js are used. Permanent position, fully on-site in Munich.',
+      }),
+    );
+    const good = assessWithRules(
+      config,
+      job({ description: 'SAP BTP role. CAP and Node.js are used. Freelance contract, 100% remote.' }),
+    );
+    expect(result.fitScore).toBeGreaterThan(bad.fitScore);
+    expect(result.fitScore).toBeLessThan(good.fitScore);
+  });
+
+  it('does not assume work authorisation outside the preferred region', () => {
+    const result = assessWithRules(config, job({ location: 'Austin, TX, US', locationCountry: 'United States' }));
+    expect(result.missingInformation.join(' ')).toMatch(/work authorisation/i);
+  });
+});
+
+describe('prescreen', () => {
+  it('drops obviously irrelevant titles cheaply', () => {
+    expect(prescreen(config, job({ title: 'Technical Recruiter', description: 'We hire SAP people.' })).passed).toBe(false);
+    expect(
+      prescreen(config, job({ title: 'Working Student SAP', description: 'Support our SAP team with small tasks.' }))
+        .passed,
+    ).toBe(false);
+  });
+
+  it('rescues an excluded title when the body is clearly in scope', () => {
+    expect(
+      prescreen(config, job({ title: 'ABAP and BTP Developer', description: 'CAP, Node.js and BTP work.' })).passed,
+    ).toBe(true);
+  });
+});
+
+describe('CV variant recommendation', () => {
+  it('only ever returns a configured variant id', () => {
+    const ids = config.cvVariants.variants.map((variant) => variant.id);
+    for (const title of ['SAP CPI Developer', 'SAP Fiori Developer', 'SAP AI Developer', 'SAP BTP Architect', 'Chef']) {
+      expect(ids).toContain(suggestCvVariant(config, jobText(job({ title }))));
+    }
+  });
+
+  it('picks the integration CV for a CPI role', () => {
+    expect(
+      suggestCvVariant(
+        config,
+        jobText(
+          job({
+            title: 'SAP Integration Suite / CPI Developer',
+            description: 'Design iFlows in SAP CPI, configure destinations, OAuth and principal propagation to S/4HANA.',
+          }),
+        ),
+      ),
+    ).toBe('cpi');
+  });
+});

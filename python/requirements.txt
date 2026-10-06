@@ -1,0 +1,3 @@
+# Direct dependency of the SAP Job Radar collector.
+# Pinned exactly; the full transitive lock lives in python/requirements.lock.txt
+python-jobspy==1.2.0

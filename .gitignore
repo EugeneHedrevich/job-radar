@@ -1,0 +1,31 @@
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Persistent database
+data/
+*.sqlite
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+*.db
+
+# Personal CV files - never commit these
+cv/
+*.pdf
+*.docx
+
+# Dependencies and build output
+node_modules/
+dist/
+gen/
+.venv/
+__pycache__/
+*.pyc
+
+# Tooling
+.DS_Store
+coverage/
+.vitest/
+*.log

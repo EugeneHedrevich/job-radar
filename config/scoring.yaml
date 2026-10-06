@@ -1,0 +1,264 @@
+# SAP Job Radar - scoring configuration.
+#
+# Everything the deterministic matcher does is driven by this file. The LLM
+# stage reuses the same weights so both engines are comparable.
+#
+# The output is a FIT SCORE (0-100): how well the vacancy matches the profile.
+# It is NOT a probability of being hired.
+
+version: "2026-10-06.1"
+
+# Final score = sum(dimension score x weight). Weights must sum to 1.0.
+weights:
+  technical: 0.55
+  commercial: 0.20
+  location: 0.25
+
+thresholds:
+  apply: 75 # >= -> recommendation "Apply"
+  review: 55 # >= -> recommendation "Review"; below -> "Skip"
+  notify: 75 # >= -> eligible for a Telegram notification
+  # Jobs that pass the LLM screen gate are sent to the LLM (stage 2).
+  llm_screen_gate: 45
+
+# Unknown facts must not silently become a yes or a no.
+# These neutral values are used when a dimension cannot be judged, and the fact
+# is recorded in `missingInformation`.
+uncertainty:
+  neutral_score: 50
+  # A job whose description was never retrieved can never be recommended
+  # "Apply" by the deterministic engine, only "Review".
+  cap_without_description: 70
+  # Likewise an LLM assessment is never produced without a description.
+  require_description_for_llm: true
+
+technical:
+  # Points per matched skill group, capped at `cap`. Matching is
+  # case-insensitive on word boundaries against title + description.
+  groups:
+    core: { points_per_hit: 14, cap: 42 }
+    integration: { points_per_hit: 10, cap: 30 }
+    frontend: { points_per_hit: 8, cap: 16 }
+    data: { points_per_hit: 7, cap: 21 }
+    platform: { points_per_hit: 6, cap: 18 }
+    ai: { points_per_hit: 9, cap: 27 }
+  # A title hit is worth this multiplier on top of a description hit.
+  title_multiplier: 1.5
+  # Floor applied when the title clearly names an SAP BTP-family role.
+  relevant_title_floor: 45
+  max: 100
+
+commercial:
+  # Contract/freelance signals.
+  contract_signals_bonus: 25
+  permanent_signals_penalty: 35
+  # Rate handling. Unknown rate -> neutral, never a reject.
+  rate_at_or_above_target_bonus: 20
+  rate_below_minimum_penalty: 45
+  base: 50
+  max: 100
+
+location:
+  base: 50
+  fully_remote_bonus: 35
+  remote_within_europe_bonus: 10
+  hybrid_penalty: 20
+  onsite_penalty: 40
+  outside_preferred_region_penalty: 25
+  preferred_country_bonus: 10
+  max: 100
+
+# Mandatory incompatibilities. A hard reject forces recommendation "Skip" and a
+# score cap, regardless of how well the job scores elsewhere.
+hard_rejects:
+  score_cap: 25
+  rules:
+    - id: permanent_only
+      reason: "Permanent employment only; profile is freelance/B2B/contract."
+      # Requires a permanent signal AND no contract signal anywhere.
+      any:
+        - "permanent (position|role|contract|employment) only"
+        - "no (freelance|contractors?|b2b|c2c)"
+        - "freelancers? (are )?(not|won't be) (considered|accepted)"
+        - "(only|exclusively) (direct hire|festanstellung|unbefristet)"
+        - "keine (freiberufler|freelancer)"
+      none:
+        - "freelance"
+        - "contract(or|ing)?\\b"
+        - "b2b"
+        - "interim"
+
+    - id: abap_only
+      reason: "ABAP-centric development role; profile has reading-level ABAP only."
+      any:
+        - "abap (developer|consultant|programmer)"
+        - "senior abap"
+        - "(^|\\W)rap (framework|model)? ?(developer|expert|specialist)"
+        - "abap oo"
+        - "(expert|strong|extensive|deep) (knowledge|experience) (in|of|with) abap"
+      none:
+        - "btp"
+        - "cap(m)?\\b"
+        - "cloud application programming"
+        - "node\\.?js"
+        - "typescript"
+        - "ui5"
+        - "fiori"
+        - "integration suite"
+
+    - id: functional_only
+      reason: "Predominantly functional role; profile is technical/development."
+      any:
+        - "functional (consultant|analyst|lead)"
+        - "(fi/co|sd/mm|mm/sd|is-u|isu|ewm|hcm|successfactors) consultant"
+        - "business process (consultant|expert)"
+        - "customizing (consultant|expert)"
+      none:
+        - "develop(er|ment)"
+        - "btp"
+        - "cap(m)?\\b"
+        - "node\\.?js"
+        - "ui5"
+        - "fiori"
+        - "integration suite"
+
+    - id: onsite_heavy
+      reason: "Heavily onsite; profile accepts only occasional travel."
+      any:
+        - "(100|full)\\s*%\\s*(on[- ]?site|onsite|vor ort)"
+        - "fully on[- ]?site"
+        - "(5|five) days? (a|per) week (on[- ]?site|in (the )?office)"
+        - "no remote (work)?( possible| allowed)?"
+        - "remote (work )?is not (possible|an option|offered)"
+        - "must relocate"
+        - "relocation (is )?(required|mandatory)"
+      none: []
+
+    - id: language_barrier
+      reason: "A language the profile does not hold is mandatory."
+      any:
+        - "(fluent|native|business|verhandlungssicher)\\w* (german|deutsch)"
+        - "german (language )?(is )?(required|mandatory|a must|erforderlich)"
+        - "(fluent|native|business) (french|dutch|italian|spanish|polish)"
+        - "(french|dutch|italian|spanish|polish) (language )?(is )?(required|mandatory|a must)"
+        - "sehr gute deutschkenntnisse"
+      none:
+        - "english (only|speaking|is sufficient|is enough)"
+        - "german (is )?(a plus|nice to have|optional|not required|beneficial)"
+
+# Cheap stage-1 screening. Jobs failing this never reach the LLM.
+prescreen:
+  # At least one of these must appear in the title or description.
+  require_any:
+    - "\\bsap\\b"
+    - "s/?4 ?hana"
+    - "\\bbtp\\b"
+    - "\\babap\\b"
+    - "\\bfiori\\b"
+    - "\\bui5\\b"
+  # If the title contains any of these and none of `rescue_terms`, drop early.
+  drop_title_terms:
+    - "abap"
+    - "basis administrator"
+    - "sales"
+    - "account executive"
+    - "recruiter"
+    - "intern(ship)?"
+    - "working student"
+    - "werkstudent"
+    - "praktikum"
+  rescue_terms:
+    - "btp"
+    - "cap"
+    - "capm"
+    - "cpi"
+    - "integration suite"
+    - "ui5"
+    - "fiori"
+    - "cloud"
+
+# Phrases used to detect contract vs permanent and remote vs onsite when the
+# structured fields from the source are missing.
+signals:
+  contract:
+    - "freelance"
+    - "freelancer"
+    - "contract(or|ing)?\\b"
+    - "b2b"
+    - "interim"
+    - "self[- ]employed"
+    - "day rate"
+    - "daily rate"
+    - "hourly rate"
+    - "tagessatz"
+    - "werkvertrag"
+    - "outside ir35"
+  permanent:
+    - "permanent"
+    - "festanstellung"
+    - "unbefristet"
+    - "full[- ]time employee"
+    - "cdi\\b"
+    - "payroll"
+    - "annual salary"
+    - "13th salary"
+  fully_remote:
+    - "fully remote"
+    - "100\\s*%\\s*remote"
+    - "remote[- ]first"
+    - "work from anywhere"
+    - "remote \\(europe\\)"
+    - "remote within (the )?(eu|europe|eea)"
+  hybrid:
+    - "hybrid"
+    - "\\d\\s*days? (a|per) week (in (the )?office|on[- ]?site)"
+    - "partially remote"
+  onsite:
+    - "on[- ]?site"
+    - "vor ort"
+    - "in[- ]office"
+  mandatory_markers:
+    - "must have"
+    - "required"
+    - "mandatory"
+    - "essential"
+    - "is a must"
+    - "minimum requirement"
+  preferred_markers:
+    - "nice to have"
+    - "preferred"
+    - "a plus"
+    - "beneficial"
+    - "desirable"
+    - "would be an advantage"
+
+# Countries considered inside the preferred working region.
+preferred_countries:
+  - "Bulgaria"
+  - "Germany"
+  - "Netherlands"
+  - "Austria"
+  - "Switzerland"
+  - "Ireland"
+  - "Poland"
+  - "Belgium"
+  - "Denmark"
+  - "Sweden"
+  - "Finland"
+  - "Norway"
+  - "Spain"
+  - "Portugal"
+  - "Italy"
+  - "France"
+  - "Czech Republic"
+  - "Romania"
+  - "United Kingdom"
+  - "Luxembourg"
+  - "Estonia"
+  - "Lithuania"
+  - "Latvia"
+  - "Greece"
+  - "Hungary"
+  - "Croatia"
+  - "Slovakia"
+  - "Slovenia"

@@ -1,0 +1,36 @@
+# SAP Job Radar - CV variants.
+#
+# These describe CVs that ALREADY EXIST on your disk. The tool only recommends
+# which one to send; it never rewrites a CV and never generates a PDF.
+# Only the ids listed here can ever be recommended.
+#
+# `file` is informational and is NOT read by the tool. Keep real CV files out of
+# the repository (see .gitignore).
+
+default: "btp-cap"
+
+variants:
+  - id: "btp-cap"
+    label: "BTP/CAP"
+    file: "~/cv/hedrevich-sap-btp-cap.pdf"
+    focus: ["SAP BTP", "CAP", "CAPM", "CDS", "Node.js", "TypeScript", "HANA Cloud", "OData", "Cloud Foundry", "XSUAA"]
+
+  - id: "cpi"
+    label: "CPI/Integration Suite"
+    file: "~/cv/hedrevich-sap-integration.pdf"
+    focus: ["Integration Suite", "CPI", "iFlow", "Event Mesh", "principal propagation", "destinations", "OAuth", "API Management", "S/4HANA integration"]
+
+  - id: "ui5"
+    label: "UI5/Fiori"
+    file: "~/cv/hedrevich-sap-ui5-fiori.pdf"
+    focus: ["SAPUI5", "UI5", "Fiori", "Fiori Elements", "Fiori Launchpad", "Work Zone", "frontend"]
+
+  - id: "ai"
+    label: "SAP AI"
+    file: "~/cv/hedrevich-sap-ai.pdf"
+    focus: ["AI Core", "Generative AI Hub", "Joule", "RAG", "embeddings", "Vector Engine", "LLM", "machine learning"]
+
+  - id: "architect"
+    label: "BTP Architect"
+    file: "~/cv/hedrevich-sap-btp-architect.pdf"
+    focus: ["architect", "solution architect", "technical architect", "lead", "architecture", "governance", "landscape"]

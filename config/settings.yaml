@@ -1,0 +1,41 @@
+# SAP Job Radar - runtime settings.
+# Secrets live in .env, never here.
+
+storage:
+  # Persistent SQLite location. Relative paths resolve from the project root.
+  # Override with JOB_RADAR_DB_DIR.
+  db_dir: "./data"
+  db_file: "job-radar.sqlite"
+
+collector:
+  # Override with JOB_RADAR_PYTHON. Defaults to the project venv.
+  python: "./.venv/bin/python"
+  script: "./python/collector.py"
+
+llm:
+  enabled: true # still a no-op unless OPENAI_API_KEY is set
+  model: "gpt-4o-mini" # configurable; any chat-completions model
+  base_url: "https://api.openai.com/v1"
+  temperature: 0
+  max_output_tokens: 900
+  request_timeout_seconds: 60
+  max_jobs_per_run: 25 # cost guard
+  # Vacancy text is untrusted input: it is truncated and wrapped in a delimited
+  # block, and the model is told never to follow instructions inside it.
+  max_description_chars: 12000
+
+telegram:
+  enabled: true
+  # Minimum fit score required to notify. Mirrors scoring.thresholds.notify.
+  min_fit_score: 75
+  # Never send more than this per cycle, however many jobs match.
+  max_per_run: 10
+  max_attempts: 5
+  retry_base_delay_seconds: 5
+  disable_web_page_preview: true
+
+scheduler:
+  # Matches searches.yaml rotation.interval_hours.
+  cron: "0 */3 * * *"
+  timezone: "Europe/Sofia"
+  run_on_start: true

@@ -1,0 +1,40 @@
+{
+  "name": "sap-job-radar",
+  "version": "0.1.0",
+  "description": "SAP Job Radar - find SAP vacancies and push matches to Telegram",
+  "main": "index.js",
+  "scripts": {
+    "collect": "tsx src/cli.ts collect",
+    "rank": "tsx src/cli.ts rank",
+    "top": "tsx src/cli.ts top",
+    "notify": "tsx src/cli.ts notify",
+    "cycle": "tsx src/cli.ts cycle",
+    "watch": "tsx src/cli.ts watch",
+    "status": "tsx src/cli.ts status",
+    "dry-run": "tsx src/cli.ts cycle --dry-run",
+    "cycle:demo": "tsx src/cli.ts cycle --demo --dry-run",
+    "typecheck": "tsc --noEmit",
+    "test:watch": "vitest",
+    "test": "vitest run"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "private": "true",
+  "dependencies": {
+    "@cap-js/sqlite": "3.1.1",
+    "@sap/cds": "10.1.1",
+    "dotenv": "17.2.3",
+    "node-cron": "4.2.1",
+    "yaml": "2.9.1",
+    "zod": "4.1.12"
+  },
+  "devDependencies": {
+    "@cap-js/cds-types": "0.20.0",
+    "@types/node": "22.18.9",
+    "tsx": "4.20.6",
+    "typescript": "5.9.3",
+    "vitest": "5.0.3"
+  },
+  "type": "module"
+}

@@ -1,0 +1,113 @@
+# SAP Job Radar - candidate profile.
+# Bump `version` whenever you change anything here: cached assessments are keyed
+# on it, so a bump forces re-evaluation of all jobs.
+version: "2026-10-06.1"
+
+identity:
+  name: "Yauhen Hedrevich"
+  alias: "Eugene Hedrevich"
+  headline: "Senior SAP BTP Developer / Solution Architect"
+  years_of_sap_experience: 7            # "7+"; treat as a floor, not a ceiling
+  base_location: "Sofia, Bulgaria"
+  timezone: "Europe/Sofia"
+
+# Editable. Nothing here is inferred - leave a value as `unknown` if you do not
+# want the matcher to assume it.
+availability:
+  status: "open"                        # open | passive | unavailable
+  notice_period_days: 14
+  earliest_start: unknown
+  weekly_capacity_hours: 40
+
+# Work authorisation is NEVER inferred from the base location.
+# Add only permissions you actually hold.
+work_authorization:
+  bulgaria: "authorized"
+  eu_remote_b2b: "authorized_as_contractor"   # invoicing from BG as a contractor
+  eu_onsite_employment: "unknown"
+  uk: "unknown"
+  usa: "unknown"
+  requires_sponsorship: unknown
+
+travel:
+  max_onsite_days_per_month: 4
+  accepts_occasional_travel: true
+  accepts_relocation: false
+
+engagement:
+  preferred_types: ["freelance", "b2b", "contract"]
+  acceptable_types: ["freelance", "b2b", "contract", "contract_to_hire"]
+  rejected_types: ["permanent_only", "internship"]
+  preferred_work_mode: "fully_remote"
+  acceptable_work_modes: ["fully_remote", "remote_first_hybrid"]
+  preferred_regions: ["Europe", "EEA", "EU", "UK"]
+
+compensation:
+  target_hourly_rate: 50
+  minimum_hourly_rate: 45
+  currency: "EUR"
+  # Used only to compare non-hourly postings. Adjust if your working year differs.
+  hours_per_day: 8
+  working_days_per_month: 20
+  working_months_per_year: 11
+
+languages:
+  - code: "en"
+    proficiency: "professional"
+  - code: "ru"
+    proficiency: "native"
+  # Languages NOT listed here are treated as "not held". A posting that makes an
+  # unlisted language mandatory is a mandatory gap.
+
+# proficiency: expert | strong | working | basic
+skills:
+  core:
+    - { name: "SAP BTP", proficiency: expert, aliases: ["Business Technology Platform"] }
+    - { name: "CAP", proficiency: expert, aliases: ["CAPM", "Cloud Application Programming Model", "@sap/cds"] }
+    - { name: "CDS", proficiency: expert, aliases: ["Core Data Services"] }
+    - { name: "Node.js", proficiency: expert, aliases: ["nodejs", "node"] }
+    - { name: "TypeScript", proficiency: expert, aliases: ["ts"] }
+    - { name: "JavaScript", proficiency: expert }
+  frontend:
+    - { name: "SAPUI5", proficiency: strong, aliases: ["UI5", "OpenUI5"] }
+    - { name: "SAP Fiori", proficiency: strong, aliases: ["Fiori Elements", "Fiori"] }
+  data:
+    - { name: "SAP HANA Cloud", proficiency: strong, aliases: ["HANA"] }
+    - { name: "OData", proficiency: expert, aliases: ["OData V2", "OData V4"] }
+    - { name: "REST", proficiency: expert }
+    - { name: "S/4HANA integration", proficiency: strong, aliases: ["S4HANA", "S/4"] }
+  integration:
+    - { name: "SAP Integration Suite", proficiency: strong }
+    - { name: "SAP CPI", proficiency: strong, aliases: ["Cloud Platform Integration", "CI", "HCI"] }
+    - { name: "Destinations", proficiency: strong }
+    - { name: "OAuth", proficiency: strong, aliases: ["OAuth2", "OAuth 2.0"] }
+    - { name: "Principal Propagation", proficiency: strong }
+    - { name: "SAP Event Mesh", proficiency: working, aliases: ["Event Mesh", "Advanced Event Mesh"] }
+  platform:
+    - { name: "Cloud Foundry", proficiency: strong, aliases: ["CF"] }
+    - { name: "XSUAA", proficiency: strong }
+    - { name: "SAP IAS", proficiency: strong, aliases: ["Identity Authentication Service", "IAS"] }
+    - { name: "SAP Build Work Zone", proficiency: working, aliases: ["Work Zone", "Launchpad Service"] }
+    - { name: "SAP Build Process Automation", proficiency: working, aliases: ["BPA", "Workflow Management"] }
+  ai:
+    - { name: "SAP AI Core", proficiency: strong }
+    - { name: "Generative AI Hub", proficiency: strong, aliases: ["GenAI Hub"] }
+    - { name: "Joule Studio", proficiency: working }
+    - { name: "RAG", proficiency: strong, aliases: ["Retrieval Augmented Generation"] }
+    - { name: "Embeddings", proficiency: strong }
+    - { name: "HANA Vector Engine", proficiency: strong, aliases: ["Vector Engine"] }
+  limited:
+    # Declared explicitly so the matcher does not over-claim them.
+    - { name: "ABAP", proficiency: basic, note: "reading and troubleshooting only; no recent development ownership" }
+
+# Capabilities deliberately NOT claimed. Used to produce mandatory gaps instead
+# of silently assuming experience.
+not_claimed:
+  - "RAP ownership"
+  - "ABAP OO development"
+  - "ABAP on-premise custom development"
+  - "SAP IS-U functional consulting"
+  - "SAP FI/CO functional consulting"
+  - "SAP SD/MM functional consulting"
+  - "SAP Basis administration"
+  - "ABAP HANA (AMDP/CDS ABAP) development"
