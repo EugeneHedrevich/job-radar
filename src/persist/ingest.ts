@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { cds, db, SELECT, INSERT, UPDATE, query, queryOne } from '../db/index.js';
 import type { NormalizedJob } from '../normalize/index.js';
-import { tokenSimilarity } from '../util/text.js';
+import { normalizeText, tokenSimilarity } from '../util/text.js';
 import { log } from '../util/log.js';
 
 export interface IngestResult {
@@ -34,6 +34,7 @@ export interface JobRow {
   firstSeenAt: string;
   lastSeenAt: string;
   status: string;
+  isDemo: boolean;
 }
 
 /** Thresholds for cross-source duplicate detection. */
@@ -46,7 +47,7 @@ export const DEDUPE = {
 
 export async function ingestJobs(
   normalized: NormalizedJob[],
-  context: { runId: string | null; seenAt?: Date },
+  context: { runId: string | null; seenAt?: Date; demo?: boolean },
 ): Promise<IngestResult> {
   const seenAt = (context.seenAt ?? new Date()).toISOString();
   const result: IngestResult = {
@@ -70,16 +71,16 @@ export async function ingestJobs(
     const existingListing = await findListing(job);
     if (existingListing) {
       await touchListing(existingListing.ID, job, seenAt, context.runId);
-      const enriched = await enrichJob(existingListing.job_ID, job, seenAt);
+      const enriched = await enrichJob(existingListing.job_ID, job, seenAt, true, context.demo);
       if (enriched) result.updated += 1;
       if (existingListing.job_ID) result.jobIds.push(existingListing.job_ID);
       continue;
     }
 
-    const duplicate = await findCrossSourceDuplicate(job);
+    const duplicate = await findCrossSourceDuplicate(job, Boolean(context.demo));
     if (duplicate) {
       await insertListing(duplicate.ID, job, seenAt, context.runId);
-      await enrichJob(duplicate.ID, job, seenAt);
+      await enrichJob(duplicate.ID, job, seenAt, false, context.demo);
       result.mergedAcrossSources += 1;
       result.jobIds.push(duplicate.ID);
       continue;
@@ -108,6 +109,7 @@ export async function ingestJobs(
         firstSeenAt: seenAt,
         lastSeenAt: seenAt,
         status: 'New',
+        isDemo: Boolean(context.demo),
       }),
     );
     await insertListing(jobId, job, seenAt, context.runId);
@@ -141,14 +143,22 @@ async function findListing(job: NormalizedJob): Promise<{ ID: string; job_ID: st
  *
  * A match requires the same company. Titles alone are never enough: either the
  * descriptions must be similar, or the titles must be near-identical AND the
- * locations compatible.
+ * same specific location must be known. Different same-board identities never
+ * participate in this heuristic.
  */
-export async function findCrossSourceDuplicate(job: NormalizedJob): Promise<JobRow | undefined> {
+export async function findCrossSourceDuplicate(job: NormalizedJob, demo = false): Promise<JobRow | undefined> {
   if (!job.companyNormalized) return undefined;
   const candidates = await query<JobRow>(
-    SELECT.from(db().Jobs).where({ companyNormalized: job.companyNormalized }),
+    SELECT.from(db().Jobs).where({ companyNormalized: job.companyNormalized, isDemo: demo }),
   );
   for (const candidate of candidates) {
+    // A different identity on the same board is a separate vacancy, even when
+    // a recruiter reuses titles or descriptions across clients.
+    const sameSource = await queryOne(
+      SELECT.from(db().SourceListings).columns('ID')
+        .where({ job_ID: candidate.ID, source: job.listing.source }),
+    );
+    if (sameSource) continue;
     if (isDuplicate(candidate, job)) return candidate;
   }
   return undefined;
@@ -165,11 +175,17 @@ export function isDuplicate(candidate: JobRow, job: NormalizedJob): boolean {
     return tokenSimilarity(candidate.description, job.description) >= DEDUPE.minDescriptionSimilarity;
   }
 
-  // Without descriptions we need near-identical titles and compatible locations.
+  // Without descriptions require an exact, specific location. A shared country
+  // or an unknown location is insufficient evidence of vacancy identity.
   if (titleSimilarity < DEDUPE.titleOnlySimilarity) return false;
-  const countriesKnown = candidate.locationCountry && job.locationCountry;
-  if (countriesKnown && candidate.locationCountry !== job.locationCountry) return false;
-  return true;
+  const location = normalizeText(candidate.location ?? '');
+  const incomingLocation = normalizeText(job.location ?? '');
+  if (!location || location !== incomingLocation) return false;
+  const genericLocations = new Set(['remote', 'europe', 'european union', 'eu', 'worldwide']);
+  const parts = location.split(',').map((part) => part.trim()).filter(Boolean);
+  return parts.some((part) => !genericLocations.has(part) &&
+    part !== normalizeText(candidate.locationCountry ?? '') &&
+    !/^[a-z]{2}$/.test(part));
 }
 
 async function insertListing(
@@ -215,11 +231,15 @@ async function touchListing(
 }
 
 /**
- * Refresh a job from a newly seen listing. Known values are never replaced by
- * unknown ones, and firstSeenAt is immutable.
+ * Refresh stated values from an existing source listing; new cross-source
+ * listings fill missing values only. Unknown values never erase known ones,
+ * and firstSeenAt is immutable.
  * Returns true when something other than lastSeenAt changed.
  */
-async function enrichJob(jobId: string | null, job: NormalizedJob, seenAt: string): Promise<boolean> {
+async function enrichJob(
+  jobId: string | null, job: NormalizedJob, seenAt: string,
+  authoritative: boolean, demo = false,
+): Promise<boolean> {
   if (!jobId) return false;
   const current = await queryOne<JobRow>(SELECT.from(db().Jobs).where({ ID: jobId }));
   if (!current) {
@@ -229,14 +249,22 @@ async function enrichJob(jobId: string | null, job: NormalizedJob, seenAt: strin
 
   const patch: Record<string, unknown> = { lastSeenAt: seenAt };
   const fill = <K extends keyof JobRow>(key: K, value: JobRow[K] | null) => {
-    if (value !== null && value !== undefined && (current[key] === null || current[key] === undefined)) {
+    const previous = current[key];
+    // CAP returns Decimal columns as strings; compare their numeric values.
+    const unchanged = (key === 'salaryMin' || key === 'salaryMax') && previous !== null && value !== null
+      ? Number(previous) === Number(value)
+      : value === previous;
+    if (value !== null && value !== undefined && !unchanged &&
+      (authoritative || previous === null || previous === undefined)) {
       patch[key as string] = value;
     }
   };
+  if (authoritative) fill('title', job.title);
   fill('company', job.company);
   fill('companyNormalized', job.companyNormalized);
   fill('location', job.location);
   fill('locationCountry', job.locationCountry);
+  if (patch.location && authoritative) patch.locationCountry = job.locationCountry;
   fill('isRemote', job.isRemote);
   fill('jobType', job.jobType);
   fill('salaryMin', job.salaryMin);
@@ -245,12 +273,12 @@ async function enrichJob(jobId: string | null, job: NormalizedJob, seenAt: strin
   fill('salaryCurrency', job.salaryCurrency);
   fill('datePosted', job.datePosted);
 
-  // A description that arrives later (e.g. from a description-budget run) is a
-  // genuine upgrade and replaces the empty one.
-  if (job.description && !current.description) {
+  if (job.description && job.description !== current.description && (authoritative || !current.description)) {
     patch.description = job.description;
     patch.descriptionHash = job.descriptionHash;
   }
+  if (demo && !current.isDemo) patch.isDemo = true;
+  if (authoritative && current.primaryUrl !== job.primaryUrl) patch.primaryUrl = job.primaryUrl;
 
   await cds.run(UPDATE(db().Jobs).set(patch).where({ ID: jobId }));
   return Object.keys(patch).length > 1;

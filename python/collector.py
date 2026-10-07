@@ -24,6 +24,7 @@ exit   : 0 on protocol success (task failures are reported in-band),
 from __future__ import annotations
 
 import json
+import logging
 import math
 import sys
 import time
@@ -133,27 +134,67 @@ def classify_error(exc: BaseException) -> str:
 
 
 def build_kwargs(task: dict[str, Any]) -> dict[str, Any]:
-    kwargs: dict[str, Any] = {"site_name": [task["source"]], "verbose": 0}
+    kwargs: dict[str, Any] = {"site_name": [task["source"]], "verbose": 1}
     for key, value in task.items():
         if key in ALLOWED_TASK_PARAMS and value is not None:
             kwargs[key] = value
     return kwargs
 
 
-def run_task(task: dict[str, Any], timeout_seconds: int) -> dict[str, Any]:
+class UpstreamFailures(logging.Handler):
+    """JobSpy sometimes logs a failed request and returns an empty/partial frame.
+
+    Its loggers do not propagate to the root logger, so attach directly. Known
+    transport/block warnings matter too (e.g. description requests), while
+    ordinary warnings such as unsupported filters are not task failures.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(logging.WARNING)
+        self.failures: list[tuple[str, str]] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        message = record.getMessage()
+        kind = classify_error(RuntimeError(message))
+        if record.levelno >= logging.ERROR or kind != "error":
+            self.failures.append((kind, message))
+
+    def worst(self) -> tuple[str, str] | None:
+        severity = {"blocked": 5, "rate_limit": 4, "timeout": 3, "network": 2, "error": 1}
+        return max(self.failures, key=lambda failure: severity[failure[0]], default=None)
+
+
+def scrape_with_failures(kwargs: dict[str, Any]) -> tuple[Any, tuple[str, str] | None]:
     from jobspy import scrape_jobs
 
+    capture = UpstreamFailures()
+    loggers = [logging.getLogger(name) for name in list(logging.root.manager.loggerDict)
+               if name.startswith("JobSpy:")]
+    levels = [logger.level for logger in loggers]
+    for logger in loggers:
+        logger.addHandler(capture)
+    try:
+        frame = scrape_jobs(**kwargs)
+        return frame, capture.worst()
+    finally:
+        for logger, level in zip(loggers, levels):
+            logger.removeHandler(capture)
+            logger.setLevel(level)
+        capture.close()
+
+
+def run_task(task: dict[str, Any], timeout_seconds: int) -> dict[str, Any]:
     task_id = task["task_id"]
     source = task["source"]
     started = time.monotonic()
     kwargs = build_kwargs(task)
     log(f"[task {task_id}] {source} :: {kwargs.get('search_term')!r} @ {kwargs.get('location')!r}")
 
-    # Daemon threads let us abandon a wedged scraper without blocking exit.
+    # The Node parent enforces the subprocess wall-clock timeout as well.
     executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"task-{task_id}")
-    future = executor.submit(scrape_jobs, **kwargs)
+    future = executor.submit(scrape_with_failures, kwargs)
     try:
-        frame = future.result(timeout=timeout_seconds)
+        frame, upstream_failure = future.result(timeout=timeout_seconds)
     except FutureTimeout:
         executor.shutdown(wait=False, cancel_futures=True)
         return {
@@ -199,7 +240,9 @@ def run_task(task: dict[str, Any], timeout_seconds: int) -> dict[str, Any]:
         "type": "task_result",
         "task_id": task_id,
         "source": source,
-        "status": "succeeded",
+        "status": "failed" if upstream_failure else "succeeded",
+        **({"error_kind": upstream_failure[0], "message": upstream_failure[1][:1900]}
+           if upstream_failure else {}),
         "count": count,
         "duration_ms": int((time.monotonic() - started) * 1000),
     }
@@ -238,13 +281,23 @@ def main() -> int:
 
     emit({"type": "meta", "jobspy_version": version, "tasks": len(tasks)})
 
+    paused_sources: dict[str, dict[str, Any]] = {}
     for index, task in enumerate(tasks):
         if not isinstance(task, dict) or "task_id" not in task or "source" not in task:
             log(f"skipping malformed task at index {index}")
             continue
+        if task["source"] in paused_sources:
+            failure = paused_sources[task["source"]]
+            emit({"type": "task_result", "task_id": task["task_id"], "source": task["source"],
+                  "status": "failed", "error_kind": failure["error_kind"], "count": 0,
+                  "duration_ms": 0, "message": f"source paused after {failure['message']}"[:1900]})
+            continue
         if index > 0 and delay_seconds > 0:
             time.sleep(delay_seconds)
-        emit(run_task(task, timeout_seconds))
+        result = run_task(task, timeout_seconds)
+        emit(result)
+        if result.get("error_kind") in {"blocked", "rate_limit", "timeout"}:
+            paused_sources[task["source"]] = result
 
     emit({"type": "done", "tasks": len(tasks)})
     return 0

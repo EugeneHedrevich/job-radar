@@ -21,6 +21,7 @@ export interface AssessmentResult {
 
 export interface MatchableJob {
   ID: string;
+  isDemo?: boolean;
   title: string;
   company: string | null;
   location: string | null;

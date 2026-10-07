@@ -45,6 +45,11 @@ export function jobText(job: MatchableJob): JobText {
 
 export function detectEngagement(config: AppConfig, job: MatchableJob, text: JobText): Engagement {
   const signals = config.scoring.signals;
+  // A negated contract term must never count as a positive engagement signal.
+  const exclusions = config.scoring.hard_rejects.rules.filter((rule) =>
+    rule.id === 'contract_excluded' || rule.id === 'permanent_only',
+  );
+  if (exclusions.some((rule) => matchesAny(text.all, rule.any))) return 'permanent';
   const jobType = normalizeText(job.jobType ?? '');
   if (jobType.includes('contract')) return 'contract';
   const contract = matchesAny(text.all, signals.contract ?? []);

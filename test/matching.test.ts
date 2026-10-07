@@ -45,6 +45,39 @@ describe('deterministic matching (no LLM key required)', () => {
 });
 
 describe('mandatory-gap filtering', () => {
+  it.each([
+    'No freelancers accepted.',
+    'Freelancers are not considered.',
+    'No contractors accepted.',
+    'No B2B.',
+    'Keine Freelancer.',
+    'Permanent contract only.',
+  ])('rejects explicit contract exclusions: %s', (exclusion) => {
+    const result = assessWithRules(config, job({ description: `${job().description} ${exclusion}` }));
+    expect(result.hardReject).toBe(true);
+    expect(result.recommendation).toBe('Skip');
+    expect(result.fitScore).toBeLessThanOrEqual(config.scoring.hard_rejects.score_cap);
+    expect(result.commercialFit).toBeLessThan(assessWithRules(config, job()).commercialFit);
+  });
+
+  it('downgrades a high-scoring mixed role when ABAP OO development is mandatory', () => {
+    const result = assessWithRules(config, job({
+      description: `${job().description} ABAP OO development is mandatory.`,
+    }));
+    expect(result.hardReject).toBe(false);
+    expect(result.fitScore).toBeGreaterThanOrEqual(config.scoring.thresholds.apply);
+    expect(result.mandatoryGaps.join(' ')).toMatch(/ABAP OO/);
+    expect(result.recommendation).toBe('Review');
+  });
+
+  it('keeps Apply for a positive contract offer with only preferred ABAP OO knowledge', () => {
+    const result = assessWithRules(config, job({
+      description: `${job().description} ABAP OO development is nice to have.`,
+    }));
+    expect(result.mandatoryGaps).toEqual([]);
+    expect(result.recommendation).toBe('Apply');
+  });
+
   it('rejects an ABAP-only role even when the title mentions SAP', () => {
     const result = assessWithRules(
       config,

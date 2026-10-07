@@ -54,8 +54,9 @@ cp .env.example .env
 Verify the installation without touching any live job board:
 
 ```bash
-npm run cycle:demo     # offline demo fixtures, Telegram dry run
+npm run cycle:demo     # offline demo fixtures in separate storage, Telegram dry run
 npm test               # full test suite
+npm run test:collector  # pinned JobSpy regressions with mocked HTTP (requires .venv)
 npm run typecheck
 ```
 
@@ -92,6 +93,7 @@ to the deterministic rule engine.
 | `npm run cycle:demo`         | Complete cycle on offline demo fixtures, dry run                  |
 | `npm run status`             | Database counts, source health, configuration state               |
 | `npm test`                   | Test suite                                                        |
+| `npm run test:collector`    | Python collector regressions against pinned JobSpy, mocked HTTP  |
 
 Flags are passed after `--`:
 
@@ -172,6 +174,11 @@ Rules that always apply:
 
 Assessments are cached by job content + profile version + scoring version + engine, so
 re-running costs nothing and changing the profile forces a clean re-evaluation.
+The cache also includes the effective profile, scoring and CV configuration, so changes
+invalidate assessments even if a version was not bumped. Notifications use the latest
+assessment matching the current vacancy and configuration; queued retries are checked again
+before delivery. Failed LLM calls consume the request budget and disable further calls for
+that run, with rules used for the remaining jobs.
 
 ## 6. Data model
 
@@ -190,7 +197,14 @@ Deduplication:
 2. Exact match on `(source, canonicalUrl)` — tracking parameters, scheme, `www.` and
    fragments are normalised away.
 3. Cross-source: same normalised company **plus** either similar descriptions or
-   near-identical titles with compatible locations. Titles alone are never enough.
+   near-identical titles with the same known city/location. A shared country, generic remote
+   location or missing location is insufficient when descriptions are missing. Different
+   listing identities from the same board stay separate.
+
+Repeated observations of an existing listing refresh stated details, including descriptions,
+rates and remote terms, while preserving known values when a new observation omits them.
+Changes invalidate previous assessments. A newly merged cross-source listing fills missing
+fields without replacing existing known information.
 
 Unique indexes on `Jobs.fingerprint`, `SourceListings(source, sourceJobId)`,
 `SourceListings(source, canonicalUrl)` and `Assessments.cacheKey` enforce this at the database
@@ -201,6 +215,11 @@ does not state one.
 
 The database lives in `storage.db_dir` (`./data` by default, git-ignored). Override with
 `JOB_RADAR_DB_DIR`.
+Demo and `--fixture` commands use a `demo/` subdirectory of that database directory and
+automatically enable rules-only matching and Telegram previews. Fixture records are also
+marked as demo data and cannot be delivered by a live notification run. Existing databases
+are migrated without dropping data, and bundled demo listings left by older versions are
+marked to prevent live delivery.
 
 ## 7. Resilience
 
@@ -214,11 +233,16 @@ The database lives in `storage.db_dir` (`./data` by default, git-ignored). Overr
 * Collector output is schema-validated line by line; malformed lines are counted and discarded
   rather than corrupting the database. Tasks the collector never reports on are recorded as
   failed, not silently dropped.
+* JobSpy request failures reported only through its loggers are captured as task failures,
+  including empty or partial results returned after a 429 or block. A block/rate limit stops
+  the remaining tasks for that source immediately; ordinary empty searches remain successful.
 
 ## 8. Tests
 
 ```bash
 npm test
+npm run test:collector
+npm run typecheck
 ```
 
 Covers deduplication (including repeated runs, cross-source merges and false-merge
@@ -226,6 +250,11 @@ prevention), missing-field handling, mandatory-gap filtering and hard rejects, u
 handling, malformed collector output, source failure isolation and cooldown, batch planning
 budgets, notification retry/permanent-failure behaviour, and a full offline cycle proving that
 running the same collection twice creates no duplicate jobs and sends no extra notifications.
+Regression coverage includes current-assessment notification selection and queued retries,
+authoritative vacancy updates, conservative vacancy identity, demo isolation and legacy data
+migration, negative contract statements, mandatory gaps, and LLM request budgets. Python
+tests exercise the installed JobSpy implementation with mocked HTTP responses; no live job
+boards or Telegram messages are needed.
 
 `fixtures/demo-jobs.jsonl` is **demo data** — hand-written, fictional companies, in the exact
 format the Python collector emits.

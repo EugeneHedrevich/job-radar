@@ -112,7 +112,7 @@ export async function collect(options: CollectOptions = {}): Promise<CollectSumm
     else unusable += 1;
   }
 
-  const ingest = await ingestJobs(normalized, { runId, seenAt: new Date() });
+  const ingest = await ingestJobs(normalized, { runId, seenAt: new Date(), demo: Boolean(options.fixture) });
   ingest.unusable = unusable;
 
   for (const outcome of outcomes) {

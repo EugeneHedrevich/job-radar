@@ -1,6 +1,6 @@
 import path from 'node:path';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { loadConfig, PROJECT_ROOT } from '../src/config/index.js';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { loadConfig, PROJECT_ROOT, resetConfigCache } from '../src/config/index.js';
 import { db, SELECT, query } from '../src/db/index.js';
 import { loadFixture } from '../src/fixtures/load.js';
 import { collect } from '../src/pipeline/collect.js';
@@ -24,9 +24,15 @@ function countingClient(): TelegramClient & { calls: number } {
 
 describe('full cycle on offline fixtures', () => {
   beforeAll(async () => {
+    vi.stubEnv('OPENAI_API_KEY', '');
+    resetConfigCache();
     await useTempDb();
   });
-  afterAll(closeTempDb);
+  afterAll(async () => {
+    await closeTempDb();
+    vi.unstubAllEnvs();
+    resetConfigCache();
+  });
 
   it('works without an OPENAI_API_KEY using deterministic matching only', () => {
     const config = loadConfig();
@@ -51,9 +57,9 @@ describe('full cycle on offline fixtures', () => {
     expect(ranked.every((entry) => entry.assessment.fitScore >= 0 && entry.assessment.fitScore <= 100)).toBe(true);
   });
 
-  it('produces no duplicate jobs and no extra notifications when run again', async () => {
+  it('previews demo notifications without delivering them live or duplicating jobs', async () => {
     const client = countingClient();
-    const before = await notify({ client });
+    const before = await notify({ client, dryRun: true });
     expect(before.sent).toBeGreaterThan(0);
 
     const jobsBefore = (await query(SELECT.from(db().Jobs))).length;

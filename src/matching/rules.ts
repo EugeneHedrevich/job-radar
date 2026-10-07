@@ -244,6 +244,7 @@ export function assessWithRules(config: AppConfig, job: MatchableJob): Assessmen
   let recommendation: Recommendation = hardRejects.length ? 'Skip' : recommendationFor(config, fitScore);
   // Never recommend applying to a vacancy whose text we have not read.
   if (!text.hasDescription && recommendation === 'Apply') recommendation = 'Review';
+  if (mandatoryGaps.length > 0 && recommendation === 'Apply') recommendation = 'Review';
 
   const explanation = buildExplanation({
     hardRejectReason,

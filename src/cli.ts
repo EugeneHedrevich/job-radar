@@ -224,8 +224,15 @@ async function main(): Promise<number> {
     return 0;
   }
 
-  loadConfig();
+  const config = loadConfig();
+  const offline = Boolean(fixtureFile(flags));
+  // An override to the live database directory still keeps fixtures isolated.
+  if (offline) config.dbPath = path.join(path.dirname(config.dbPath), 'demo', path.basename(config.dbPath));
   await connectDb();
+  if (offline) {
+    flags.set('dry-run', true);
+    flags.set('rules-only', true);
+  }
 
   switch (command) {
     case 'collect':

@@ -28,6 +28,7 @@ entity Jobs : cuid {
   firstSeenAt       : Timestamp not null;    // never used as a publication date
   lastSeenAt        : Timestamp not null;
   status            : String(20) default 'New';  // New | Interested | Applied | Ignored
+  isDemo            : Boolean default false;   // fixture data is never delivered live
 
   listings          : Composition of many SourceListings on listings.job = $self;
   assessments       : Composition of many Assessments    on assessments.job = $self;

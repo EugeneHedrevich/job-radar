@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { loadConfig } from '../config/index.js';
 import { cds, db, SELECT, INSERT, UPDATE, query, queryOne } from '../db/index.js';
-import { rowToAssessment } from './rank.js';
+import { findCurrentAssessment, rowToAssessment } from './rank.js';
 import { formatNotification } from '../notify/format.js';
 import { createDryRunClient, createTelegramClient, type TelegramClient } from '../notify/telegram.js';
 import type { MatchableJob } from '../matching/types.js';
@@ -76,52 +76,56 @@ async function queueCandidates(
   threshold: number,
   options: NotifyOptions,
 ): Promise<number> {
-  const { Jobs, Assessments, Notifications, SourceListings } = db();
-
-  const assessments = await query<any>(SELECT.from(Assessments).where({ fitScore: { '>=': threshold } }));
-
-  // Highest score first; only the best assessment per job is ever notified.
-  assessments.sort((a, b) => b.fitScore - a.fitScore);
+  const { Jobs, Notifications } = db();
+  const candidates: Array<{ job: MatchableJob; assessment: any }> = [];
+  for (const job of await query<MatchableJob>(SELECT.from(Jobs))) {
+    if (options.jobIds?.length && !options.jobIds.includes(job.ID)) continue;
+    if (job.isDemo && !options.dryRun) continue;
+    const assessment = await findCurrentAssessment(config, job);
+    if (eligible(assessment, threshold)) candidates.push({ job, assessment });
+  }
+  candidates.sort((a, b) => b.assessment.fitScore - a.assessment.fitScore);
 
   let queued = 0;
-  const handledJobs = new Set<string>();
-
-  for (const row of assessments) {
-    if (!row.job_ID) continue;
-    if (options.jobIds?.length && !options.jobIds.includes(row.job_ID)) continue;
-    if (handledJobs.has(row.job_ID)) continue;
-    handledJobs.add(row.job_ID);
-    if (row.recommendation === 'Skip' || row.hardReject) continue;
-
+  for (const { job, assessment: row } of candidates) {
     // One notification per job. Repeated collection runs must not re-notify.
-    const existing = await queryOne<{ ID: string }>(
-      SELECT.from(Notifications).columns('ID').where({ job_ID: row.job_ID, channel: CHANNEL }),
+    const existing = await queryOne<{ ID: string; status: string }>(
+      SELECT.from(Notifications).columns('ID', 'status').where({ job_ID: job.ID, channel: CHANNEL }),
     );
-    if (existing) continue;
+    if (existing && existing.status !== 'Skipped') continue;
+    const payload = await notificationPayload(config, job, row);
 
-    const job = await queryOne<MatchableJob>(SELECT.from(Jobs).where({ ID: row.job_ID }));
-    if (!job) continue;
-    const listings = await query<{ source: string }>(
-      SELECT.from(SourceListings).columns('source').where({ job_ID: row.job_ID }),
-    );
-    const payload = formatNotification(config, job, rowToAssessment(row), listings.map((l) => l.source));
-
-    await cds.run(
-      INSERT.into(Notifications).entries({
-        ID: randomUUID(),
-        job_ID: row.job_ID,
-        assessment_ID: row.ID,
-        channel: CHANNEL,
-        status: 'Pending',
-        attempts: 0,
-        chatId: config.secrets.telegramChatId ?? null,
-        payload: JSON.stringify(payload),
-        createdAt: new Date().toISOString(),
-      }),
-    );
+    const values = {
+      job_ID: job.ID,
+      assessment_ID: row.ID,
+      channel: CHANNEL,
+      status: 'Pending',
+      attempts: 0,
+      chatId: config.secrets.telegramChatId ?? null,
+      payload: JSON.stringify(payload),
+      createdAt: new Date().toISOString(),
+      lastError: null,
+    };
+    await cds.run(existing
+      ? UPDATE(Notifications).set(values).where({ ID: existing.ID })
+      : INSERT.into(Notifications).entries({ ID: randomUUID(), ...values }));
     queued += 1;
   }
   return queued;
+}
+
+function eligible(assessment: any, threshold: number): boolean {
+  return Boolean(assessment && assessment.fitScore >= threshold &&
+    assessment.recommendation !== 'Skip' && !assessment.hardReject);
+}
+
+async function notificationPayload(
+  config: ReturnType<typeof loadConfig>, job: MatchableJob, assessment: any,
+) {
+  const listings = await query<{ source: string }>(
+    SELECT.from(db().SourceListings).columns('source').where({ job_ID: job.ID }),
+  );
+  return formatNotification(config, job, rowToAssessment(assessment), listings.map((listing) => listing.source));
 }
 
 async function flushQueue(
@@ -145,6 +149,21 @@ async function flushQueue(
   let skipped = 0;
 
   for (const [index, row] of pending.entries()) {
+    if (options.jobIds?.length && !options.jobIds.includes(row.job_ID)) continue;
+    // Revalidate retries and dry-run queues, not just newly queued candidates.
+    const job = await queryOne<MatchableJob>(SELECT.from(db().Jobs).where({ ID: row.job_ID }));
+    const assessment = job && await findCurrentAssessment(config, job);
+    if (!job || (job.isDemo && !options.dryRun) ||
+      !eligible(assessment, options.minFitScore ?? config.settings.telegram.min_fit_score)) {
+      await cds.run(UPDATE(Notifications).set({
+        status: 'Skipped',
+        lastError: job?.isDemo && !options.dryRun
+          ? 'Demo data cannot be delivered live'
+          : 'No eligible assessment for the current job and configuration',
+      }).where({ ID: row.ID }));
+      skipped += 1;
+      continue;
+    }
     if (sent >= limit) {
       skipped += 1;
       continue;
@@ -155,18 +174,10 @@ async function flushQueue(
     }
     if (row.attempts > 0) retried += 1;
 
-    let payload;
-    try {
-      payload = JSON.parse(row.payload);
-    } catch {
-      await cds.run(
-        UPDATE(Notifications)
-          .set({ status: 'Failed', attempts: maxAttempts, lastError: 'stored payload is not valid JSON' })
-          .where({ ID: row.ID }),
-      );
-      failed += 1;
-      continue;
-    }
+    const payload = await notificationPayload(config, job, assessment);
+    await cds.run(UPDATE(Notifications).set({
+      assessment_ID: assessment.ID, payload: JSON.stringify(payload),
+    }).where({ ID: row.ID }));
 
     const result = await client.send(payload);
     const attempts = row.attempts + 1;

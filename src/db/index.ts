@@ -2,6 +2,8 @@ import path from 'node:path';
 import { mkdirSync } from 'node:fs';
 import cds from '@sap/cds';
 import { loadConfig, PROJECT_ROOT } from '../config/index.js';
+import { loadFixture } from '../fixtures/load.js';
+import { normalizeJob } from '../normalize/index.js';
 import { log } from '../util/log.js';
 
 export const NAMESPACE = 'sap.jobradar';
@@ -46,11 +48,32 @@ export async function connectDb(dbPathOverride?: string): Promise<any> {
       log.info('Deploying CDS schema', { dbPath });
       await (cds as any).deploy(csn).to(db);
     }
+    await ensureDemoProvenance(db);
     await ensureIndexes(db);
     entities = cds.entities(NAMESPACE) as unknown as Entities;
     return db;
   })();
   return dbPromise;
+}
+
+/** Add provenance without redeploying or dropping an existing database. */
+async function ensureDemoProvenance(connection: any): Promise<void> {
+  const columns: Array<{ name: string }> = await connection.run('PRAGMA table_info(sap_jobradar_Jobs)');
+  if (!columns.some((column) => column.name === 'isDemo')) {
+    await connection.run('ALTER TABLE sap_jobradar_Jobs ADD COLUMN isDemo BOOLEAN DEFAULT 0');
+  }
+  // Older versions placed the bundled fictional listings in the live database.
+  // Identify them by listing identity, including secondary listings after a merge.
+  for (const record of loadFixture(path.join(PROJECT_ROOT, 'fixtures', 'demo-jobs.jsonl'))) {
+    const listing = normalizeJob(record.job, record.source)?.listing;
+    if (!listing) continue;
+    await connection.run(
+      `UPDATE sap_jobradar_Jobs SET isDemo = 1 WHERE ID IN
+       (SELECT job_ID FROM sap_jobradar_SourceListings
+        WHERE source = ? AND (sourceJobId = ? OR canonicalUrl = ?))`,
+      [listing.source, listing.sourceJobId, listing.canonicalUrl],
+    );
+  }
 }
 
 /**

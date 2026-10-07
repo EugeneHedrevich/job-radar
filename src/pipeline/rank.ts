@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { loadConfig, type AppConfig } from '../config/index.js';
-import { cds, db, SELECT, INSERT, query, queryOne } from '../db/index.js';
+import { cds, db, SELECT, INSERT, UPDATE, query, queryOne } from '../db/index.js';
 import { assessWithLlm, LlmUnavailableError } from '../matching/llm.js';
 import { assessWithRules, prescreen } from '../matching/rules.js';
 import type { AssessmentResult, MatchableJob } from '../matching/types.js';
@@ -25,28 +25,45 @@ export interface RankOptions {
 }
 
 /**
- * Build the cache key for an assessment. It covers the job content, the profile
- * version, the scoring version and the engine, so changing any of them forces a
- * fresh evaluation while repeated runs reuse the previous result.
+ * Hash vacancy identity/content and effective matching configuration, including
+ * versions and engine inputs. Operational limits and secrets are not inputs.
  */
 export function assessmentCacheKey(
   config: AppConfig,
   job: MatchableJob,
   engine: 'rules' | 'llm',
 ): string {
-  const content = [
-    job.title,
-    job.company ?? '',
-    job.location ?? '',
-    job.jobType ?? '',
-    job.isRemote === null ? '' : String(job.isRemote),
-    `${job.salaryMin ?? ''}-${job.salaryMax ?? ''}-${job.salaryInterval ?? ''}-${job.salaryCurrency ?? ''}`,
-    job.descriptionHash ?? 'no-description',
-  ].join('|');
-  const engineTag = engine === 'llm' ? `llm:${config.settings.llm.model}` : 'rules';
-  return sha256(
-    `${content}||profile=${config.profile.version}||scoring=${config.scoring.version}||engine=${engineTag}`,
-  );
+  return sha256(JSON.stringify({
+    revision: 2,
+    job: {
+      ID: job.ID, title: job.title, company: job.company,
+      location: job.location, locationCountry: job.locationCountry,
+      jobType: job.jobType, isRemote: job.isRemote,
+      salaryMin: job.salaryMin, salaryMax: job.salaryMax,
+      salaryInterval: job.salaryInterval, salaryCurrency: job.salaryCurrency,
+      description: job.description, primaryUrl: job.primaryUrl, datePosted: job.datePosted,
+    },
+    profile: config.profile,
+    scoring: config.scoring,
+    cvVariants: config.cvVariants,
+    engine,
+    llm: engine === 'llm' ? {
+      model: config.settings.llm.model,
+      base_url: config.settings.llm.base_url,
+      temperature: config.settings.llm.temperature,
+      max_output_tokens: config.settings.llm.max_output_tokens,
+      max_description_chars: config.settings.llm.max_description_chars,
+      require_description: config.scoring.uncertainty.require_description_for_llm,
+    } : undefined,
+  }));
+}
+
+/** The latest assessment still valid for this job and effective configuration. */
+export async function findCurrentAssessment(config: AppConfig, job: MatchableJob): Promise<any | undefined> {
+  const keys = [assessmentCacheKey(config, job, 'rules')];
+  if (config.llmAvailable) keys.push(assessmentCacheKey(config, job, 'llm'));
+  return queryOne(SELECT.from(db().Assessments)
+    .where({ job_ID: job.ID, cacheKey: { in: keys } }).orderBy('createdAt desc'));
 }
 
 export async function rank(options: RankOptions = {}): Promise<RankedJob[]> {
@@ -78,14 +95,24 @@ export async function rank(options: RankOptions = {}): Promise<RankedJob[]> {
       };
     }
 
-    const shouldUseLlm =
-      useLlm &&
+    const eligibleForLlm =
+      useLlm && !job.isDemo &&
       screen.passed &&
-      llmBudget > 0 &&
       Boolean(job.description) &&
       assessment.fitScore >= config.scoring.thresholds.llm_screen_gate &&
       !assessment.hardReject;
 
+    // Cached evaluations cost no requests, including after the request budget
+    // has been spent. The budget governs calls rather than cache reads.
+    if (eligibleForLlm && !options.force) {
+      const cached = await queryOne<any>(SELECT.from(Assessments)
+        .where({ cacheKey: assessmentCacheKey(config, job, 'llm') }));
+      if (cached) {
+        ranked.push({ job, assessment: rowToAssessment(cached), assessmentId: cached.ID, cached: true });
+        continue;
+      }
+    }
+    const shouldUseLlm = eligibleForLlm && llmBudget > 0;
     if (shouldUseLlm) engine = 'llm';
 
     const cacheKey = assessmentCacheKey(config, job, engine);
@@ -98,10 +125,12 @@ export async function rank(options: RankOptions = {}): Promise<RankedJob[]> {
     }
 
     if (shouldUseLlm) {
+      llmBudget -= 1;
       try {
         assessment = await assessWithLlm(config, job);
-        llmBudget -= 1;
       } catch (error) {
+        // Stop further calls for this run when the provider is failing.
+        llmBudget = 0;
         if (error instanceof LlmUnavailableError) {
           log.warn('LLM unavailable, keeping deterministic assessment', { reason: error.message });
         } else {
@@ -126,33 +155,31 @@ export async function rank(options: RankOptions = {}): Promise<RankedJob[]> {
 async function storeAssessment(jobId: string, cacheKey: string, assessment: AssessmentResult): Promise<string> {
   const { Assessments } = db();
   const existing = await queryOne<{ ID: string }>(SELECT.from(Assessments).columns('ID').where({ cacheKey }));
-  if (existing) return existing.ID;
-
-  const id = randomUUID();
-  await cds.run(
-    INSERT.into(Assessments).entries({
-      ID: id,
-      job_ID: jobId,
-      cacheKey,
-      engine: assessment.engine,
-      model: assessment.model,
-      profileVersion: assessment.profileVersion,
-      fitScore: assessment.fitScore,
-      recommendation: assessment.recommendation,
-      technicalFit: assessment.technicalFit,
-      commercialFit: assessment.commercialFit,
-      locationFit: assessment.locationFit,
-      strongMatches: JSON.stringify(assessment.strongMatches),
-      mandatoryGaps: JSON.stringify(assessment.mandatoryGaps),
-      preferredGaps: JSON.stringify(assessment.preferredGaps),
-      missingInformation: JSON.stringify(assessment.missingInformation),
-      explanation: assessment.explanation,
-      suggestedCvVariant: assessment.suggestedCvVariant,
-      hardReject: assessment.hardReject,
-      hardRejectReason: assessment.hardRejectReason,
-      createdAt: new Date().toISOString(),
-    }),
-  );
+  const id = existing?.ID ?? randomUUID();
+  const values = {
+    job_ID: jobId,
+    cacheKey,
+    engine: assessment.engine,
+    model: assessment.model,
+    profileVersion: assessment.profileVersion,
+    fitScore: assessment.fitScore,
+    recommendation: assessment.recommendation,
+    technicalFit: assessment.technicalFit,
+    commercialFit: assessment.commercialFit,
+    locationFit: assessment.locationFit,
+    strongMatches: JSON.stringify(assessment.strongMatches),
+    mandatoryGaps: JSON.stringify(assessment.mandatoryGaps),
+    preferredGaps: JSON.stringify(assessment.preferredGaps),
+    missingInformation: JSON.stringify(assessment.missingInformation),
+    explanation: assessment.explanation,
+    suggestedCvVariant: assessment.suggestedCvVariant,
+    hardReject: assessment.hardReject,
+    hardRejectReason: assessment.hardRejectReason,
+    createdAt: new Date().toISOString(),
+  };
+  await cds.run(existing
+    ? UPDATE(Assessments).set(values).where({ ID: id })
+    : INSERT.into(Assessments).entries({ ID: id, ...values }));
   return id;
 }
 

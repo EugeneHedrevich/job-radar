@@ -6,7 +6,7 @@
 # The output is a FIT SCORE (0-100): how well the vacancy matches the profile.
 # It is NOT a probability of being hired.
 
-version: "2026-10-06.1"
+version: "2026-10-07.1"
 
 # Final score = sum(dimension score x weight). Weights must sum to 1.0.
 weights:
@@ -75,18 +75,19 @@ hard_rejects:
   rules:
     - id: permanent_only
       reason: "Permanent employment only; profile is freelance/B2B/contract."
-      # Requires a permanent signal AND no contract signal anywhere.
+      # Explicit employment-only statements are not contract offers.
       any:
         - "permanent (position|role|contract|employment) only"
-        - "no (freelance|contractors?|b2b|c2c)"
-        - "freelancers? (are )?(not|won't be) (considered|accepted)"
         - "(only|exclusively) (direct hire|festanstellung|unbefristet)"
-        - "keine (freiberufler|freelancer)"
-      none:
-        - "freelance"
-        - "contract(or|ing)?\\b"
-        - "b2b"
-        - "interim"
+      none: []
+
+    - id: contract_excluded
+      reason: "Freelance/contract engagement is explicitly excluded."
+      any:
+        - "\\bno (freelancers?|contractors?|b2b|c2c)\\b"
+        - "\\b(freelancers?|contractors?|b2b|c2c) (are )?(not|won't be) (considered|accepted|allowed)\\b"
+        - "\\bkeine (freiberufler|freelancer)\\b"
+      none: []
 
     - id: abap_only
       reason: "ABAP-centric development role; profile has reading-level ABAP only."
