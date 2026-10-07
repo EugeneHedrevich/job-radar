@@ -204,7 +204,7 @@ async function runStatus() {
   out(`  collection runs     : ${await count(CollectionRuns)}`);
   out(`  assessments         : ${await count(Assessments)}`);
   out(`  notifications sent  : ${await count(Notifications, { status: 'Sent' })}`);
-  out(`  notifications open  : ${await count(Notifications, { status: { in: ['Pending', 'Failed'] } })}`);
+  out(`  notifications open  : ${await count(Notifications, { status: { in: ['Pending', 'Failed', 'Sending'] } })}`);
 
   const health = await readHealth();
   out('');

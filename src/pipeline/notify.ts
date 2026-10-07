@@ -1,9 +1,9 @@
-import { randomUUID } from 'node:crypto';
 import { loadConfig } from '../config/index.js';
-import { cds, db, SELECT, INSERT, UPDATE, query, queryOne } from '../db/index.js';
+import { cds, db, SELECT, UPDATE, query, queryOne } from '../db/index.js';
 import { findCurrentAssessment, rowToAssessment } from './rank.js';
 import { formatNotification } from '../notify/format.js';
-import { createDryRunClient, createTelegramClient, type TelegramClient } from '../notify/telegram.js';
+import { createDryRunClient, createTelegramClient, type TelegramClient, type TelegramSendResult } from '../notify/telegram.js';
+import { claimNotification, queueNotification } from './notification-store.js';
 import type { MatchableJob } from '../matching/types.js';
 import { log, out } from '../util/log.js';
 
@@ -76,7 +76,7 @@ async function queueCandidates(
   threshold: number,
   options: NotifyOptions,
 ): Promise<number> {
-  const { Jobs, Notifications } = db();
+  const { Jobs } = db();
   const candidates: Array<{ job: MatchableJob; assessment: any }> = [];
   for (const job of await query<MatchableJob>(SELECT.from(Jobs))) {
     if (options.jobIds?.length && !options.jobIds.includes(job.ID)) continue;
@@ -88,28 +88,14 @@ async function queueCandidates(
 
   let queued = 0;
   for (const { job, assessment: row } of candidates) {
-    // One notification per job. Repeated collection runs must not re-notify.
-    const existing = await queryOne<{ ID: string; status: string }>(
-      SELECT.from(Notifications).columns('ID', 'status').where({ job_ID: job.ID, channel: CHANNEL }),
-    );
-    if (existing && existing.status !== 'Skipped') continue;
     const payload = await notificationPayload(config, job, row);
-
-    const values = {
-      job_ID: job.ID,
-      assessment_ID: row.ID,
+    if (await queueNotification({
+      jobId: job.ID,
+      assessmentId: row.ID,
       channel: CHANNEL,
-      status: 'Pending',
-      attempts: 0,
       chatId: config.secrets.telegramChatId ?? null,
       payload: JSON.stringify(payload),
-      createdAt: new Date().toISOString(),
-      lastError: null,
-    };
-    await cds.run(existing
-      ? UPDATE(Notifications).set(values).where({ ID: existing.ID })
-      : INSERT.into(Notifications).entries({ ID: randomUUID(), ...values }));
-    queued += 1;
+    })) queued += 1;
   }
   return queued;
 }
@@ -139,7 +125,7 @@ async function flushQueue(
 
   const pending = await query<any>(
     SELECT.from(Notifications)
-      .where({ channel: CHANNEL, status: { in: ['Pending', 'Failed'] } })
+      .where({ channel: CHANNEL, status: { in: ['Pending', 'Failed', 'Sending'] } })
       .orderBy('createdAt'),
   );
 
@@ -148,70 +134,89 @@ async function flushQueue(
   let retried = 0;
   let skipped = 0;
 
-  for (const [index, row] of pending.entries()) {
-    if (options.jobIds?.length && !options.jobIds.includes(row.job_ID)) continue;
-    // Revalidate retries and dry-run queues, not just newly queued candidates.
-    const job = await queryOne<MatchableJob>(SELECT.from(db().Jobs).where({ ID: row.job_ID }));
-    const assessment = job && await findCurrentAssessment(config, job);
-    if (!job || (job.isDemo && !options.dryRun) ||
-      !eligible(assessment, options.minFitScore ?? config.settings.telegram.min_fit_score)) {
-      await cds.run(UPDATE(Notifications).set({
-        status: 'Skipped',
-        lastError: job?.isDemo && !options.dryRun
-          ? 'Demo data cannot be delivered live'
-          : 'No eligible assessment for the current job and configuration',
-      }).where({ ID: row.ID }));
-      skipped += 1;
-      continue;
-    }
+  for (const [index, candidate] of pending.entries()) {
+    if (options.jobIds?.length && !options.jobIds.includes(candidate.job_ID)) continue;
     if (sent >= limit) {
       skipped += 1;
       continue;
     }
-    if (row.attempts >= maxAttempts) {
+    const row = await claimNotification(candidate.ID, maxAttempts, Boolean(options.dryRun));
+    if (!row) {
       skipped += 1;
       continue;
     }
-    if (row.attempts > 0) retried += 1;
+    const owned = { ID: row.ID, status: 'Sending', claimToken: row.claimToken };
+    let delivered = false;
+    try {
+      // Revalidate retries and dry-run queues, not just newly queued candidates.
+      const job = await queryOne<MatchableJob>(SELECT.from(db().Jobs).where({ ID: row.job_ID }));
+      const assessment = job && await findCurrentAssessment(config, job);
+      if (!job || (job.isDemo && !options.dryRun) ||
+        !eligible(assessment, options.minFitScore ?? config.settings.telegram.min_fit_score)) {
+        await cds.run(UPDATE(Notifications).set({
+          status: 'Skipped',
+          claimToken: null, claimUntil: null,
+          lastError: job?.isDemo && !options.dryRun
+            ? 'Demo data cannot be delivered live'
+            : 'No eligible assessment for the current job and configuration',
+        }).where(owned));
+        skipped += 1;
+        continue;
+      }
+      const attempts = row.attempts;
+      if (attempts > (options.dryRun ? 0 : 1)) retried += 1;
 
-    const payload = await notificationPayload(config, job, assessment);
-    await cds.run(UPDATE(Notifications).set({
-      assessment_ID: assessment.ID, payload: JSON.stringify(payload),
-    }).where({ ID: row.ID }));
+      const payload = await notificationPayload(config, job, assessment);
+      const prepared = await cds.run(UPDATE(Notifications).set({
+        assessment_ID: assessment.ID, payload: JSON.stringify(payload),
+      }).where(owned));
+      if (!prepared) { skipped += 1; continue; }
 
-    const result = await client.send(payload);
-    const attempts = row.attempts + 1;
+      let result: TelegramSendResult;
+      try {
+        result = await client.send(payload);
+      } catch (error) {
+        result = { ok: false, retryable: true, error: error instanceof Error ? error.message : String(error) };
+      }
 
-    if (result.ok) {
+      if (result.ok) {
+        delivered = !options.dryRun;
+        await cds.run(
+          UPDATE(Notifications)
+            .set({
+              status: options.dryRun ? 'Pending' : 'Sent',
+              claimToken: null, claimUntil: null,
+              telegramMessageId: result.messageId ?? null,
+              sentAt: options.dryRun ? null : new Date().toISOString(),
+              lastError: null,
+            })
+            .where(owned),
+        );
+        sent += 1;
+        continue;
+      }
+
+      // Permanent errors burn the remaining attempts so we stop hammering the API.
+      const finalAttempts = result.retryable ? attempts : maxAttempts;
       await cds.run(
         UPDATE(Notifications)
-          .set({
-            status: options.dryRun ? 'Pending' : 'Sent',
-            attempts: options.dryRun ? row.attempts : attempts,
-            telegramMessageId: result.messageId ?? null,
-            sentAt: options.dryRun ? null : new Date().toISOString(),
-            lastError: null,
-          })
-          .where({ ID: row.ID }),
+          .set({ status: 'Failed', attempts: finalAttempts, lastError: result.error ?? 'unknown error', claimToken: null, claimUntil: null })
+          .where(owned),
       );
-      sent += 1;
-      continue;
-    }
+      failed += 1;
+      log.warn('Telegram delivery failed', { notification: row.ID, error: result.error, retryable: result.retryable });
 
-    // Permanent errors burn the remaining attempts so we stop hammering the API.
-    const finalAttempts = result.retryable ? attempts : maxAttempts;
-    await cds.run(
-      UPDATE(Notifications)
-        .set({ status: 'Failed', attempts: finalAttempts, lastError: result.error ?? 'unknown error' })
-        .where({ ID: row.ID }),
-    );
-    failed += 1;
-    log.warn('Telegram delivery failed', { notification: row.ID, error: result.error, retryable: result.retryable });
-
-    // Back off before the next message, but never after the last one: there is
-    // nothing left to protect from a burst.
-    if (result.retryable && attempts < maxAttempts && index < pending.length - 1) {
-      await sleep(config.settings.telegram.retry_base_delay_seconds * 1000 * attempts);
+      if (result.retryable && attempts < maxAttempts && index < pending.length - 1) {
+        await sleep(config.settings.telegram.retry_base_delay_seconds * 1000 * attempts);
+      }
+    } catch (error) {
+      // Release preparation failures, but don't immediately make an acknowledged
+      // delivery retryable if persisting its result failed.
+      if (!delivered) await cds.run(UPDATE(Notifications).set({
+        status: 'Failed', claimToken: null, claimUntil: null,
+        lastError: error instanceof Error ? error.message : String(error),
+      }).where(owned));
+      throw error;
     }
   }
 

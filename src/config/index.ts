@@ -69,6 +69,7 @@ export const profileSchema = z.object({
   languages: z.array(z.object({ code: z.string(), proficiency: z.string() })),
   skills: z.record(z.string(), z.array(skillSchema)),
   not_claimed: z.array(z.string()).default([]),
+  not_claimed_aliases: z.record(z.string(), z.array(z.string())).default({}),
 });
 export type Profile = z.infer<typeof profileSchema>;
 

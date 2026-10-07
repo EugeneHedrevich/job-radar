@@ -163,6 +163,14 @@ Rules that always apply:
 * **Mandatory incompatibility overrides a high score.** Permanent-only, ABAP-centric,
   predominantly functional, heavily on-site and unheld-mandatory-language roles are capped at
   `hard_rejects.score_cap` and forced to `Skip` — the LLM cannot override this.
+* **Requirement boundaries are preserved.** List items and mandatory/preferred sections are
+  evaluated separately, and markers are attached to their skill. Known mandatory gaps remain
+  mandatory in model results and prevent `Apply`. Short names can be configured in
+  `profile.not_claimed_aliases` (for example, `ABAP OO` for `ABAP OO development`).
+* **Travel limits are enforced.** Stated onsite days per week/month/year are compared with
+  `travel.max_onsite_days_per_month` before accepting a role. Weekly attendance is converted
+  using `compensation.working_days_per_month / 5`; three days every week exceeds the current
+  four-day monthly limit. An unstated frequency stays unknown.
 * **Mixed roles are judged on the description**, not the title. A "SAP BTP Developer with
   ABAP background" that only wants ABAP for reading is not rejected.
 * **Unknown is not a verdict.** An unstated rate, contract type, work mode or country lands in
@@ -189,7 +197,8 @@ that run, with rules used for the remaining jobs.
 * `CollectionRuns`, `CollectionTasks`, `CollectionErrors` — what ran, what failed, why.
 * `SourceHealth` — per-source circuit breaker that survives restarts.
 * `Assessments` — cached match results.
-* `Notifications` — pending / sent / failed state, attempt counter and Telegram message id.
+* `Notifications` — pending / sending / sent / failed state, attempt counter, delivery claim
+  and Telegram message id.
 
 Deduplication:
 
@@ -200,6 +209,8 @@ Deduplication:
    near-identical titles with the same known city/location. A shared country, generic remote
    location or missing location is insufficient when descriptions are missing. Different
    listing identities from the same board stay separate.
+   Conflicting countries, cities or explicitly stated client/project details prevent merging,
+   even when recruiter descriptions share the same boilerplate.
 
 Repeated observations of an existing listing refresh stated details, including descriptions,
 rates and remote terms, while preserving known values when a new observation omits them.
@@ -236,6 +247,13 @@ marked to prevent live delivery.
 * JobSpy request failures reported only through its loggers are captured as task failures,
   including empty or partial results returned after a 429 or block. A block/rate limit stops
   the remaining tasks for that source immediately; ordinary empty searches remain successful.
+* Concurrent notification runs insert each job's notification once and atomically claim it
+  before sending. SQLite transactions are short and never span delivery; one connection per
+  process and a busy timeout prevent overlapping writes from immediately failing. Claims
+  expire after five minutes for recovery after a crash, and attempts are bounded. Delivery
+  followed by a crash before recording success can still be retried; Telegram delivery and
+  SQLite persistence cannot be committed as one transaction. Existing duplicate queue rows
+  remain as `Superseded` history, with a sent copy taking precedence.
 
 ## 8. Tests
 
@@ -255,6 +273,8 @@ authoritative vacancy updates, conservative vacancy identity, demo isolation and
 migration, negative contract statements, mandatory gaps, and LLM request budgets. Python
 tests exercise the installed JobSpy implementation with mocked HTTP responses; no live job
 boards or Telegram messages are needed.
+Concurrency tests hold one sender open while another independent process completes,
+checking that only the claimed notification is delivered.
 
 `fixtures/demo-jobs.jsonl` is **demo data** — hand-written, fictional companies, in the exact
 format the Python collector emits.

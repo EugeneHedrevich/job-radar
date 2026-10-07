@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { loadConfig } from '../src/config/index.js';
 import { assessWithRules, prescreen, suggestCvVariant } from '../src/matching/rules.js';
-import { jobText } from '../src/matching/signals.js';
+import { jobText, requirementKind } from '../src/matching/signals.js';
 import type { MatchableJob } from '../src/matching/types.js';
 
 const config = loadConfig();
@@ -45,6 +45,43 @@ describe('deterministic matching (no LLM key required)', () => {
 });
 
 describe('mandatory-gap filtering', () => {
+  it.each([
+    'Requirements:\n- ABAP OO development is mandatory\n- SAPUI5 is preferred',
+    'Mandatory requirements:\n- ABAP OO development\nPreferred skills:\n- SAPUI5',
+    'Must have: ABAP OO development, CAP, Node.js. Nice to have: SAPUI5.',
+    'ABAP OO development is mandatory; SAPUI5 is preferred.',
+    'Mandatory: ABAP OO development, preferred: SAPUI5.',
+    '<ul><li>ABAP OO development is mandatory</li><li>SAPUI5 is preferred</li></ul>',
+  ])('keeps a mandatory skill separate from a preferred skill: %s', (requirements) => {
+    const vacancy = job({ description: `${job().description}\n${requirements}` });
+    const text = jobText(vacancy);
+    expect(requirementKind(config, text.all, 'ABAP OO development')).toBe('mandatory');
+    expect(requirementKind(config, text.all, 'SAPUI5')).toBe('preferred');
+    const result = assessWithRules(config, vacancy);
+    expect(result.mandatoryGaps.join(' ')).toMatch(/ABAP OO/);
+    expect(result.preferredGaps.join(' ')).not.toMatch(/ABAP OO/);
+    expect(result.recommendation).toBe('Review');
+  });
+
+  it('keeps the strongest requirement when the same skill appears as both preferred and mandatory', () => {
+    const text = jobText(job({ description: 'ABAP OO development is preferred.\nABAP OO development is mandatory for the client project.' }));
+    expect(requirementKind(config, text.all, 'ABAP OO development')).toBe('mandatory');
+  });
+
+  it('recognizes short skill names in requirements lists without changing the capability claim', () => {
+    const result = assessWithRules(config, job({
+      description: `${job().description}\nMandatory:\n- ABAP OO\nPreferred:\n- SAPUI5`,
+    }));
+    expect(result.mandatoryGaps).toContain('ABAP OO development appears to be mandatory');
+    expect(result.recommendation).toBe('Review');
+  });
+
+  it('does not transfer a preferred marker to a neighboring mandatory skill', () => {
+    const text = jobText(job({ description: 'SAPUI5 is preferred, ABAP OO development is mandatory.' }));
+    expect(requirementKind(config, text.all, 'SAPUI5')).toBe('preferred');
+    expect(requirementKind(config, text.all, 'ABAP OO development')).toBe('mandatory');
+  });
+
   it.each([
     'No freelancers accepted.',
     'Freelancers are not considered.',
@@ -147,6 +184,44 @@ describe('mandatory-gap filtering', () => {
     );
     expect(preferred.preferredGaps.some((gap) => /IS-U/i.test(gap))).toBe(true);
     expect(preferred.mandatoryGaps.some((gap) => /IS-U/i.test(gap))).toBe(false);
+  });
+});
+
+describe('configured travel limit', () => {
+  it.each([
+    'Three onsite days every week are required.',
+    'Hybrid: 3 days per week onsite.',
+    'On-site presence: 3 days a week.',
+    'Two to three days in the office per week.',
+    'Five onsite days per month are required.',
+  ])('hard-rejects attendance above the four-day monthly limit: %s', (attendance) => {
+    const result = assessWithRules(config, job({ description: `${job().description}\n${attendance}` }));
+    expect(result.hardReject).toBe(true);
+    expect(result.recommendation).toBe('Skip');
+    expect(result.fitScore).toBeLessThanOrEqual(config.scoring.hard_rejects.score_cap);
+    expect(result.mandatoryGaps.join(' ')).toMatch(/profile limit \(4 days\/month\)/);
+  });
+
+  it('allows explicitly stated attendance at the configured limit', () => {
+    const result = assessWithRules(config, job({ description: `${job().description} Four onsite days per month are required.` }));
+    expect(result.hardReject).toBe(false);
+  });
+
+  it('uses the edited travel limit rather than a fixed weekly rejection rule', () => {
+    const changed = structuredClone(config);
+    changed.profile.travel!.max_onsite_days_per_month = 12;
+    const result = assessWithRules(changed, job({ description: `${job().description} Three onsite days every week are required.` }));
+    expect(result.hardReject).toBe(false);
+  });
+
+  it('does not count remote days as onsite attendance', () => {
+    const result = assessWithRules(config, job({ description: `${job().description} Three days per week remote and one day per week onsite.` }));
+    expect(result.hardReject).toBe(false);
+  });
+
+  it('keeps an unspecified attendance frequency unknown', () => {
+    const result = assessWithRules(config, job({ description: `${job().description} Occasional onsite meetings.` }));
+    expect(result.hardReject).toBe(false);
   });
 });
 

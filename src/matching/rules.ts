@@ -6,6 +6,7 @@ import {
   hourlyRate,
   jobText,
   matchesAny,
+  onsiteDaysPerMonth,
   pattern,
   requirementKind,
   type JobText,
@@ -39,6 +40,11 @@ interface HardRejectHit {
 
 export function findHardRejects(config: AppConfig, text: JobText): HardRejectHit[] {
   const hits: HardRejectHit[] = [];
+  const limit = config.profile.travel?.max_onsite_days_per_month;
+  const requiredDays = onsiteDaysPerMonth(config, text.all);
+  if (typeof limit === 'number' && Number.isFinite(limit) && limit >= 0 && requiredDays !== null && requiredDays > limit) {
+    hits.push({ id: 'travel_limit', reason: `Required onsite attendance (${requiredDays.toFixed(1)} days/month) exceeds the profile limit (${limit} days/month).` });
+  }
   for (const rule of config.scoring.hard_rejects.rules) {
     if (!matchesAny(text.all, rule.any)) continue;
     if (rule.none.length && matchesAny(text.all, rule.none)) continue;
@@ -174,7 +180,9 @@ function collectGaps(config: AppConfig, text: JobText) {
   const preferredGaps: string[] = [];
   const unclear: string[] = [];
   for (const claim of config.profile.not_claimed) {
-    const kind = requirementKind(config, text.all, claim);
+    const kinds = [claim, ...(config.profile.not_claimed_aliases[claim] ?? [])]
+      .map((term) => requirementKind(config, text.all, term));
+    const kind = kinds.includes('mandatory') ? 'mandatory' : kinds.includes('preferred') ? 'preferred' : kinds.includes('unclear') ? 'unclear' : null;
     if (!kind) continue;
     if (kind === 'mandatory') mandatoryGaps.push(`${claim} appears to be mandatory`);
     else if (kind === 'preferred') preferredGaps.push(`${claim} is listed as preferred`);
@@ -216,11 +224,11 @@ export function recommendationFor(config: AppConfig, score: number): Recommendat
  */
 export function assessWithRules(config: AppConfig, job: MatchableJob): AssessmentResult {
   const text = jobText(job);
+  const hardRejects = findHardRejects(config, text);
   const technical = scoreTechnical(config, text);
   const commercial = scoreCommercial(config, job, text);
   const location = scoreLocation(config, job, text);
   const gaps = collectGaps(config, text);
-  const hardRejects = findHardRejects(config, text);
 
   const weights = config.scoring.weights;
   let fitScore = Math.round(

@@ -33,13 +33,21 @@ export async function connectDb(dbPathOverride?: string): Promise<any> {
     const dbPath = dbPathOverride ?? loadConfig().dbPath;
     if (dbPath !== ':memory:') mkdirSync(path.dirname(dbPath), { recursive: true });
 
-    cds.env.requires.db = { kind: 'sqlite', impl: '@cap-js/sqlite', credentials: { url: dbPath } } as any;
+    cds.env.requires.db = {
+      kind: 'sqlite', impl: '@cap-js/sqlite', credentials: { url: dbPath },
+      // The synchronous SQLite driver cannot wait on another connection in the
+      // same event loop. Serialize this process's short database transactions.
+      pool: { min: 1, max: 1, evictionRunIntervalMillis: 0 },
+    } as any;
     // Keep the plain CSN around: cds.deploy must not receive the already
     // unfolded nodejs model, or foreign keys get generated twice.
     const csn = await cds.load(path.join(PROJECT_ROOT, 'db'));
     cds.model = cds.compile.for.nodejs(csn);
 
     const db = await cds.connect.to('db');
+    // Independent CLI processes must wait for short writes instead of failing
+    // immediately with SQLITE_BUSY. No transaction spans Telegram delivery.
+    await db.run('PRAGMA busy_timeout = 5000');
     const existing: Array<{ name: string }> = await db.run(
       `SELECT name FROM sqlite_master WHERE type = 'table'`,
     );
@@ -49,11 +57,30 @@ export async function connectDb(dbPathOverride?: string): Promise<any> {
       await (cds as any).deploy(csn).to(db);
     }
     await ensureDemoProvenance(db);
+    await ensureNotificationClaims(db);
     await ensureIndexes(db);
     entities = cds.entities(NAMESPACE) as unknown as Entities;
     return db;
   })();
   return dbPromise;
+}
+
+async function ensureNotificationClaims(connection: any): Promise<void> {
+  const columns: Array<{ name: string }> = await connection.run('PRAGMA table_info(sap_jobradar_Notifications)');
+  for (const [name, type] of [['claimToken', 'VARCHAR(36)'], ['claimUntil', 'TIMESTAMP']]) {
+    if (!columns.some((column) => column.name === name)) {
+      await connection.run(`ALTER TABLE sap_jobradar_Notifications ADD COLUMN ${name} ${type}`);
+    }
+  }
+  // Preserve the history of duplicate rows left by earlier races, retaining a
+  // sent row if one exists. Only one active notification may remain per job.
+  await connection.run(`UPDATE sap_jobradar_Notifications SET status = 'Superseded'
+    WHERE ID IN (SELECT ID FROM (
+      SELECT ID, ROW_NUMBER() OVER (PARTITION BY job_ID, channel ORDER BY
+        CASE status WHEN 'Sent' THEN 0 WHEN 'Sending' THEN 1 ELSE 2 END,
+        createdAt, ID) AS position
+      FROM sap_jobradar_Notifications WHERE status != 'Superseded'
+    ) WHERE position > 1)`);
 }
 
 /** Add provenance without redeploying or dropping an existing database. */
@@ -96,6 +123,8 @@ async function ensureIndexes(db: any): Promise<void> {
        ON sap_jobradar_Jobs (companyNormalized)`,
     `CREATE INDEX IF NOT EXISTS idx_notification_status
        ON sap_jobradar_Notifications (status)`,
+    `CREATE UNIQUE INDEX IF NOT EXISTS idx_notification_job_channel
+       ON sap_jobradar_Notifications (job_ID, channel) WHERE status != 'Superseded'`,
   ];
   for (const statement of statements) await db.run(statement);
 }

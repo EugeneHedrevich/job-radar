@@ -1,8 +1,8 @@
 import { z } from 'zod';
 import type { AppConfig } from '../config/index.js';
-import { truncate } from '../util/text.js';
+import { normalizeText, truncate } from '../util/text.js';
 import { log } from '../util/log.js';
-import { findHardRejects, suggestCvVariant } from './rules.js';
+import { assessWithRules, suggestCvVariant } from './rules.js';
 import { jobText } from './signals.js';
 import type { AssessmentResult, MatchableJob } from './types.js';
 
@@ -182,14 +182,17 @@ export async function assessWithLlm(config: AppConfig, job: MatchableJob): Promi
   }
 
   // Deterministic mandatory incompatibilities always win over the model.
-  const hardRejects = findHardRejects(config, text);
+  const deterministic = assessWithRules(config, job);
   let fitScore = Math.round(data.fit_score);
   let recommendation = data.recommendation;
-  const mandatoryGaps = [...data.mandatory_gaps];
-  let hardRejectReason: string | null = null;
-  if (hardRejects.length) {
-    hardRejectReason = hardRejects.map((hit) => hit.reason).join(' ');
-    for (const hit of hardRejects) if (!mandatoryGaps.includes(hit.reason)) mandatoryGaps.push(hit.reason);
+  const mandatoryGaps = [...new Set([...deterministic.mandatoryGaps, ...data.mandatory_gaps])];
+  const mandatoryTerms = config.profile.not_claimed
+    .filter((claim) => deterministic.mandatoryGaps.some((gap) => gap.includes(claim)))
+    .flatMap((claim) => [claim, ...(config.profile.not_claimed_aliases[claim] ?? [])]).map(normalizeText);
+  const preferredGaps = [...new Set([...deterministic.preferredGaps, ...data.preferred_gaps])]
+    .filter((gap) => !mandatoryTerms.some((term) => normalizeText(gap).includes(term)));
+  const hardRejectReason = deterministic.hardRejectReason;
+  if (deterministic.hardReject) {
     fitScore = Math.min(fitScore, config.scoring.hard_rejects.score_cap);
     recommendation = 'Skip';
   } else if (recommendation === 'Apply' && (mandatoryGaps.length > 0 || fitScore < config.scoring.thresholds.apply)) {
@@ -209,11 +212,11 @@ export async function assessWithLlm(config: AppConfig, job: MatchableJob): Promi
     locationFit: Math.round(data.location_fit),
     strongMatches: data.strong_matches.slice(0, 12),
     mandatoryGaps,
-    preferredGaps: data.preferred_gaps,
+    preferredGaps,
     missingInformation: data.missing_information,
     explanation: data.explanation,
     suggestedCvVariant: allowedVariant,
-    hardReject: hardRejects.length > 0,
+    hardReject: deterministic.hardReject,
     hardRejectReason,
   };
 }

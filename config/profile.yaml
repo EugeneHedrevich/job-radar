@@ -1,7 +1,7 @@
 # SAP Job Radar - candidate profile.
 # Bump `version` whenever you change anything here: cached assessments are keyed
 # on it, so a bump forces re-evaluation of all jobs.
-version: "2026-10-06.1"
+version: "2026-10-07.1"
 
 identity:
   name: "Yauhen Hedrevich"
@@ -111,3 +111,7 @@ not_claimed:
   - "SAP SD/MM functional consulting"
   - "SAP Basis administration"
   - "ABAP HANA (AMDP/CDS ABAP) development"
+
+# Short skill names used in requirement lists refer to the same unclaimed capability.
+not_claimed_aliases:
+  "ABAP OO development": ["ABAP OO", "object-oriented ABAP"]

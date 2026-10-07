@@ -1,11 +1,12 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { loadConfig, resetConfigCache } from '../src/config/index.js';
-import { cds, db, DELETE, SELECT, query, queryOne } from '../src/db/index.js';
+import { cds, db, DELETE, SELECT, UPDATE, query, queryOne } from '../src/db/index.js';
 import { normalizeJob } from '../src/normalize/index.js';
 import type { CollectorJob } from '../src/collector/types.js';
 import { ingestJobs } from '../src/persist/ingest.js';
 import { notify } from '../src/pipeline/notify.js';
 import { rank } from '../src/pipeline/rank.js';
+import { assessWithLlm } from '../src/matching/llm.js';
 import type { NotificationPayload } from '../src/notify/format.js';
 import { closeTempDb, useTempDb } from './helpers/db.js';
 
@@ -53,6 +54,23 @@ beforeEach(async () => {
 afterAll(() => { vi.unstubAllGlobals(); resetConfigCache(); });
 
 describe('vacancy identity and refresh', () => {
+  it.each([
+    ['Berlin, Germany', 'Austin, TX, US'],
+    ['Berlin, Germany', 'Munich, Germany'],
+  ])('does not merge recruiter boilerplate across conflicting locations: %s / %s', async (first, second) => {
+    await ingest({ location: first });
+    const result = await ingest({ id: 'indeed-2', job_url: 'https://indeed.com/viewjob?jk=2', location: second }, 'indeed');
+    expect(result.created).toBe(1);
+    expect(result.mergedAcrossSources).toBe(0);
+  });
+
+  it.each(['Client', 'Project ID', 'Duration', 'Start date'])('does not merge different recruiter projects with conflicting %s', async (label) => {
+    await ingest({ description: `${strong.description}\n${label}: European client project` });
+    const result = await ingest({ id: 'indeed-2', job_url: 'https://indeed.com/viewjob?jk=2', description: `${strong.description}\n${label}: US client project` }, 'indeed');
+    expect(result.created).toBe(1);
+    expect(result.mergedAcrossSources).toBe(0);
+  });
+
   it('keeps distinct same-board IDs separate, even with identical descriptions', async () => {
     await ingest();
     const result = await ingest({ id: 'regression-2', job_url: 'https://www.linkedin.com/jobs/view/regression-2' });
@@ -130,6 +148,15 @@ describe('vacancy identity and refresh', () => {
 });
 
 describe('current notification eligibility', () => {
+  it('does not notify a weekly onsite schedule above the configured travel limit', async () => {
+    await ingest({ description: `${strong.description}\nThree onsite days every week are required.` });
+    const [result] = await rank({ rulesOnly: true });
+    expect(result!.assessment.recommendation).toBe('Skip');
+    const client = sender();
+    expect((await notify({ client })).queued).toBe(0);
+    expect(client.send).not.toHaveBeenCalled();
+  });
+
   it('ignores an older high score after the vacancy is reassessed as a rejection', async () => {
     await ingest();
     await rank({ rulesOnly: true });
@@ -211,7 +238,68 @@ describe('current notification eligibility', () => {
   });
 });
 
+describe('overlapping notification runs', () => {
+  it.each([false, true])('claims a notification once with an existing queue of %s', async (alreadyQueued) => {
+    await ingest();
+    await rank({ rulesOnly: true });
+    if (alreadyQueued) await notify({ dryRun: true, client: sender() });
+    const client = { send: vi.fn(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      return { ok: true, messageId: 42, retryable: false };
+    }) };
+    const results = await Promise.all([notify({ client }), notify({ client })]);
+    expect(client.send).toHaveBeenCalledTimes(1);
+    expect(results.reduce((count, result) => count + result.sent, 0)).toBe(1);
+    expect(await query(SELECT.from(db().Notifications))).toHaveLength(1);
+    expect(await queryOne(SELECT.from(db().Notifications))).toMatchObject({ status: 'Sent', attempts: 1, claimToken: null });
+  });
+
+  it('recovers an expired delivery claim and counts the recovery against the attempt limit', async () => {
+    await ingest();
+    await rank({ rulesOnly: true });
+    await notify({ dryRun: true, client: sender() });
+    await cds.run(UPDATE(db().Notifications).set({
+      status: 'Sending', attempts: 1, claimToken: 'old-claim', claimUntil: '2020-01-01T00:00:00.000Z',
+    }));
+    const client = sender();
+    expect((await notify({ client })).sent).toBe(1);
+    expect(client.send).toHaveBeenCalledTimes(1);
+    expect(await queryOne(SELECT.from(db().Notifications))).toMatchObject({ status: 'Sent', attempts: 2, claimToken: null });
+  });
+
+  it('releases the delivery claim when the sender throws, allowing a bounded retry', async () => {
+    await ingest();
+    await rank({ rulesOnly: true });
+    const client = { send: vi.fn(async () => { throw new Error('connection reset'); }) };
+    expect((await notify({ client })).failed).toBe(1);
+    expect(await queryOne(SELECT.from(db().Notifications))).toMatchObject({ status: 'Failed', attempts: 1, claimToken: null });
+    expect((await notify({ client: sender() })).sent).toBe(1);
+  });
+});
+
 describe('LLM request budget and refreshed evaluations', () => {
+  it('preserves a deterministic mandatory skill gap when a valid model response omits it', async () => {
+    await ingest({ description: `${strong.description}\nMandatory requirements:\n- ABAP OO development\nPreferred skills:\n- SAPUI5` });
+    enableLlm(1);
+    vi.stubGlobal('fetch', vi.fn(async () => llmResponse()));
+    const [result] = await rank();
+    expect(result!.assessment.engine).toBe('llm');
+    expect(result!.assessment.fitScore).toBe(95);
+    expect(result!.assessment.mandatoryGaps.join(' ')).toMatch(/ABAP OO development/);
+    expect(result!.assessment.recommendation).toBe('Review');
+  });
+
+  it('enforces travel limits even for a directly requested model assessment', async () => {
+    await ingest({ description: `${strong.description}\nThree onsite days every week are required.` });
+    enableLlm(1);
+    vi.stubGlobal('fetch', vi.fn(async () => llmResponse()));
+    const job = await queryOne<any>(SELECT.from(db().Jobs));
+    const result = await assessWithLlm(loadConfig(), job);
+    expect(result.hardReject).toBe(true);
+    expect(result.recommendation).toBe('Skip');
+    expect(result.mandatoryGaps.join(' ')).toMatch(/onsite attendance/);
+  });
+
   async function seedJobs() {
     for (let index = 0; index < 3; index += 1) {
       await ingest({ id: `budget-${index}`, job_url: `https://linkedin.com/jobs/view/budget-${index}` });

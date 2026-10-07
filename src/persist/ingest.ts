@@ -166,6 +166,14 @@ export async function findCrossSourceDuplicate(job: NormalizedJob, demo = false)
 
 export function isDuplicate(candidate: JobRow, job: NormalizedJob): boolean {
   if (!candidate.companyNormalized || candidate.companyNormalized !== job.companyNormalized) return false;
+  // Recruiter boilerplate is not evidence that conflicting client projects
+  // are the same vacancy. Check these facts before description similarity.
+  if (candidate.locationCountry && job.locationCountry &&
+    normalizeText(candidate.locationCountry) !== normalizeText(job.locationCountry)) return false;
+  const candidateCity = specificLocation(candidate.location, candidate.locationCountry);
+  const incomingCity = specificLocation(job.location, job.locationCountry);
+  if (candidateCity && incomingCity && candidateCity !== incomingCity) return false;
+  if (conflictingProjectDetails(candidate.description, job.description)) return false;
 
   const titleSimilarity = tokenSimilarity(candidate.title, job.title);
   if (titleSimilarity < DEDUPE.minTitleSimilarity) return false;
@@ -181,11 +189,33 @@ export function isDuplicate(candidate: JobRow, job: NormalizedJob): boolean {
   const location = normalizeText(candidate.location ?? '');
   const incomingLocation = normalizeText(job.location ?? '');
   if (!location || location !== incomingLocation) return false;
-  const genericLocations = new Set(['remote', 'europe', 'european union', 'eu', 'worldwide']);
-  const parts = location.split(',').map((part) => part.trim()).filter(Boolean);
-  return parts.some((part) => !genericLocations.has(part) &&
-    part !== normalizeText(candidate.locationCountry ?? '') &&
-    !/^[a-z]{2}$/.test(part));
+  return Boolean(candidateCity);
+}
+
+function specificLocation(location: string | null, country: string | null): string {
+  const generic = new Set(['remote', 'europe', 'european union', 'eu', 'worldwide', normalizeText(country)]);
+  return normalizeText(location).split(',').map((part) => part.trim())
+    .filter((part) => part && !generic.has(part) && !/^[a-z]{2}$/.test(part)).join(', ');
+}
+
+function projectDetails(description: string | null): Map<string, string> {
+  const fields = new Map<string, string>();
+  const labels = /\b(end[- ]?client|client(?: (?:country|location))?|project(?: (?:id|code|reference|name|country|location))?|(?:job |requisition )?reference(?: (?:id|number))?|requisition id|start date|duration)\s*:\s*([^\n;.!?]+)/gi;
+  for (const match of (description ?? '').matchAll(labels)) {
+    const label = normalizeText(match[1]).replace(/^end[- ]?client$/, 'client');
+    const value = normalizeText(match[2]);
+    if (value && !['unknown', 'not stated', 'confidential', 'tbd'].includes(value)) fields.set(label, value);
+  }
+  return fields;
+}
+
+function conflictingProjectDetails(first: string | null, second: string | null): boolean {
+  const a = projectDetails(first);
+  const b = projectDetails(second);
+  for (const [field, value] of a) {
+    if (b.has(field) && b.get(field) !== value) return true;
+  }
+  return false;
 }
 
 async function insertListing(

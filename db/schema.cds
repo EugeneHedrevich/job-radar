@@ -127,7 +127,9 @@ entity Notifications : cuid {
   job               : Association to Jobs;
   assessment        : Association to Assessments;
   channel           : String(20);            // telegram
-  status            : String(20);            // Pending | Sent | Failed | Skipped
+  status            : String(20);            // Pending | Sending | Sent | Failed | Skipped | Superseded
+  claimToken        : String(36);            // owner of the current delivery attempt
+  claimUntil        : Timestamp;             // lease expiry for recovery after a crash
   attempts          : Integer default 0;
   lastError         : String(2000);
   telegramMessageId : Integer;
