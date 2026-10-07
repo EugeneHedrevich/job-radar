@@ -7,8 +7,12 @@ import 'dotenv/config';
 
 export const PROJECT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 
+function envPath(name: string, fallback: string): string {
+  return process.env[name]?.trim() || fallback;
+}
+
 export function configDir(): string {
-  return path.resolve(PROJECT_ROOT, process.env.JOB_RADAR_CONFIG_DIR ?? 'config');
+  return path.resolve(PROJECT_ROOT, envPath('JOB_RADAR_CONFIG_DIR', 'config'));
 }
 
 function readYaml(file: string): unknown {
@@ -296,7 +300,7 @@ export function loadConfig(options: { reload?: boolean } = {}): AppConfig {
     }
   }
 
-  const dbDir = path.resolve(PROJECT_ROOT, process.env.JOB_RADAR_DB_DIR ?? settings.storage.db_dir);
+  const dbDir = path.resolve(PROJECT_ROOT, envPath('JOB_RADAR_DB_DIR', settings.storage.db_dir));
   const secrets: Secrets = {
     openaiApiKey: process.env.OPENAI_API_KEY?.trim() || undefined,
     openaiModel: process.env.OPENAI_MODEL?.trim() || undefined,
@@ -313,10 +317,10 @@ export function loadConfig(options: { reload?: boolean } = {}): AppConfig {
     settings,
     secrets,
     dbPath: path.join(dbDir, settings.storage.db_file),
-    pythonPath: path.resolve(PROJECT_ROOT, process.env.JOB_RADAR_PYTHON ?? settings.collector.python),
+    pythonPath: path.resolve(PROJECT_ROOT, envPath('JOB_RADAR_PYTHON', settings.collector.python)),
     collectorScript: path.resolve(
       PROJECT_ROOT,
-      process.env.JOB_RADAR_COLLECTOR_SCRIPT ?? settings.collector.script,
+      envPath('JOB_RADAR_COLLECTOR_SCRIPT', settings.collector.script),
     ),
     llmAvailable: settings.llm.enabled && Boolean(secrets.openaiApiKey),
     telegramAvailable:

@@ -278,8 +278,12 @@ describe('overlapping notification runs', () => {
 });
 
 describe('LLM request budget and refreshed evaluations', () => {
-  it('preserves a deterministic mandatory skill gap when a valid model response omits it', async () => {
-    await ingest({ description: `${strong.description}\nMandatory requirements:\n- ABAP OO development\nPreferred skills:\n- SAPUI5` });
+  it.each([
+    'Mandatory requirements:\n- ABAP OO development\nPreferred skills:\n- SAPUI5',
+    'Must have CAP, Node.js, ABAP OO development. Nice to have SAPUI5.',
+    'SAPUI5 is preferred, ABAP OO development is mandatory.',
+  ])('preserves a deterministic mandatory skill gap when a valid model response omits it: %s', async (requirements) => {
+    await ingest({ description: `${strong.description}\n${requirements}` });
     enableLlm(1);
     vi.stubGlobal('fetch', vi.fn(async () => llmResponse()));
     const [result] = await rank();
@@ -287,6 +291,22 @@ describe('LLM request budget and refreshed evaluations', () => {
     expect(result!.assessment.fitScore).toBe(95);
     expect(result!.assessment.mandatoryGaps.join(' ')).toMatch(/ABAP OO development/);
     expect(result!.assessment.recommendation).toBe('Review');
+  });
+
+  it.each([
+    ['Optional: five onsite days per month.', false],
+    ['Five onsite days per month are not required.', false],
+    ['Five onsite days per month.', true],
+  ])('keeps travel obligation semantics after a mocked model assessment: %s', async (attendance, unclear) => {
+    await ingest({ description: `${strong.description}\n${attendance}` });
+    enableLlm(1);
+    const request = vi.fn(async () => llmResponse());
+    vi.stubGlobal('fetch', request);
+    const [result] = await rank();
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(result!.assessment.engine).toBe('llm');
+    expect(result!.assessment.hardReject).toBe(false);
+    expect(result!.assessment.missingInformation.some((item) => /unclear whether onsite attendance/.test(item))).toBe(unclear);
   });
 
   it('enforces travel limits even for a directly requested model assessment', async () => {

@@ -41,7 +41,7 @@ interface HardRejectHit {
 export function findHardRejects(config: AppConfig, text: JobText): HardRejectHit[] {
   const hits: HardRejectHit[] = [];
   const limit = config.profile.travel?.max_onsite_days_per_month;
-  const requiredDays = onsiteDaysPerMonth(config, text.all);
+  const requiredDays = onsiteDaysPerMonth(config, text.all).mandatory;
   if (typeof limit === 'number' && Number.isFinite(limit) && limit >= 0 && requiredDays !== null && requiredDays > limit) {
     hits.push({ id: 'travel_limit', reason: `Required onsite attendance (${requiredDays.toFixed(1)} days/month) exceeds the profile limit (${limit} days/month).` });
   }
@@ -135,6 +135,10 @@ function scoreLocation(config: AppConfig, job: MatchableJob, text: JobText): Dim
   const missing: string[] = [];
   let score = rules.base;
 
+  const attendance = onsiteDaysPerMonth(config, text.all);
+  if (attendance.unclear !== null) {
+    missing.push(`unclear whether onsite attendance (${attendance.unclear.toFixed(1)} days/month) is mandatory`);
+  }
   const mode = detectWorkMode(config, job, text);
   const country = job.locationCountry;
   const preferred = country
@@ -149,7 +153,7 @@ function scoreLocation(config: AppConfig, job: MatchableJob, text: JobText): Dim
       break;
     case 'hybrid':
       score -= rules.hybrid_penalty;
-      notes.push('hybrid - on-site presence expected');
+      notes.push('hybrid - on-site attendance mentioned');
       break;
     case 'onsite':
       score -= rules.onsite_penalty;

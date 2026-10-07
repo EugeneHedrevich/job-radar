@@ -56,9 +56,15 @@ export async function connectDb(dbPathOverride?: string): Promise<any> {
       log.info('Deploying CDS schema', { dbPath });
       await (cds as any).deploy(csn).to(db);
     }
-    await ensureDemoProvenance(db);
-    await ensureNotificationClaims(db);
-    await ensureIndexes(db);
+    await db.tx(async (tx: any) => {
+      // CAP starts a deferred transaction. A write, even with no matching rows,
+      // acquires SQLite's writer lock before any migration reads the schema.
+      // A competing process waits here, then checks the committed schema again.
+      await tx.run('UPDATE sap_jobradar_Jobs SET ID = ID WHERE 0 = 1');
+      await ensureDemoProvenance(tx);
+      await ensureNotificationClaims(tx);
+      await ensureIndexes(tx);
+    });
     entities = cds.entities(NAMESPACE) as unknown as Entities;
     return db;
   })();

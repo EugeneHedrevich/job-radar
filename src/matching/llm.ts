@@ -213,7 +213,7 @@ export async function assessWithLlm(config: AppConfig, job: MatchableJob): Promi
     strongMatches: data.strong_matches.slice(0, 12),
     mandatoryGaps,
     preferredGaps,
-    missingInformation: data.missing_information,
+    missingInformation: [...new Set([...deterministic.missingInformation, ...data.missing_information])],
     explanation: data.explanation,
     suggestedCvVariant: allowedVariant,
     hardReject: deterministic.hardReject,

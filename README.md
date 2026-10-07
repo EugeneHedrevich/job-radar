@@ -51,6 +51,17 @@ cp .env.example .env
 # edit .env: TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, OPENAI_API_KEY (all optional)
 ```
 
+Optional path variables may stay empty after copying `.env.example`. Missing, empty and
+whitespace-only values use the configured defaults; surrounding whitespace in overrides is
+trimmed. Relative paths resolve from the project root:
+
+| Variable | Default |
+| -------- | ------- |
+| `JOB_RADAR_CONFIG_DIR` | `./config` |
+| `JOB_RADAR_DB_DIR` | `storage.db_dir` (`./data`) |
+| `JOB_RADAR_PYTHON` | `collector.python` (`./.venv/bin/python`) |
+| `JOB_RADAR_COLLECTOR_SCRIPT` | `collector.script` (`./python/collector.py`) |
+
 Verify the installation without touching any live job board:
 
 ```bash
@@ -167,10 +178,16 @@ Rules that always apply:
   evaluated separately, and markers are attached to their skill. Known mandatory gaps remain
   mandatory in model results and prevent `Apply`. Short names can be configured in
   `profile.not_claimed_aliases` (for example, `ABAP OO` for `ABAP OO development`).
-* **Travel limits are enforced.** Stated onsite days per week/month/year are compared with
+  A shared marker also covers comma-separated lists without a colon (`Must have CAP,
+  Node.js, ABAP OO development`); an explicit preferred marker changes the list context.
+* **Travel limits are enforced for required attendance.** Explicitly mandatory onsite days
+  per week/month/year are compared with
   `travel.max_onsite_days_per_month` before accepting a role. Weekly attendance is converted
-  using `compensation.working_days_per_month / 5`; three days every week exceeds the current
-  four-day monthly limit. An unstated frequency stays unknown.
+  using `compensation.working_days_per_month / 5`; three required days every week exceeds the
+  current four-day monthly limit. Optional or negated attendance causes no travel hard reject.
+  These markers apply within the attendance clause. A frequency without a clear obligation
+  is reported in `missingInformation`, including in model results; an unstated frequency
+  stays unknown.
 * **Mixed roles are judged on the description**, not the title. A "SAP BTP Developer with
   ABAP background" that only wants ABAP for reading is not rejected.
 * **Unknown is not a verdict.** An unstated rate, contract type, work mode or country lands in
@@ -254,6 +271,10 @@ marked to prevent live delivery.
   followed by a crash before recording success can still be retried; Telegram delivery and
   SQLite persistence cannot be committed as one transaction. Existing duplicate queue rows
   remain as `Superseded` history, with a sent copy taking precedence.
+* Existing-database migrations run in one CAP transaction. A SQLite writer lock is acquired
+  before checking columns, and held through schema changes, duplicate-history reconciliation
+  and index creation. Parallel processes recheck the committed schema after acquiring the
+  lock. Migration failures roll back and propagate to the caller.
 
 ## 8. Tests
 
@@ -275,6 +296,8 @@ tests exercise the installed JobSpy implementation with mocked HTTP responses; n
 boards or Telegram messages are needed.
 Concurrency tests hold one sender open while another independent process completes,
 checking that only the claimed notification is delivered.
+Additional regressions cover blank path overrides, comma-separated requirement markers,
+optional and unclear attendance, and concurrent migration of a database missing claim columns.
 
 `fixtures/demo-jobs.jsonl` is **demo data** — hand-written, fictional companies, in the exact
 format the Python collector emits.

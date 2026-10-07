@@ -34,7 +34,7 @@ export function assessmentCacheKey(
   engine: 'rules' | 'llm',
 ): string {
   return sha256(JSON.stringify({
-    revision: 3,
+    revision: 4,
     job: {
       ID: job.ID, title: job.title, company: job.company,
       location: job.location, locationCountry: job.locationCountry,
