@@ -51,6 +51,11 @@ export const profileSchema = z.object({
     base_location: z.string(),
     timezone: z.string().optional(),
   }),
+  education: z.array(z.object({
+    field: z.string().min(1),
+    qualification: z.string().optional(),
+    institution: z.string().optional(),
+  })).default([]),
   availability: z.record(z.string(), z.unknown()).optional(),
   work_authorization: z.record(z.string(), z.unknown()).optional(),
   travel: z.record(z.string(), z.unknown()).optional(),

@@ -140,6 +140,25 @@ describe('source failure isolation', () => {
 });
 
 describe('batch planning', () => {
+  it('plans SAP specialists without assumed geography and within the existing budgets', () => {
+    const config = loadConfig();
+    const plan = planBatch(config, { batchKey: 'sap-specialists' });
+    expect([...plan.tasksBySource.keys()]).toEqual(['redglobal', 'eursap', 'whitehall']);
+    const tasks = [...plan.tasksBySource.values()].flat();
+    expect(tasks).toHaveLength(15);
+    expect(tasks.every((entry) => entry.location === undefined && entry.country_indeed === undefined)).toBe(true);
+    expect(tasks.filter((entry) => entry.fetch_description).length).toBeLessThanOrEqual(
+      config.searches.description_budget.max_tasks_per_run,
+    );
+    expect(tasks.length).toBeLessThanOrEqual(config.searches.resilience.max_tasks_per_run);
+  });
+
+  it.each(['redglobal', 'eursap', 'whitehall'])('collects %s independently with a description budget', (source) => {
+    const plan = planBatch(loadConfig(), { batchKey: 'sap-specialists', onlySources: [source] });
+    expect([...plan.tasksBySource.keys()]).toEqual([source]);
+    expect(plan.tasksBySource.get(source)!.some((entry) => entry.fetch_description)).toBe(true);
+  });
+
   it('rotates through the configured batches over time', () => {
     const config = loadConfig();
     const batches = config.searches.rotation.batches.length;

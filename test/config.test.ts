@@ -77,3 +77,11 @@ describe('optional environment paths', () => {
     expect(config.collectorScript).toBe(path.join(PROJECT_ROOT, 'custom-collector.py'));
   });
 });
+
+describe('candidate education', () => {
+  it('preserves the declared field without inventing qualification details', () => {
+    expect(loadConfig().profile.education).toEqual([
+      { field: 'Chemical Engineering', qualification: 'unknown', institution: 'unknown' },
+    ]);
+  });
+});

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """SAP Job Radar collector.
 
-Collects vacancies with python-jobspy and emits machine-readable JSON Lines on
+Collects vacancies with python-jobspy and public SAP agency adapters, emitting JSON Lines on
 stdout. Every diagnostic message goes to stderr so stdout stays parseable.
 
 This process only collects. Persistence, deduplication, matching and
@@ -165,6 +165,14 @@ class UpstreamFailures(logging.Handler):
 
 
 def scrape_with_failures(kwargs: dict[str, Any]) -> tuple[Any, tuple[str, str] | None]:
+    from sap_sources import SOURCES, scrape_agency
+
+    if kwargs["site_name"][0] in SOURCES:
+        import pandas as pd
+
+        records, failure = scrape_agency(kwargs)
+        return pd.DataFrame(records), ((classify_error(failure), f"{type(failure).__name__}: {failure}") if failure else None)
+
     from jobspy import scrape_jobs
 
     capture = UpstreamFailures()

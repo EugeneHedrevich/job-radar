@@ -5,12 +5,13 @@ relevant ones to Telegram with an **Open vacancy** button. You open the link and
 manually — the tool never applies on your behalf and never rewrites your CV.
 
 ```
-JobSpy (Python)  ->  JSON Lines  ->  Node.js / SAP CAP  ->  SQLite  ->  matching  ->  Telegram
+Python collectors -> JSON Lines -> Node.js / SAP CAP -> SQLite -> matching -> Telegram
    collection          stdout         normalisation          store       rules+LLM      notify
                                       deduplication
 ```
 
-* **Collection**: `python-jobspy` (LinkedIn, Indeed, Glassdoor), run as a subprocess.
+* **Collection**: `python-jobspy` (LinkedIn, Indeed, Glassdoor) and public SAP agency adapters
+  (RED Global, Eursap, Whitehall Resources), run as a subprocess.
 * **Orchestration & persistence**: SAP CAP (Node.js + TypeScript) on SQLite.
 * **Matching**: deterministic rules first, optional structured OpenAI evaluation second.
 * **Notification**: Telegram Bot API.
@@ -173,11 +174,40 @@ npm run watch   -- --dry-run
 
 Run `npx tsx src/cli.ts help` for the full flag list.
 
+### SAP specialist sources
+
+The `sap-specialists` batch adds public searches from
+[RED Global](https://www.redglobal.com/jobs), [Eursap](https://eursap.eu/jobs) and
+[Whitehall Resources](https://www.whitehallresources.com/sap-jobs/). It searches BTP, CAP,
+CPI, UI5 and Fiori without requiring the title to contain "Developer". The batch is part
+of the regular rotation; its 15 tasks fit inside the existing limit of 18 per run.
+
+```bash
+npm run collect -- --batch sap-specialists --source redglobal,eursap,whitehall --results 5
+npm run rank
+npm run notify -- --dry-run --limit 3
+```
+
+Searches include all advertised locations. The matcher applies your profile preferences;
+"remote" never implies permission to work from Bulgaria. The advertiser is stored as the
+agency when the client company is undisclosed. Published dates and rate intervals are
+used only when explicitly supplied. A start date is not a publication date, and a rate
+without an interval stays unknown. Known expired listings and known dates outside the
+freshness window are excluded when that metadata is available.
+
+The existing description budget still applies: by default two search tasks per run can
+fetch full descriptions. Other results remain incomplete. To dedicate that budget to a
+particular agency, use e.g.
+`npm run collect -- --batch sap-specialists --source whitehall --results 5`.
+RED Global and Whitehall search pagination is capped at three pages; Eursap uses the first
+filtered result response from its public browser search. HTTP failures and access challenges
+are reported to the existing cooldown mechanism; they are not successful empty searches.
+
 ## 4. Configuration
 
 | File                      | Contents                                                         |
 | ------------------------- | ---------------------------------------------------------------- |
-| `config/profile.yaml`     | Candidate profile, skills, availability, work authorisation, rate |
+| `config/profile.yaml`     | Candidate profile, education, skills, availability, authorisation, rate |
 | `config/searches.yaml`    | Keywords, per-source geography, rotation, budgets, resilience     |
 | `config/scoring.yaml`     | Weights, thresholds, hard rejects, signal phrases                 |
 | `config/cv-variants.yaml` | CV variants that may be recommended                               |
@@ -198,6 +228,10 @@ Key behaviours driven by configuration:
   but it is never given an invented assessment and can never be recommended `Apply`.
 * **Scoring** — `weights` must sum to 1.0. Bumping `profile.version` or `scoring.version`
   invalidates every cached assessment.
+
+The profile declares Chemical Engineering education. Qualification level and institution
+remain unknown until supplied. This information is passed to OpenAI; it does not imply a
+Computer Science degree or a particular diploma level.
 
 ### Changing the notification threshold
 
@@ -379,8 +413,8 @@ Deliberately out of scope for this MVP, with the hooks that would be used:
 
 * **Gmail / LinkedIn email alerts** — add a new collector that emits the same JSON Lines
   contract as `python/collector.py`; nothing else changes.
-* **SAP agencies (RED Global, Eursap, Whitehall, Abeo, …)** — same collector contract, one
-  module per agency feed, registered as a new `source` in `config/searches.yaml`.
+* **More SAP agencies** — follow the public adapters in `python/sap_sources.py`, emit the
+  same collector contract and register a source and batch in `config/searches.yaml`.
 * **Additional APIs** (Adzuna, Jooble, Arbeitnow) — same collector contract.
 * **CV tailoring** — `config/cv-variants.yaml` already carries variant metadata; a generator
   would consume `Assessments.suggestedCvVariant` plus the gap lists.

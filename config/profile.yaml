@@ -1,7 +1,7 @@
 # SAP Job Radar - candidate profile.
 # Bump `version` whenever you change anything here: cached assessments are keyed
 # on it, so a bump forces re-evaluation of all jobs.
-version: "2026-10-07.1"
+version: "2026-10-08.1"
 
 identity:
   name: "Yauhen Hedrevich"
@@ -10,6 +10,11 @@ identity:
   years_of_sap_experience: 7            # "7+"; treat as a floor, not a ceiling
   base_location: "Sofia, Bulgaria"
   timezone: "Europe/Sofia"
+
+education:
+  - field: "Chemical Engineering"
+    qualification: "unknown"
+    institution: "unknown"
 
 # Editable. Nothing here is inferred - leave a value as `unknown` if you do not
 # want the matcher to assume it.

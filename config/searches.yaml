@@ -4,7 +4,9 @@
 #   * LinkedIn searches globally and understands only `location` (free text).
 #   * Indeed and Glassdoor REQUIRE `country_indeed`; `location` only narrows it.
 #   * Glassdoor supports a smaller country list than Indeed.
-# Verified against python-jobspy 1.2.0.
+#   * SAP agencies use their public searches; `all` preserves the location
+#     stated by each vacancy rather than assuming a country or remote access.
+# JobSpy sources verified against python-jobspy 1.2.0.
 
 defaults:
   hours_old: 96 # freshness window; deliberately wider than the 3h cycle so
@@ -80,6 +82,36 @@ sources:
     supports_description_fetch: true
     search_results_include_description: false
 
+  redglobal:
+    enabled: true
+    geos:
+      all: { id: all }
+    results_wanted: 5
+    delay_between_tasks_seconds: 3
+    task_timeout_seconds: 180
+    supports_description_fetch: true
+    search_results_include_description: false
+
+  eursap:
+    enabled: true
+    geos:
+      all: { id: all }
+    results_wanted: 5
+    delay_between_tasks_seconds: 3
+    task_timeout_seconds: 180
+    supports_description_fetch: true
+    search_results_include_description: false
+
+  whitehall:
+    enabled: true
+    geos:
+      all: { id: all }
+    results_wanted: 5
+    delay_between_tasks_seconds: 3
+    task_timeout_seconds: 180
+    supports_description_fetch: true
+    search_results_include_description: false
+
 # A small rotating batch runs every cycle. Never every keyword x every country.
 rotation:
   interval_hours: 3
@@ -112,6 +144,15 @@ rotation:
         indeed: [uk, ie, nl]
         glassdoor: [uk, ie]
 
+    # Agency searches use skill names: a BTP Consultant should not be lost
+    # just because the search term ends with "Developer".
+    - key: "sap-specialists"
+      keywords: ["BTP", "CAP", "CPI", "UI5", "Fiori"]
+      targets:
+        redglobal: [all]
+        eursap: [all]
+        whitehall: [all]
+
 # Descriptions cost one extra HTTP request per job and are the fastest way to
 # get blocked. They are therefore budgeted per run.
 # A job collected without a description stays incomplete - it is never given an
@@ -119,7 +160,7 @@ rotation:
 description_budget:
   max_tasks_per_run: 2
   # Sources that already ship descriptions in search results are skipped here.
-  prefer_sources: ["linkedin", "glassdoor"]
+  prefer_sources: ["linkedin", "glassdoor", "redglobal", "eursap", "whitehall"]
 
 resilience:
   max_tasks_per_run: 18

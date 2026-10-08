@@ -278,6 +278,17 @@ describe('overlapping notification runs', () => {
 });
 
 describe('LLM request budget and refreshed evaluations', () => {
+  it('includes declared education in the model input without inventing a diploma level', async () => {
+    await ingest();
+    enableLlm(1);
+    const request = vi.fn(async () => llmResponse());
+    vi.stubGlobal('fetch', request);
+    await rank();
+    const body = JSON.parse((request.mock.calls[0] as unknown as [string, RequestInit])[1].body as string);
+    expect(body.messages[1].content).toContain('Education: Chemical Engineering (qualification level: unknown; institution: unknown)');
+    expect(body.messages[0].content).toContain('Do not infer a qualification level or institution');
+  });
+
   it.each([
     'Mandatory requirements:\n- ABAP OO development\nPreferred skills:\n- SAPUI5',
     'Must have CAP, Node.js, ABAP OO development. Nice to have SAPUI5.',

@@ -62,10 +62,14 @@ function profileBrief(config: AppConfig): string {
   const skills = Object.entries(profile.skills)
     .map(([group, list]) => `${group}: ${list.map((s) => `${s.name} (${s.proficiency})`).join(', ')}`)
     .join('\n');
+  const education = profile.education.map((entry) =>
+    `${entry.field} (qualification level: ${entry.qualification ?? 'unknown'}; institution: ${entry.institution ?? 'unknown'})`,
+  ).join('; ') || 'not stated';
   return [
     `Name: ${profile.identity.name}`,
     `Headline: ${profile.identity.headline}`,
     `SAP experience: ${profile.identity.years_of_sap_experience}+ years`,
+    `Education: ${education}`,
     `Base: ${profile.identity.base_location}`,
     `Engagement preferred: ${profile.engagement.preferred_types.join(', ')}; rejected: ${profile.engagement.rejected_types.join(', ')}`,
     `Work mode preferred: ${profile.engagement.preferred_work_mode}; acceptable: ${profile.engagement.acceptable_work_modes.join(', ')}`,
@@ -93,6 +97,7 @@ Rules you must follow:
 - Output a FIT SCORE (0-100) describing how well the vacancy matches the profile. It is NOT a probability of being hired.
 - Separate mandatory requirements from preferred ones. Only a missing MANDATORY requirement belongs in mandatory_gaps.
 - If a fact (rate, contract type, location eligibility, work authorisation, language requirement) is not stated, put it in missing_information. Do not guess it, and do not treat it as either a pass or a fail.
+- Use the stated education field. Do not infer a qualification level or institution, or equate Chemical Engineering with Computer Science. Distinguish an unspecified degree requirement from a requirement for a specific field or qualification level.
 - Mixed BTP/ABAP or BTP/IS-U roles must be judged on what the description actually requires, not on the title.
 - suggested_cv_variant must be exactly one of the allowed CV variant ids.
 - Never invent requirements, technologies, rates or CV content that are not in the inputs.`;
