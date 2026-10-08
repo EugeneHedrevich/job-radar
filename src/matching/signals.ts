@@ -149,6 +149,11 @@ export function requirementKind(config: AppConfig, text: string, term: string): 
     let listKind: Requirement | null = section;
     for (const part of block.split(/,|\s+[|•]\s*/)) {
       const clause = normalizeText(part).replace(/^(?:[-*#]+|\d+[.)])\s*/, '');
+      const attendancePart = pattern(ONSITE).test(clause) || pattern(SCHEDULE).test(clause) ||
+        /\b(?:attendance|relocation)\b/.test(clause);
+      // An attendance obligation ends an inline skill list. Its marker must
+      // not turn a neighboring, unqualified skill into a mandatory requirement.
+      if (attendancePart) listKind = section;
       const foundMarkers = [
         ...markers(clause, mandatoryMarkers, 'mandatory' as const),
         ...markers(clause, preferredMarkers, 'preferred' as const),
@@ -164,7 +169,7 @@ export function requirementKind(config: AppConfig, text: string, term: string): 
         continue;
       }
       const colon = clause.indexOf(':');
-      if (colon >= 0 && foundMarkers.some((marker) => marker.start < colon)) {
+      if (!attendancePart && colon >= 0 && foundMarkers.some((marker) => marker.start < colon)) {
         section = nearestMarker(foundMarkers, 0, colon)?.kind ?? null;
         listKind = section;
       } else if (clause.endsWith(':')) {
@@ -177,7 +182,7 @@ export function requirementKind(config: AppConfig, text: string, term: string): 
         if (kind === 'mandatory') return 'mandatory';
         if (kind === 'preferred') preferred = true;
       }
-      if (foundMarkers.length) listKind = [...foundMarkers].sort((a, b) => b.start - a.start)[0]!.kind;
+      if (foundMarkers.length && !attendancePart) listKind = [...foundMarkers].sort((a, b) => b.start - a.start)[0]!.kind;
     }
   }
   return found ? preferred ? 'preferred' : 'unclear' : null;
@@ -236,6 +241,7 @@ function onlyAttendanceDetails(config: AppConfig, fragment: string): boolean {
     remainder = remainder.replace(fragment.slice(marker.start, marker.end), ' ');
   }
   remainder = remainder.replace(new RegExp(SCHEDULE, 'g'), ' ').replace(new RegExp(WORK_MODE, 'g'), ' ')
+    .replace(/\bat\s+least\b/g, ' ')
     .replace(/\b(?:attendance|presence|visits?|work|working|days?|hybrid|fully|is|are|be|it|this|also|only|approximately)\b/g, ' ')
     .replace(/[\s:.*#()\-!?]+/g, '');
   return remainder === '';
@@ -291,14 +297,29 @@ export function hasMandatoryOnsiteCondition(config: AppConfig, text: string): bo
   return attendanceClauses(config, text).some((clause) => mandatoryOnsiteCondition(config, clause));
 }
 
+/** Ignore partial matches inside ambiguous numbers or time periods. */
+function onsiteSchedules(clause: string): RegExpExecArray[] {
+  const modes = [...markers(clause, [ONSITE], 'onsite'), ...markers(clause, ['\\bremote\\b'], 'remote')];
+  return [...clause.matchAll(new RegExp(SCHEDULE, 'g'))].filter((match) => {
+    const end = match.index + match[0].length;
+    const alternativeNumber = pattern(`\\b${NUMBER}\\s+or\\s*$`).test(clause.slice(0, match.index));
+    const alternativePeriod = /^\s*(?:or|\/)\s*(?:(?:per|a|each|every)\s+)?(?:week|month|year)\b/.test(clause.slice(end));
+    return !alternativeNumber && !alternativePeriod && nearestMarker(modes, match.index, end)?.kind === 'onsite';
+  });
+}
+
+/** Surface onsite mentions without a reliable, non-optional schedule. */
+export function hasUnclearOnsiteFrequency(config: AppConfig, text: string): boolean {
+  return attendanceClauses(config, text).some((clause) =>
+    onsiteSchedules(clause).length === 0 && markers(clause, [ONSITE], 'onsite').some((marker) =>
+      attendanceRequirement(config, clause, marker.start, marker.end) !== 'optional'));
+}
+
 /** Keep explicit frequency separate from whether that attendance is required. */
 export function onsiteDaysPerMonth(config: AppConfig, text: string): OnsiteDays {
   const days: OnsiteDays = { mandatory: null, optional: null, unclear: null };
-  const schedule = new RegExp(SCHEDULE, 'g');
   for (const clause of attendanceClauses(config, text)) {
-    const modes = [...markers(clause, [ONSITE], 'onsite'), ...markers(clause, ['\\bremote\\b'], 'remote')];
-    for (const match of clause.matchAll(schedule)) {
-      if (nearestMarker(modes, match.index, match.index + match[0].length)?.kind !== 'onsite') continue;
+    for (const match of onsiteSchedules(clause)) {
       const amount = NUMBER_WORDS[match[2] ?? match[1]!] ?? Number(match[2] ?? match[1]);
       const factor = match[3] === 'week' ? config.profile.compensation.working_days_per_month / 5 : match[3] === 'year' ? 1 / 12 : 1;
       const kind = attendanceRequirement(config, clause, match.index, match.index + match[0].length,

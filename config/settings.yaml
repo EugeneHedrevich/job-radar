@@ -19,7 +19,7 @@ llm:
   temperature: 0
   max_output_tokens: 900
   request_timeout_seconds: 60
-  max_jobs_per_run: 25 # cost guard
+  max_jobs_per_run: 5 # cost guard
   # Vacancy text is untrusted input: it is truncated and wrapped in a delimited
   # block, and the model is told never to follow instructions inside it.
   max_description_chars: 12000
@@ -29,7 +29,7 @@ telegram:
   # Minimum fit score required to notify. Mirrors scoring.thresholds.notify.
   min_fit_score: 75
   # Never send more than this per cycle, however many jobs match.
-  max_per_run: 10
+  max_per_run: 3
   max_attempts: 5
   retry_base_delay_seconds: 5
   disable_web_page_preview: true

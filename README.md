@@ -47,11 +47,11 @@ python3.12 -m venv .venv
 ./.venv/bin/python -m pip install -r python/requirements.txt
 
 # --- Secrets ---------------------------------------------------------------
-cp .env.example .env
-# edit .env: TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, OPENAI_API_KEY (all optional)
+touch .env
+# edit .env: OPENAI_API_KEY, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
 ```
 
-Optional path variables may stay empty after copying `.env.example`. Missing, empty and
+Optional path variables in `.env` may stay empty. Missing, empty and
 whitespace-only values use the configured defaults; surrounding whitespace in overrides is
 trimmed. Relative paths resolve from the project root:
 
@@ -89,6 +89,61 @@ delivered on the next run once the credentials exist.
 Set `OPENAI_API_KEY`. The model comes from `config/settings.yaml` (`llm.model`) and can be
 overridden with `OPENAI_MODEL`. **Without a key the tool works fully** — matching falls back
 to the deterministic rule engine.
+
+### First live run
+
+Fill `.env` with your existing `OPENAI_API_KEY`, `TELEGRAM_BOT_TOKEN` and
+`TELEGRAM_CHAT_ID`. Check `config/profile.yaml`: skills, languages, availability and work
+authorisation must reflect your actual situation. The current preferences are **€45/hour
+minimum, €50/hour target and at most 4 onsite days per month**; review them before running.
+
+The starting limits are 5 new OpenAI evaluations per ranking run and 3 Telegram
+notifications per notification run, with a minimum fit score of 75. Existing assessment
+cache, collector budgets, source cooldowns and notification deduplication remain in use.
+
+Run these commands manually from the project directory:
+
+```bash
+npm run status
+npm run collect -- --batch btp-core --source linkedin,indeed --results 5
+npm run rank
+npm run notify -- --dry-run --limit 3
+npm run notify -- --limit 1
+```
+
+Inspect the notification preview before the final command, which sends at most one real
+Telegram notification. `--results 5` is a limit per search task, not for the whole batch.
+`--dry-run` disables Telegram sending only: collection still contacts real job boards and
+ranking still makes OpenAI requests when enabled. This also applies to `cycle` and `watch`
+with `--dry-run`. `notify` reads stored assessments; its `--limit` limits notifications,
+**not AI calls**. AI requests are bounded by `llm.max_jobs_per_run`.
+
+The assessment cache revision is updated for the corrected onsite rules. A normal
+`npm run rank` recalculates outdated assessments with the same five-request OpenAI budget;
+matching current assessments still use the cache. The SQLite data, older assessments,
+source cooldowns and notification history are preserved.
+
+### Continuous monitoring
+
+After the manual check, run **one instance** of `npm run watch`. The current schedule is
+every 3 hours in `Europe/Sofia`, with an immediate cycle on startup. To keep accessible logs:
+
+```bash
+mkdir -p logs
+npm run watch >> logs/job-radar.log 2>&1
+```
+
+For unattended operation, manually configure a process supervisor such as `launchd` on
+macOS or `systemd` on Linux to start on boot and restart after a process crash. Set the
+project working directory and make Node.js, the Python virtual environment and `.env`
+available to that process. Use the log above or the supervisor's logs and arrange log
+rotation. No service is installed automatically.
+
+Keep SQLite in the same persistent directory (`./data` by default, or an absolute
+`JOB_RADAR_DB_DIR`), not temporary storage. It contains the assessment cache, source
+cooldowns and notification history. Do not run a second watcher against it. A sleeping or
+powered-off laptop does not perform monitoring; keep the host awake or use an always-on
+machine.
 
 ## 3. Commands
 
@@ -186,13 +241,14 @@ Rules that always apply:
   using `compensation.working_days_per_month / 5`; three required days every week exceeds the
   current four-day monthly limit. Optional or negated attendance causes no travel hard reject.
   These markers apply within the attendance requirement, including connected comma-separated
-  fragments (`Onsite attendance is required, three days per week`). Independent skills or
+  fragments (`Onsite attendance is required, at least three days per week`, at least
+  12 days/month with the current working-day setting). Independent skills or
   conditions reset that context. The `onsite_heavy` work-mode and remote-prohibition checks
   use the same local obligation markers; an optional skill elsewhere cannot disable them.
   Numeric schedules use the configured travel limit rather than a separate five-day regex.
   A frequency without a clear obligation
-  is reported in `missingInformation`, including in model results; an unstated frequency
-  stays unknown.
+  is reported in `missingInformation`, including in model results; an unstated or ambiguous
+  frequency is also reported there without inventing a monthly value.
 * **Mixed roles are judged on the description**, not the title. A "SAP BTP Developer with
   ABAP background" that only wants ABAP for reading is not rejected.
 * **Unknown is not a verdict.** An unstated rate, contract type, work mode or country lands in

@@ -241,6 +241,7 @@ describe('configured travel limit', () => {
   it('keeps an unspecified attendance frequency unknown', () => {
     const result = assessWithRules(config, job({ description: `${job().description} Occasional onsite meetings.` }));
     expect(result.hardReject).toBe(false);
+    expect(result.missingInformation).toContain('onsite attendance frequency is not stated or unclear');
   });
 
   it.each([
@@ -291,6 +292,9 @@ describe('onsite requirement context and legacy work-mode rules', () => {
   it.each([
     ['Fully remote. Five days per week onsite are not required.', { mandatory: null, optional: 20, unclear: null }, false],
     ['Onsite attendance is required, three days per week.', { mandatory: 12, optional: null, unclear: null }, true],
+    ['Onsite attendance is required, at least three days per week.', { mandatory: 12, optional: null, unclear: null }, true],
+    ['Fully remote. Onsite attendance is optional, at least three days per week.', { mandatory: null, optional: 12, unclear: null }, false],
+    ['Fully remote. Onsite attendance is not required, at least three days per week.', { mandatory: null, optional: 12, unclear: null }, false],
     ['Three days per week onsite, required.', { mandatory: 12, optional: null, unclear: null }, true],
     ['SAPUI5 is optional, three onsite days every week are required.', { mandatory: 12, optional: null, unclear: null }, true],
     ['Hybrid: three onsite days per week.', { mandatory: null, optional: null, unclear: 12 }, false],
@@ -319,6 +323,38 @@ describe('onsite requirement context and legacy work-mode rules', () => {
   ])('joins dependent attendance fragments without taking a skill marker: %s', (description) => {
     expect(onsiteDaysPerMonth(config, description).mandatory).toBe(12);
     expect(assessWithRules(config, job({ description })).hardReject).toBe(true);
+  });
+
+  it.each([
+    'ABAP OO development is preferred, onsite attendance is required, at least three days per week.',
+    'Onsite attendance is required, at least three days per week, ABAP OO development is preferred.',
+  ])('keeps a preferred skill separate from mandatory onsite attendance: %s', (description) => {
+    expect(onsiteDaysPerMonth(config, description).mandatory).toBe(12);
+    const result = assessWithRules(config, job({ description }));
+    expect(result.hardReject).toBe(true);
+    expect(result.preferredGaps.join(' ')).toMatch(/ABAP OO development/);
+    expect(result.mandatoryGaps.join(' ')).not.toMatch(/ABAP OO development/);
+  });
+
+  it.each([
+    'Onsite attendance is required, at least three days per week, ABAP OO development.',
+    'Mandatory onsite attendance: at least three days per week, ABAP OO development.',
+  ])('does not transfer an onsite obligation to an unqualified neighboring skill: %s', (description) => {
+    expect(requirementKind(config, description, 'ABAP OO development')).toBe('unclear');
+    const result = assessWithRules(config, job({ description }));
+    expect(result.hardReject).toBe(true);
+    expect(result.mandatoryGaps.join(' ')).not.toMatch(/ABAP OO development/);
+  });
+
+  it.each([
+    'Onsite attendance is required, at least several days per week.',
+    'Two or three onsite days per week are required.',
+    'Three onsite days per week or month are required.',
+  ])('reports ambiguous frequency without inventing a monthly value: %s', (description) => {
+    expect(onsiteDaysPerMonth(config, description)).toEqual({ mandatory: null, optional: null, unclear: null });
+    const result = assessWithRules(config, job({ description }));
+    expect(result.hardReject).toBe(false);
+    expect(result.missingInformation).toContain('onsite attendance frequency is not stated or unclear');
   });
 
   it.each([

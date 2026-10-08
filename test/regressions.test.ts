@@ -296,6 +296,8 @@ describe('LLM request budget and refreshed evaluations', () => {
   it.each([
     ['Optional: five onsite days per month.', false],
     ['Five onsite days per month are not required.', false],
+    ['Onsite attendance is optional, at least three days per week.', false],
+    ['Onsite attendance is not required, at least three days per week.', false],
     ['Five onsite days per month.', true],
     ['Fully remote. Five days per week onsite are not required.', false],
     ['Hybrid: three onsite days per week.', true],
@@ -312,9 +314,21 @@ describe('LLM request budget and refreshed evaluations', () => {
     expect(result!.assessment.missingInformation.some((item) => /unclear whether onsite attendance/.test(item))).toBe(unclear);
   });
 
+  it('preserves an unknown onsite frequency when the model omits missing information', async () => {
+    await ingest({ description: `${strong.description}\nOnsite attendance is required, at least several days per week.` });
+    enableLlm(1);
+    const request = vi.fn(async () => llmResponse());
+    vi.stubGlobal('fetch', request);
+    const [result] = await rank();
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(result!.assessment.hardReject).toBe(false);
+    expect(result!.assessment.missingInformation).toContain('onsite attendance frequency is not stated or unclear');
+  });
+
   it.each([
     'Three onsite days every week are required.',
     'Onsite attendance is required, three days per week.',
+    'Onsite attendance is required, at least three days per week.',
     'Three days per week onsite, required.',
     'SAPUI5 is optional, three onsite days every week are required.',
   ])('enforces travel limits even for a directly requested model assessment: %s', async (attendance) => {

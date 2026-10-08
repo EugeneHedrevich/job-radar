@@ -4,6 +4,7 @@ import {
   detectEngagement,
   detectWorkMode,
   hasMandatoryOnsiteCondition,
+  hasUnclearOnsiteFrequency,
   hourlyRate,
   jobText,
   matchesAny,
@@ -144,6 +145,7 @@ function scoreLocation(config: AppConfig, job: MatchableJob, text: JobText): Dim
   if (attendance.unclear !== null) {
     missing.push(`unclear whether onsite attendance (${attendance.unclear.toFixed(1)} days/month) is mandatory`);
   }
+  if (hasUnclearOnsiteFrequency(config, text.all)) missing.push('onsite attendance frequency is not stated or unclear');
   const mode = detectWorkMode(config, job, text);
   const country = job.locationCountry;
   const preferred = country
