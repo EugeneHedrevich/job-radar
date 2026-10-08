@@ -3,6 +3,7 @@ import { normalizeText } from '../util/text.js';
 import {
   detectEngagement,
   detectWorkMode,
+  hasMandatoryOnsiteCondition,
   hourlyRate,
   jobText,
   matchesAny,
@@ -46,6 +47,10 @@ export function findHardRejects(config: AppConfig, text: JobText): HardRejectHit
     hits.push({ id: 'travel_limit', reason: `Required onsite attendance (${requiredDays.toFixed(1)} days/month) exceeds the profile limit (${limit} days/month).` });
   }
   for (const rule of config.scoring.hard_rejects.rules) {
+    if (rule.id === 'onsite_heavy') {
+      if (hasMandatoryOnsiteCondition(config, text.all)) hits.push({ id: rule.id, reason: rule.reason });
+      continue;
+    }
     if (!matchesAny(text.all, rule.any)) continue;
     if (rule.none.length && matchesAny(text.all, rule.none)) continue;
     hits.push({ id: rule.id, reason: rule.reason });

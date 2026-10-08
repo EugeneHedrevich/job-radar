@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { loadConfig } from '../src/config/index.js';
-import { assessWithRules, prescreen, suggestCvVariant } from '../src/matching/rules.js';
+import { assessWithRules, findHardRejects, prescreen, suggestCvVariant } from '../src/matching/rules.js';
 import { detectWorkMode, jobText, onsiteDaysPerMonth, requirementKind } from '../src/matching/signals.js';
 import type { MatchableJob } from '../src/matching/types.js';
 
@@ -284,6 +284,98 @@ describe('configured travel limit', () => {
   ])('keeps an independent required frequency mandatory: %s', (attendance) => {
     expect(onsiteDaysPerMonth(config, attendance).mandatory).toBe(12);
     expect(assessWithRules(config, job({ description: `${job().description}\n${attendance}` })).hardReject).toBe(true);
+  });
+});
+
+describe('onsite requirement context and legacy work-mode rules', () => {
+  it.each([
+    ['Fully remote. Five days per week onsite are not required.', { mandatory: null, optional: 20, unclear: null }, false],
+    ['Onsite attendance is required, three days per week.', { mandatory: 12, optional: null, unclear: null }, true],
+    ['Three days per week onsite, required.', { mandatory: 12, optional: null, unclear: null }, true],
+    ['SAPUI5 is optional, three onsite days every week are required.', { mandatory: 12, optional: null, unclear: null }, true],
+    ['Hybrid: three onsite days per week.', { mandatory: null, optional: null, unclear: 12 }, false],
+  ] as const)('keeps mode, frequency and obligation together: %s', (description, expectedDays, rejected) => {
+    const vacancy = job({ description });
+    const text = jobText(vacancy);
+    expect(onsiteDaysPerMonth(config, text.all)).toEqual(expectedDays);
+    const result = assessWithRules(config, vacancy);
+    expect(result.hardReject).toBe(rejected);
+    if (rejected) {
+      expect(result.recommendation).toBe('Skip');
+      expect(result.fitScore).toBeLessThanOrEqual(config.scoring.hard_rejects.score_cap);
+      expect(result.hardRejectReason).toMatch(/Required onsite attendance \(12\.0 days\/month\)/);
+    } else {
+      expect(findHardRejects(config, text).map((hit) => hit.id)).not.toContain('onsite_heavy');
+    }
+    if (expectedDays.unclear !== null) {
+      expect(result.missingInformation).toContain('unclear whether onsite attendance (12.0 days/month) is mandatory');
+    }
+  });
+
+  it.each([
+    'Onsite attendance is required and three days per week.',
+    'Three days per week, onsite, required.',
+    'SAPUI5 is optional, onsite attendance is required, three days per week.',
+  ])('joins dependent attendance fragments without taking a skill marker: %s', (description) => {
+    expect(onsiteDaysPerMonth(config, description).mandatory).toBe(12);
+    expect(assessWithRules(config, job({ description })).hardReject).toBe(true);
+  });
+
+  it.each([
+    'SAPUI5 is required, three onsite days per week.',
+    'Three onsite days per week, SAPUI5 is required.',
+    'SAPUI5 is optional, three onsite days per week.',
+    'Overtime is required, three onsite days per week.',
+    'Three onsite days per week with optional SAPUI5 knowledge.',
+  ])('keeps an independent skill or condition out of attendance obligation: %s', (description) => {
+    expect(onsiteDaysPerMonth(config, description)).toEqual({ mandatory: null, optional: null, unclear: 12 });
+    const result = assessWithRules(config, job({ description }));
+    expect(result.hardReject).toBe(false);
+    expect(result.missingInformation).toContain('unclear whether onsite attendance (12.0 days/month) is mandatory');
+  });
+
+  it.each([
+    'Fully remote. Five days per week onsite, not required.',
+    'Fully remote. Onsite attendance is optional, five days per week.',
+    'Fully remote. Five days per week onsite are optional.',
+    'Fully onsite is not required.',
+    'Not fully onsite.',
+    'Fully onsite, optional.',
+    '100% onsite is optional.',
+    'No relocation is required.',
+  ])('ignores only the negated or optional onsite condition: %s', (description) => {
+    expect(assessWithRules(config, job({ description })).hardReject).toBe(false);
+  });
+
+  it.each([
+    'SAPUI5 is optional, fully onsite.',
+    'Fully onsite with optional SAPUI5 knowledge.',
+    'Fully onsite, SAPUI5 is optional.',
+    '100% onsite. SAPUI5 is not required.',
+    'Optional onsite visits. No remote work allowed.',
+    'Five onsite days per month are not required, but remote work is not possible.',
+    'Optional SAPUI5, remote work is not offered.',
+    'SAPUI5 is optional, must relocate.',
+    'Relocation is required, SAPUI5 is optional.',
+  ])('preserves required onsite work, remote prohibitions and relocation: %s', (description) => {
+    const vacancy = job({ description });
+    expect(findHardRejects(config, jobText(vacancy)).map((hit) => hit.id)).toContain('onsite_heavy');
+    const result = assessWithRules(config, vacancy);
+    expect(result.hardReject).toBe(true);
+    expect(result.recommendation).toBe('Skip');
+  });
+
+  it('reports an unqualified five-day schedule as uncertain without the old weekly hard reject', () => {
+    const result = assessWithRules(config, job({ description: 'Five days per week onsite.' }));
+    expect(result.hardReject).toBe(false);
+    expect(result.missingInformation).toContain('unclear whether onsite attendance (20.0 days/month) is mandatory');
+  });
+
+  it('uses the configured monthly limit even for a required five-day weekly schedule', () => {
+    const changed = structuredClone(config);
+    changed.profile.travel!.max_onsite_days_per_month = 20;
+    expect(assessWithRules(changed, job({ description: 'Five days per week onsite are required.' })).hardReject).toBe(false);
+    expect(assessWithRules(config, job({ description: 'Five days per week onsite are required.' })).hardReject).toBe(true);
   });
 });
 

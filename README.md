@@ -185,7 +185,12 @@ Rules that always apply:
   `travel.max_onsite_days_per_month` before accepting a role. Weekly attendance is converted
   using `compensation.working_days_per_month / 5`; three required days every week exceeds the
   current four-day monthly limit. Optional or negated attendance causes no travel hard reject.
-  These markers apply within the attendance clause. A frequency without a clear obligation
+  These markers apply within the attendance requirement, including connected comma-separated
+  fragments (`Onsite attendance is required, three days per week`). Independent skills or
+  conditions reset that context. The `onsite_heavy` work-mode and remote-prohibition checks
+  use the same local obligation markers; an optional skill elsewhere cannot disable them.
+  Numeric schedules use the configured travel limit rather than a separate five-day regex.
+  A frequency without a clear obligation
   is reported in `missingInformation`, including in model results; an unstated frequency
   stays unknown.
 * **Mixed roles are judged on the description**, not the title. A "SAP BTP Developer with

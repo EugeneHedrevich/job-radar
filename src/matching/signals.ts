@@ -195,7 +195,10 @@ export interface OnsiteDays {
 
 type AttendanceRequirement = keyof OnsiteDays;
 
-function attendanceRequirement(config: AppConfig, clause: string, start: number, end: number): AttendanceRequirement {
+const SCHEDULE = `(${NUMBER})(?:\\s*(?:-|–|to)\\s*(${NUMBER}))?\\s+(?:(?:on[- ]?site|onsite|office|remote)\\s+)?days?(?:\\s+(?:on[- ]?site|onsite|in\\s+(?:the\\s+)?office|remote))?\\s*(?:/|per|a|each|every)\\s*(week|month|year)\\b`;
+const WORK_MODE = `${ONSITE}|\\bremote\\b`;
+
+function attendanceMarkers(config: AppConfig, clause: string): Marker<'mandatory' | 'optional'>[] {
   const compulsory = markers(clause, ['\\bnot\\s+optional\\b'], 'mandatory' as const);
   const optional = markers(clause, [
     '\\b(?:optional|voluntary)\\b',
@@ -207,6 +210,8 @@ function attendanceRequirement(config: AppConfig, clause: string, start: number,
     '\\bnot\\s+(?:a\\s+)?(?:requirement|obligation)\\b',
     '\\bno\\s+(?:mandatory|required|compulsory)\\s+(?:onsite|on[- ]site|office|travel|attendance|visits?)\\b',
     '\\bno\\s+(?:onsite|on[- ]site|office|travel)(?:\\s+(?:attendance|visits?|presence))?\\s+(?:(?:is|are)\\s+)?required\\b',
+    '\\b(?:not|never)\\s+(?:fully\\s+|100\\s*%\\s*)?(?:on[- ]?site|onsite|in[- ]office|vor ort)\\b',
+    '\\bno\\s+relocation\\s+(?:(?:is|are)\\s+)?(?:required|mandatory)\\b',
   ], 'optional' as const).filter((marker) => !compulsory.some((other) => marker.start < other.end && other.start < marker.end));
   const mandatory = [
     ...compulsory,
@@ -215,24 +220,89 @@ function attendanceRequirement(config: AppConfig, clause: string, start: number,
       '\\b(?:must|have\\s+to|need\\s+to|compulsory|obligatory)\\b',
     ], 'mandatory' as const),
   ].filter((marker) => !optional.some((other) => marker.start < other.end && other.start < marker.end));
-  return nearestMarker([...optional, ...mandatory], start, end)?.kind ?? 'unclear';
+  return [...optional, ...mandatory];
+}
+
+function attendanceRequirement(
+  config: AppConfig, clause: string, start: number, end: number, fallback: AttendanceRequirement = 'unclear',
+): AttendanceRequirement {
+  return nearestMarker(attendanceMarkers(config, clause), start, end)?.kind ?? fallback;
+}
+
+/** A continuation contains only attendance details, never an unrelated skill. */
+function onlyAttendanceDetails(config: AppConfig, fragment: string): boolean {
+  let remainder = fragment;
+  for (const marker of attendanceMarkers(config, fragment).sort((a, b) => (b.end - b.start) - (a.end - a.start))) {
+    remainder = remainder.replace(fragment.slice(marker.start, marker.end), ' ');
+  }
+  remainder = remainder.replace(new RegExp(SCHEDULE, 'g'), ' ').replace(new RegExp(WORK_MODE, 'g'), ' ')
+    .replace(/\b(?:attendance|presence|visits?|work|working|days?|hybrid|fully|is|are|be|it|this|also|only|approximately)\b/g, ' ')
+    .replace(/[\s:.*#()\-!?]+/g, '');
+  return remainder === '';
+}
+
+function relatedAttendanceFragment(config: AppConfig, context: string, fragment: string): boolean {
+  if (!onlyAttendanceDetails(config, fragment)) return false;
+  const contextMode = pattern(WORK_MODE).test(context);
+  const contextSchedule = pattern(SCHEDULE).test(context);
+  const fragmentMode = pattern(WORK_MODE).test(fragment);
+  const fragmentSchedule = pattern(SCHEDULE).test(fragment);
+  if (!contextMode && !contextSchedule) {
+    // A standalone "optional," or "required," can introduce a requirement.
+    return onlyAttendanceDetails(config, context) && attendanceMarkers(config, context).length > 0;
+  }
+  // A second complete attendance statement owns its own obligation marker.
+  if (fragmentMode && fragmentSchedule) return false;
+  if (fragmentMode) return !contextMode && contextSchedule;
+  return true;
+}
+
+/** Join dependent fragments; independent subjects reset the context. */
+function attendanceClauses(config: AppConfig, text: string): string[] {
+  return sentences(text).flatMap((sentence) => {
+    const parts = normalizeText(sentence).split(/(,|\s+(?:and|with|plus|but|whereas|while)\s+)/);
+    const clauses: string[] = [];
+    let context = parts[0] ?? '';
+    for (let index = 1; index < parts.length; index += 2) {
+      const separator = parts[index]!.trim();
+      const fragment = (parts[index + 1] ?? '').trim();
+      if ([',', 'and', 'with', 'plus'].includes(separator) && relatedAttendanceFragment(config, context, fragment)) {
+        context = `${context} ${fragment}`;
+      } else {
+        if (context) clauses.push(context);
+        context = fragment;
+      }
+    }
+    if (context) clauses.push(context);
+    return clauses;
+  });
+}
+
+function mandatoryOnsiteCondition(config: AppConfig, clause: string): boolean {
+  const rule = config.scoring.hard_rejects.rules.find((candidate) => candidate.id === 'onsite_heavy');
+  if (!rule || matchesAny(clause, rule.none)) return false;
+  // These patterns describe a required work mode or prohibit remote work.
+  // Optional/negated markers still take precedence within that requirement.
+  return rule.any.some((source) => [...clause.matchAll(new RegExp(source, 'gi'))].some((match) =>
+    attendanceRequirement(config, clause, match.index, match.index + match[0].length, 'mandatory') === 'mandatory'));
+}
+
+export function hasMandatoryOnsiteCondition(config: AppConfig, text: string): boolean {
+  return attendanceClauses(config, text).some((clause) => mandatoryOnsiteCondition(config, clause));
 }
 
 /** Keep explicit frequency separate from whether that attendance is required. */
 export function onsiteDaysPerMonth(config: AppConfig, text: string): OnsiteDays {
   const days: OnsiteDays = { mandatory: null, optional: null, unclear: null };
-  const schedule = new RegExp(`(${NUMBER})(?:\\s*(?:-|–|to)\\s*(${NUMBER}))?\\s+(?:(?:on[- ]?site|onsite|office|remote)\\s+)?days?(?:\\s+(?:on[- ]?site|onsite|in\\s+(?:the\\s+)?office|remote))?\\s*(?:/|per|a|each|every)\\s*(week|month|year)\\b`, 'g');
-  // Conjunctions and commas separate independent requirements: an optional
-  // skill or negated visit must not change another attendance obligation.
-  const clauses = sentences(text).flatMap((sentence) =>
-    normalizeText(sentence).split(/,|\s+(?:and|but|whereas|while)\s+/));
-  for (const clause of clauses) {
+  const schedule = new RegExp(SCHEDULE, 'g');
+  for (const clause of attendanceClauses(config, text)) {
     const modes = [...markers(clause, [ONSITE], 'onsite'), ...markers(clause, ['\\bremote\\b'], 'remote')];
     for (const match of clause.matchAll(schedule)) {
       if (nearestMarker(modes, match.index, match.index + match[0].length)?.kind !== 'onsite') continue;
       const amount = NUMBER_WORDS[match[2] ?? match[1]!] ?? Number(match[2] ?? match[1]);
       const factor = match[3] === 'week' ? config.profile.compensation.working_days_per_month / 5 : match[3] === 'year' ? 1 / 12 : 1;
-      const kind = attendanceRequirement(config, clause, match.index, match.index + match[0].length);
+      const kind = attendanceRequirement(config, clause, match.index, match.index + match[0].length,
+        mandatoryOnsiteCondition(config, clause) ? 'mandatory' : 'unclear');
       days[kind] = Math.max(days[kind] ?? 0, amount * factor);
     }
   }

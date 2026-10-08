@@ -297,6 +297,9 @@ describe('LLM request budget and refreshed evaluations', () => {
     ['Optional: five onsite days per month.', false],
     ['Five onsite days per month are not required.', false],
     ['Five onsite days per month.', true],
+    ['Fully remote. Five days per week onsite are not required.', false],
+    ['Hybrid: three onsite days per week.', true],
+    ['SAPUI5 is required, three onsite days per week.', true],
   ])('keeps travel obligation semantics after a mocked model assessment: %s', async (attendance, unclear) => {
     await ingest({ description: `${strong.description}\n${attendance}` });
     enableLlm(1);
@@ -309,16 +312,36 @@ describe('LLM request budget and refreshed evaluations', () => {
     expect(result!.assessment.missingInformation.some((item) => /unclear whether onsite attendance/.test(item))).toBe(unclear);
   });
 
-  it('enforces travel limits even for a directly requested model assessment', async () => {
-    await ingest({ description: `${strong.description}\nThree onsite days every week are required.` });
+  it.each([
+    'Three onsite days every week are required.',
+    'Onsite attendance is required, three days per week.',
+    'Three days per week onsite, required.',
+    'SAPUI5 is optional, three onsite days every week are required.',
+  ])('enforces travel limits even for a directly requested model assessment: %s', async (attendance) => {
+    await ingest({ description: `${strong.description}\n${attendance}` });
     enableLlm(1);
     vi.stubGlobal('fetch', vi.fn(async () => llmResponse()));
     const job = await queryOne<any>(SELECT.from(db().Jobs));
     const result = await assessWithLlm(loadConfig(), job);
     expect(result.hardReject).toBe(true);
     expect(result.recommendation).toBe('Skip');
+    expect(result.fitScore).toBeLessThanOrEqual(loadConfig().scoring.hard_rejects.score_cap);
+    expect(result.hardRejectReason).toMatch(/Required onsite attendance \(12\.0 days\/month\)/);
     expect(result.mandatoryGaps.join(' ')).toMatch(/onsite attendance/);
   });
+
+  it.each(['Fully onsite, SAPUI5 is optional.', 'No remote work allowed. Optional onsite visits.'])
+    ('preserves a mandatory work-mode rejection after a mocked model response: %s', async (attendance) => {
+      await ingest({ description: `${strong.description}\n${attendance}` });
+      enableLlm(1);
+      vi.stubGlobal('fetch', vi.fn(async () => llmResponse()));
+      const job = await queryOne<any>(SELECT.from(db().Jobs));
+      const result = await assessWithLlm(loadConfig(), job);
+      expect(result.hardReject).toBe(true);
+      expect(result.recommendation).toBe('Skip');
+      expect(result.fitScore).toBeLessThanOrEqual(loadConfig().scoring.hard_rejects.score_cap);
+      expect(result.hardRejectReason).toMatch(/Heavily onsite/);
+    });
 
   async function seedJobs() {
     for (let index = 0; index < 3; index += 1) {

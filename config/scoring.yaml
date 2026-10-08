@@ -125,10 +125,11 @@ hard_rejects:
 
     - id: onsite_heavy
       reason: "Heavily onsite; profile accepts only occasional travel."
+      # Checked in the same local attendance context as travel_limit.
+      # Numeric schedules use the profile's monthly travel limit, not a fixed regex.
       any:
         - "(100|full)\\s*%\\s*(on[- ]?site|onsite|vor ort)"
         - "fully on[- ]?site"
-        - "(5|five) days? (a|per) week (on[- ]?site|in (the )?office)"
         - "no remote (work)?( possible| allowed)?"
         - "remote (work )?is not (possible|an option|offered)"
         - "must relocate"
