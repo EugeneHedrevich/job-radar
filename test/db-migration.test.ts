@@ -69,6 +69,8 @@ async function createLegacyTemplate(): Promise<string> {
       ALTER TABLE sap_jobradar_Notifications DROP COLUMN claimToken;
       ALTER TABLE sap_jobradar_Notifications DROP COLUMN claimUntil;
       ALTER TABLE sap_jobradar_Jobs DROP COLUMN isDemo;
+      ALTER TABLE sap_jobradar_Assessments DROP COLUMN mandatoryGapEvidence;
+      DROP TABLE sap_jobradar_DescriptionRotation;
       INSERT INTO sap_jobradar_Jobs
         (ID, fingerprint, title, description, primaryUrl, firstSeenAt, lastSeenAt)
         VALUES ('legacy-job', 'legacy-fingerprint', 'Original vacancy', 'Original description',
@@ -79,6 +81,10 @@ async function createLegacyTemplate(): Promise<string> {
           ('pending-copy', 'legacy-job', 'telegram', 'Pending', 0, 'original pending payload', NULL, '2026-10-01T00:00:00Z'),
           ('sent-copy', 'legacy-job', 'telegram', 'Sent', 1, 'original sent payload', 42, '2026-10-02T00:00:00Z'),
           ('older-history', 'legacy-job', 'telegram', 'Superseded', 2, 'original history payload', 7, '2026-09-01T00:00:00Z');
+      INSERT INTO sap_jobradar_Assessments
+        (ID, job_ID, cacheKey, engine, fitScore, mandatoryGaps, createdAt)
+        VALUES ('legacy-assessment', 'legacy-job', 'revision-6-cache', 'llm', 60,
+          '["original gap"]', '2026-10-01T00:00:00Z');
     `);
   } finally { legacy.close(); }
   return dbPath;
@@ -111,6 +117,11 @@ describe('serialized legacy database migrations', () => {
     try {
       const columns = migrated.prepare('PRAGMA table_info(sap_jobradar_Notifications)').all();
       expect(columns.map((column) => column.name)).toEqual(expect.arrayContaining(['claimToken', 'claimUntil']));
+      expect(migrated.prepare('PRAGMA table_info(sap_jobradar_Assessments)').all().map((column) => column.name)).toContain('mandatoryGapEvidence');
+      expect(migrated.prepare('PRAGMA table_info(sap_jobradar_DescriptionRotation)').all().map((column) => column.name)).toEqual(['batchKey', 'state', 'updatedAt']);
+      expect(migrated.prepare('SELECT ID, cacheKey, fitScore, mandatoryGaps, mandatoryGapEvidence FROM sap_jobradar_Assessments').all()).toEqual([{
+        ID: 'legacy-assessment', cacheKey: 'revision-6-cache', fitScore: 60, mandatoryGaps: '["original gap"]', mandatoryGapEvidence: null,
+      }]);
       expect(migrated.prepare('SELECT ID, title, description, primaryUrl FROM sap_jobradar_Jobs').all()).toEqual([{
         ID: 'legacy-job', title: 'Original vacancy', description: 'Original description', primaryUrl: 'https://example.com/legacy',
       }]);
@@ -143,6 +154,8 @@ describe('serialized legacy database migrations', () => {
       expect(columns).not.toContain('claimToken');
       expect(columns).not.toContain('claimUntil');
       expect(rolledBack.prepare('PRAGMA table_info(sap_jobradar_Jobs)').all().map((column) => column.name)).not.toContain('isDemo');
+      expect(rolledBack.prepare('PRAGMA table_info(sap_jobradar_Assessments)').all().map((column) => column.name)).not.toContain('mandatoryGapEvidence');
+      expect(rolledBack.prepare('PRAGMA table_info(sap_jobradar_DescriptionRotation)').all()).toEqual([]);
       expect(rolledBack.prepare("SELECT status FROM sap_jobradar_Notifications WHERE ID = 'pending-copy'").get()?.status).toBe('Pending');
       expect(rolledBack.prepare('SELECT ID FROM sap_jobradar_Jobs').all()).toHaveLength(2);
     } finally { rolledBack.close(); }

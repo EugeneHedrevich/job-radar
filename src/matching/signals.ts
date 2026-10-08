@@ -154,9 +154,12 @@ export function requirementKind(config: AppConfig, text: string, term: string): 
       // An attendance obligation ends an inline skill list. Its marker must
       // not turn a neighboring, unqualified skill into a mandatory requirement.
       if (attendancePart) listKind = section;
+      const negated = markers(clause, ['\\b(?:not|never)\\s+(?:strictly\\s+)?(?:required|mandatory|essential)\\b'], 'preferred' as const);
       const foundMarkers = [
-        ...markers(clause, mandatoryMarkers, 'mandatory' as const),
+        ...markers(clause, mandatoryMarkers, 'mandatory' as const)
+          .filter((marker) => !negated.some((negative) => marker.start >= negative.start && marker.end <= negative.end)),
         ...markers(clause, preferredMarkers, 'preferred' as const),
+        ...negated,
       ];
       // A marker-only heading applies to subsequent list entries. Ordinary
       // headings end that section; inline markers apply to their own skill.

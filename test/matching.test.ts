@@ -29,6 +29,11 @@ function job(overrides: Partial<MatchableJob> = {}): MatchableJob {
 }
 
 describe('deterministic matching (no LLM key required)', () => {
+  it('does not turn a negated skill requirement into a proven mandatory gap', () => {
+    const vacancy = job({ description: `${job().description}\nABAP OO development is not required, CAP is mandatory.` });
+    expect(requirementKind(config, jobText(vacancy).all, 'ABAP OO development')).toBe('preferred');
+    expect(assessWithRules(config, vacancy).mandatoryGaps).toEqual([]);
+  });
   it('scores a strong, remote, contract BTP role highly and recommends Apply', () => {
     const result = assessWithRules(config, job());
     expect(result.engine).toBe('rules');
@@ -68,6 +73,12 @@ describe('mandatory-gap filtering', () => {
   it('keeps the strongest requirement when the same skill appears as both preferred and mandatory', () => {
     const text = jobText(job({ description: 'ABAP OO development is preferred.\nABAP OO development is mandatory for the client project.' }));
     expect(requirementKind(config, text.all, 'ABAP OO development')).toBe('mandatory');
+  });
+
+  it('cites the mandatory occurrence when an earlier occurrence of the same skill is preferred', () => {
+    const result = assessWithRules(config, job({ description: 'ABAP OO development is preferred.\nABAP OO development is mandatory for the client project.' }));
+    expect(result.mandatoryGapEvidence.find((gap) => gap.requirement === 'ABAP OO development')?.vacancyQuote)
+      .toBe('ABAP OO development is mandatory for the client project.');
   });
 
   it('recognizes short skill names in requirements lists without changing the capability claim', () => {

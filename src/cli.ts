@@ -6,6 +6,7 @@ import { loadFixture } from './fixtures/load.js';
 import { collect } from './pipeline/collect.js';
 import { notify } from './pipeline/notify.js';
 import { rank } from './pipeline/rank.js';
+import { directionCounters } from './pipeline/coverage.js';
 import { startScheduler } from './scheduler.js';
 import { log, out } from './util/log.js';
 
@@ -112,6 +113,7 @@ async function runCollect(flags: Args['flags']) {
     }
   }
   for (const skipped of summary.skipped) out(`  skipped source ${skipped.source}: ${skipped.reason}`);
+  await printDirectionCounters(summary.runId);
   return summary;
 }
 
@@ -159,9 +161,13 @@ async function runRank(flags: Args['flags']) {
     out(`  cv       : ${row.assessment.suggestedCvVariant ?? 'none'}`);
     out(`  why      : ${row.assessment.explanation}`);
     if (row.assessment.mandatoryGaps.length) out(`  gaps     : ${row.assessment.mandatoryGaps.join('; ')}`);
+    for (const gap of row.assessment.mandatoryGapEvidence) {
+      out(`  evidence : ${gap.requirement}; "${gap.vacancyQuote}"; profile ${gap.profilePath} = ${gap.profileValue}`);
+    }
     if (row.assessment.missingInformation.length) out(`  unknown  : ${row.assessment.missingInformation.join('; ')}`);
     out(`  url      : ${row.job.primaryUrl}`);
   }
+  await printDirectionCounters();
   return ranked;
 }
 
@@ -173,6 +179,7 @@ async function runNotify(flags: Args['flags']) {
   });
   out('');
   out(`Notifications: queued ${summary.queued}, sent ${summary.sent}, failed ${summary.failed}, retried ${summary.retried}, skipped ${summary.skipped}${summary.dryRun ? ' (dry run)' : ''}`);
+  await printDirectionCounters();
   return summary;
 }
 
@@ -214,6 +221,16 @@ async function runStatus() {
     const cooldown = row.cooldownUntil && new Date(row.cooldownUntil) > new Date() ? ` cooldown until ${row.cooldownUntil}` : '';
     out(`    ${row.source.padEnd(12)} ${row.lastStatus ?? 'unknown'} failures=${row.consecutiveFailures}${cooldown}`);
     if (row.lastMessage) out(`      last: ${row.lastMessage.slice(0, 160)}`);
+  }
+  await printDirectionCounters();
+}
+
+async function printDirectionCounters(runId?: string): Promise<void> {
+  out('');
+  out(`Directions (${runId ? 'unique jobs seen in this collection' : 'all stored live jobs'}; current assessments, cached LLM included):`);
+  out('  Direction     Collected  Description  Prescreen  LLM  Notify-ready');
+  for (const row of await directionCounters(runId)) {
+    out(`  ${row.direction.padEnd(12)} ${String(row.collected).padStart(9)} ${String(row.described).padStart(12)} ${String(row.prescreened).padStart(10)} ${String(row.llm).padStart(4)} ${String(row.notify).padStart(13)}`);
   }
 }
 

@@ -17,16 +17,50 @@ defaults:
   job_type: null # do NOT pre-filter on contract: most postings omit this field
   is_remote: false # do NOT pre-filter on remote: most postings omit this field
 
+# Reference catalogue; actual execution is defined by rotation.batches below.
 keywords:
   - "SAP BTP Developer"
-  - "SAP CAP Developer"
-  - "SAP CAPM Developer"
   - "SAP CPI Developer"
   - "SAP Integration Suite Developer"
-  - "SAP UI5 Developer"
-  - "SAP Fiori Developer"
   - "SAP BTP Architect"
-  - "SAP AI Developer"
+  - "SAP CAP"
+  - "SAP CAPM"
+  - "SAP Cloud Application Programming Model"
+  - "SAPUI5"
+  - "SAP UI5"
+  - "SAP Joule"
+  - "Joule Studio"
+  - "SAP Joule Developer"
+  - "SAP Business AI"
+  - "SAP AI Core"
+  - "SAP CAP Developer"
+  - "SAP CAPM Consultant"
+  - "SAP Cloud Application Programming Model Architect"
+  - "SAP Fiori"
+  - "Fiori Elements"
+  - "SAPUI5 Developer"
+  - "SAP Joule Consultant"
+  - "Joule Studio Developer"
+  - "SAP Joule Architect"
+  - "SAP Generative AI Hub"
+  - "SAP BTP AI"
+  - "SAP AI Core Developer"
+  - "SAP CAP freelance"
+  - "SAP CAPM contract"
+  - "SAP CAP B2B"
+  - "SAP Fiori Consultant"
+  - "Fiori Elements Architect"
+  - "SAP Joule freelance"
+  - "Joule Studio contract"
+  - "SAP Joule B2B"
+  - "SAP Business AI Consultant"
+  - "SAP Generative AI Hub Architect"
+  - "SAPUI5 freelance"
+  - "SAP Fiori contract"
+  - "Fiori Elements B2B"
+  - "SAP Business AI freelance"
+  - "SAP BTP AI contract"
+  - "SAP AI Core B2B"
 
 sources:
   linkedin:
@@ -112,10 +146,61 @@ sources:
     supports_description_fetch: true
     search_results_include_description: false
 
-# A small rotating batch runs every cycle. Never every keyword x every country.
+# Priority batches interleave four directions across all six sources.
+# Each uses at most 3 queries x 6 geographies = 18 tasks, without tail truncation.
+# All 19 batches run in 57 hours at the current schedule, inside the 96h window.
 rotation:
   interval_hours: 3
   batches:
+    - key: "cap-broad"
+      keywords: ["SAP CAP", "SAP CAPM", "SAP Cloud Application Programming Model"]
+      targets: &priority_targets
+        linkedin: [eu]
+        indeed: [nl]
+        glassdoor: [nl]
+        redglobal: [all]
+        eursap: [all]
+        whitehall: [all]
+    - key: "ui5-broad"
+      keywords: ["SAPUI5", "SAP UI5"]
+      targets: *priority_targets
+    - key: "joule-broad"
+      keywords: ["SAP Joule", "Joule Studio", "SAP Joule Developer"]
+      targets: *priority_targets
+    - key: "btp-ai-broad"
+      keywords: ["SAP Business AI", "SAP AI Core"]
+      targets: *priority_targets
+    - key: "cap-roles"
+      keywords: ["SAP CAP Developer", "SAP CAPM Consultant", "SAP Cloud Application Programming Model Architect"]
+      targets: *priority_targets
+    - key: "ui5-fiori"
+      keywords: ["SAP Fiori", "Fiori Elements", "SAPUI5 Developer"]
+      targets: *priority_targets
+    - key: "joule-roles"
+      keywords: ["SAP Joule Consultant", "Joule Studio Developer", "SAP Joule Architect"]
+      targets: *priority_targets
+    - key: "btp-ai-hub"
+      keywords: ["SAP Generative AI Hub", "SAP BTP AI", "SAP AI Core Developer"]
+      targets: *priority_targets
+    - key: "cap-contracts"
+      keywords: ["SAP CAP freelance", "SAP CAPM contract", "SAP CAP B2B"]
+      targets: *priority_targets
+    - key: "ui5-roles"
+      keywords: ["SAP Fiori Consultant", "Fiori Elements Architect"]
+      targets: *priority_targets
+    - key: "joule-contracts"
+      keywords: ["SAP Joule freelance", "Joule Studio contract", "SAP Joule B2B"]
+      targets: *priority_targets
+    - key: "btp-ai-roles"
+      keywords: ["SAP Business AI Consultant", "SAP Generative AI Hub Architect"]
+      targets: *priority_targets
+    - key: "ui5-contracts"
+      keywords: ["SAPUI5 freelance", "SAP Fiori contract", "Fiori Elements B2B"]
+      targets: *priority_targets
+    - key: "btp-ai-contracts"
+      keywords: ["SAP Business AI freelance", "SAP BTP AI contract", "SAP AI Core B2B"]
+      targets: *priority_targets
+
     - key: "btp-core"
       keywords: ["SAP BTP Developer", "SAP CAP Developer", "SAP CAPM Developer"]
       targets:
@@ -159,6 +244,7 @@ rotation:
 # invented assessment.
 description_budget:
   max_tasks_per_run: 2
+  # Persistent round-robin between available sources and keyword/location tasks.
   # Sources that already ship descriptions in search results are skipped here.
   prefer_sources: ["linkedin", "glassdoor", "redglobal", "eursap", "whitehall"]
 

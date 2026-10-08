@@ -8,6 +8,12 @@ export interface PlannedBatch {
    *  so that one blocked board cannot affect the others. */
   tasksBySource: Map<string, CollectorTask[]>;
   skipped: Array<{ source: string; reason: string }>;
+  descriptionRotation: DescriptionRotation;
+}
+
+export interface DescriptionRotation {
+  lastSource: string | null;
+  lastTaskBySource: Record<string, string>;
 }
 
 /**
@@ -22,6 +28,8 @@ export function selectBatchIndex(config: AppConfig, at: Date = new Date()): numb
 }
 
 export interface PlanOptions {
+  /** Persisted per-batch description cursors; planning itself is side-effect free. */
+  descriptionRotation?: DescriptionRotation;
   at?: Date;
   /** Sources currently on cooldown or explicitly disabled by the caller. */
   skipSources?: Map<string, string>;
@@ -92,8 +100,8 @@ export function planBatch(config: AppConfig, options: PlanOptions = {}): Planned
     if (tasks.length) tasksBySource.set(source, tasks);
   }
 
-  applyDescriptionBudget(config, tasksBySource);
-  return { batchKey: batch.key, keywords: batch.keywords, tasksBySource, skipped };
+  const descriptionRotation = applyDescriptionBudget(config, tasksBySource, options.descriptionRotation);
+  return { batchKey: batch.key, keywords: batch.keywords, tasksBySource, skipped, descriptionRotation };
 }
 
 /**
@@ -101,26 +109,49 @@ export function planBatch(config: AppConfig, options: PlanOptions = {}): Planned
  * to get rate limited, so only a bounded number of tasks are allowed to do it.
  * Jobs collected without a description stay incomplete on purpose.
  */
-function applyDescriptionBudget(config: AppConfig, tasksBySource: Map<string, CollectorTask[]>): void {
+function applyDescriptionBudget(
+  config: AppConfig, tasksBySource: Map<string, CollectorTask[]>, previous?: DescriptionRotation,
+): DescriptionRotation {
+  const state: DescriptionRotation = {
+    lastSource: previous?.lastSource ?? null,
+    lastTaskBySource: { ...previous?.lastTaskBySource },
+  };
   const budget = config.searches.description_budget;
-  if (budget.max_tasks_per_run <= 0) return;
+  if (budget.max_tasks_per_run <= 0) return state;
 
-  const candidates: CollectorTask[] = [];
-  const order = [...budget.prefer_sources, ...tasksBySource.keys()];
-  const seen = new Set<string>();
+  const order = [...new Set([...budget.prefer_sources, ...Object.keys(config.searches.sources)])];
+  const eligible = new Map<string, CollectorTask[]>();
   for (const source of order) {
-    if (seen.has(source)) continue;
-    seen.add(source);
     const sourceConfig = config.searches.sources[source];
     const tasks = tasksBySource.get(source);
     if (!sourceConfig || !tasks) continue;
     if (!sourceConfig.supports_description_fetch) continue;
     if (sourceConfig.search_results_include_description) continue;
-    candidates.push(...tasks);
+    eligible.set(source, tasks);
   }
-  for (const task of candidates.slice(0, budget.max_tasks_per_run)) {
-    task.fetch_description = true;
+  let sourceIndex = state.lastSource ? order.indexOf(state.lastSource) : -1;
+  let allocated = 0;
+  let misses = 0;
+  // Round-robin sources, with a separate keyword/location cursor per source.
+  // Unavailable sources keep their cursors and consume no description slots.
+  while (allocated < budget.max_tasks_per_run && misses < order.length) {
+    sourceIndex = (sourceIndex + 1) % order.length;
+    const source = order[sourceIndex]!;
+    const tasks = eligible.get(source);
+    if (!tasks?.some((task) => !task.fetch_description)) { misses += 1; continue; }
+    const last = tasks.findIndex((task) => task.task_id === state.lastTaskBySource[source]);
+    for (let offset = 1; offset <= tasks.length; offset += 1) {
+      const task = tasks[(last + offset) % tasks.length]!;
+      if (task.fetch_description) continue;
+      task.fetch_description = true;
+      state.lastTaskBySource[source] = task.task_id;
+      state.lastSource = source;
+      allocated += 1;
+      misses = 0;
+      break;
+    }
   }
+  return state;
 }
 
 function slug(value: string): string {

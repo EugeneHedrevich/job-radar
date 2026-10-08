@@ -1,5 +1,6 @@
 import type { AppConfig } from '../config/index.js';
 import { normalizeText } from '../util/text.js';
+import { deterministicGapEvidence, educationUncertainty, unknownSkillRequirements } from './evidence.js';
 import {
   detectEngagement,
   detectWorkMode,
@@ -91,8 +92,8 @@ function scoreTechnical(config: AppConfig, text: JobText): TechnicalResult {
   }
 
   const titleIsRelevant =
-    /\bsap\b/.test(text.title) &&
-    /\b(btp|cap|capm|cpi|integration suite|ui5|fiori|architect|ai|cloud)\b/.test(text.title);
+    /\b(?:sap|sapui5|fiori)\b/.test(text.all) &&
+    /\b(btp|cap|capm|cpi|integration suite|sapui5|ui5|fiori|joule|architect|ai|cloud)\b/.test(text.title);
   if (titleIsRelevant) total = Math.max(total, config.scoring.technical.relevant_title_floor);
 
   return { score: clamp(total, config.scoring.technical.max), matches: [...new Set(matches)] };
@@ -246,7 +247,8 @@ export function assessWithRules(config: AppConfig, job: MatchableJob): Assessmen
     technical.score * weights.technical + commercial.score * weights.commercial + location.score * weights.location,
   );
 
-  const missingInformation = [...commercial.missing, ...location.missing, ...gaps.unclear];
+  const missingInformation = [...commercial.missing, ...location.missing, ...gaps.unclear,
+    ...educationUncertainty(config, job), ...unknownSkillRequirements(config, job)];
   if (!text.hasDescription) {
     missingInformation.unshift('full description was not retrieved - assessment is based on the title only');
     fitScore = Math.min(fitScore, config.scoring.uncertainty.cap_without_description);
@@ -284,6 +286,7 @@ export function assessWithRules(config: AppConfig, job: MatchableJob): Assessmen
     locationFit: location.score,
     strongMatches: technical.matches.slice(0, 12),
     mandatoryGaps,
+    mandatoryGapEvidence: deterministicGapEvidence(config, job),
     preferredGaps: gaps.preferredGaps,
     missingInformation,
     explanation,

@@ -6,6 +6,7 @@ import type { CollectorJob } from '../src/collector/types.js';
 import { ingestJobs } from '../src/persist/ingest.js';
 import { notify } from '../src/pipeline/notify.js';
 import { rank } from '../src/pipeline/rank.js';
+import { directionCounters } from '../src/pipeline/coverage.js';
 import { assessWithLlm } from '../src/matching/llm.js';
 import type { NotificationPayload } from '../src/notify/format.js';
 import { closeTempDb, useTempDb } from './helpers/db.js';
@@ -27,11 +28,12 @@ function sender() {
   return { send: vi.fn(async (_payload: NotificationPayload) => ({ ok: true, messageId: 42, retryable: false })) };
 }
 
-function llmResponse(recommendation = 'Apply', fitScore = 95) {
+function llmResponse(recommendation = 'Apply', fitScore = 95, overrides: Record<string, unknown> = {}) {
   return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({
     fit_score: fitScore, recommendation, technical_fit: 95, commercial_fit: 95, location_fit: 95,
     strong_matches: ['CAP'], mandatory_gaps: [], preferred_gaps: [], missing_information: [],
     explanation: 'Mock assessment', suggested_cv_variant: loadConfig().cvVariants.default,
+    ...overrides,
   }) } }] }), { status: 200 });
 }
 
@@ -278,6 +280,155 @@ describe('overlapping notification runs', () => {
 });
 
 describe('LLM request budget and refreshed evaluations', () => {
+  it('counts current LLM and notification eligibility without using obsolete assessments', async () => {
+    await ingest();
+    enableLlm(1);
+    const request = vi.fn(async () => llmResponse());
+    vi.stubGlobal('fetch', request);
+    await rank();
+    expect((await directionCounters()).find((row) => row.direction === 'CAP/CAPM'))
+      .toMatchObject({ collected: 1, described: 1, prescreened: 1, llm: 1, notify: 1 });
+    await ingest({ description: `${strong.description}\nClient project changed.` });
+    expect((await directionCounters()).find((row) => row.direction === 'CAP/CAPM'))
+      .toMatchObject({ collected: 1, described: 1, prescreened: 1, llm: 0, notify: 0 });
+    expect(request).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ['unknown diploma level', 'A bachelor degree is mandatory.', 'education.0.qualification', 'unknown'],
+    ['unlisted skill', 'SuccessFactors integration is mandatory.', 'skills.integration.99.proficiency', 'absent'],
+    ['unrelated known skill', 'SuccessFactors integration is mandatory.', 'skills.core.1.proficiency', 'expert'],
+    ['experience floor', 'At least 10 years of SAP experience is required.', 'identity.years_of_sap_experience', '7'],
+    ['education alternatives', 'A degree in Computer Science or a related field is mandatory.', 'education.0.field', 'Chemical Engineering'],
+    ['unconfirmed additional degree', 'A degree in Computer Science is mandatory.', 'education.0.field', 'Chemical Engineering'],
+  ])('uses a rules fallback with uncertainty for %s instead of accepting an unsupported AI gap', async (_case, quote, path, value) => {
+    await ingest({ description: `${strong.description}\n${quote}` });
+    enableLlm(1);
+    const request = vi.fn(async () => llmResponse('Skip', 20, { mandatory_gaps: [{
+      requirement: quote, vacancy_quote: quote, profile_path: path, profile_value: value,
+    }] }));
+    vi.stubGlobal('fetch', request);
+    const [result] = await rank();
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(result!.assessment.engine).toBe('rules');
+    expect(result!.assessment.hardReject).toBe(false);
+    expect(result!.assessment.mandatoryGaps).toEqual([]);
+    expect(result!.assessment.missingInformation.join(' ')).toMatch(/AI assessment uncertainty/);
+    expect(result!.assessment.recommendation).toBe('Review');
+    expect(await queryOne(SELECT.from(db().Assessments))).toMatchObject({ engine: 'rules' });
+  });
+
+  it('retains unknown education when the model omits it and does not invent a degree gap', async () => {
+    await ingest({ description: `${strong.description}\nA bachelor degree is mandatory.` });
+    enableLlm(1);
+    loadConfig().profile.education = [];
+    vi.stubGlobal('fetch', vi.fn(async () => llmResponse()));
+    const [result] = await rank();
+    expect(result!.assessment.engine).toBe('llm');
+    expect(result!.assessment.mandatoryGaps).toEqual([]);
+    expect(result!.assessment.missingInformation.join(' ')).toMatch(/education is not stated/);
+  });
+
+  it('reports an unlisted mandatory skill even when the model omits uncertainty', async () => {
+    await ingest({ description: `${strong.description}\nMust have CAP, SuccessFactors integration.` });
+    enableLlm(1);
+    vi.stubGlobal('fetch', vi.fn(async () => llmResponse()));
+    const [result] = await rank();
+    expect(result!.assessment.mandatoryGaps).toEqual([]);
+    expect(result!.assessment.missingInformation.join(' ')).toMatch(/required capability "successfactors integration"/);
+  });
+
+  it('does not use a neighboring preferred proficiency as proof of a mandatory skill gap', async () => {
+    const quote = 'Expert SAPUI5 is preferred, basic ABAP is mandatory.';
+    await ingest({ description: `${strong.description}\n${quote}` });
+    enableLlm(1);
+    vi.stubGlobal('fetch', vi.fn(async () => llmResponse('Skip', 20, { mandatory_gaps: [{
+      requirement: 'expert ABAP', vacancy_quote: quote, profile_path: 'skills.limited.0.proficiency', profile_value: 'basic',
+    }] })));
+    const [result] = await rank();
+    expect(result!.assessment.engine).toBe('rules');
+    expect(result!.assessment.mandatoryGaps).toEqual([]);
+    expect(result!.assessment.missingInformation.join(' ')).toMatch(/AI assessment uncertainty/);
+  });
+
+  it.each([
+    ['invented quotation', 'ABAP OO development is mandatory.', 'ABAP OO development is mandatory and 20 years are required.', 'not_claimed.1', 'ABAP OO development'],
+    ['preferred requirement', 'ABAP OO development is preferred.', 'ABAP OO development is preferred.', 'not_claimed.1', 'ABAP OO development'],
+    ['negated requirement', 'ABAP OO development is not required.', 'ABAP OO development is not required.', 'not_claimed.1', 'ABAP OO development'],
+    ['incorrect profile fact', 'ABAP OO development is mandatory.', 'ABAP OO development is mandatory.', 'not_claimed.1', 'expert ABAP'],
+  ])('rejects %s and preserves deterministic constraints in the fallback', async (_case, actual, quote, path, value) => {
+    await ingest({ description: `${strong.description}\n${actual}\nOnsite attendance is required, at least three days per week.` });
+    enableLlm(1);
+    const request = vi.fn(async () => llmResponse('Apply', 99, { mandatory_gaps: [{
+      requirement: 'ABAP OO development', vacancy_quote: quote, profile_path: path, profile_value: value,
+    }] }));
+    vi.stubGlobal('fetch', request);
+    const job = await queryOne<any>(SELECT.from(db().Jobs));
+    const result = await assessWithLlm(loadConfig(), job);
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(result.engine).toBe('rules');
+    expect(result.hardReject).toBe(true);
+    expect(result.recommendation).toBe('Skip');
+    expect(result.hardRejectReason).toMatch(/12\.0 days\//);
+    expect(result.missingInformation.join(' ')).toMatch(/AI assessment uncertainty/);
+  });
+
+  it('persists verified structured evidence for an explicitly unclaimed mandatory skill', async () => {
+    const quote = 'ABAP OO development is mandatory.';
+    await ingest({ description: `${strong.description}\n${quote}` });
+    enableLlm(1);
+    vi.stubGlobal('fetch', vi.fn(async () => llmResponse('Apply', 95, { mandatory_gaps: [{
+      requirement: 'ABAP OO development', vacancy_quote: quote, profile_path: 'not_claimed.1', profile_value: 'ABAP OO development',
+    }] })));
+    const [result] = await rank();
+    expect(result!.assessment.engine).toBe('llm');
+    expect(result!.assessment.recommendation).toBe('Review');
+    expect(result!.assessment.mandatoryGapEvidence).toContainEqual({
+      requirement: 'ABAP OO development', vacancyQuote: quote, profilePath: 'not_claimed.1', profileValue: 'ABAP OO development',
+    });
+    const [cached] = await rank();
+    expect(cached!.cached).toBe(true);
+    expect(cached!.assessment.mandatoryGapEvidence).toEqual(result!.assessment.mandatoryGapEvidence);
+  });
+
+  it('accepts a confirmed insufficient skill level without treating other unlisted skills as absent', async () => {
+    const quote = 'Expert ABAP knowledge is mandatory.';
+    await ingest({ description: `${strong.description}\n${quote}` });
+    enableLlm(1);
+    vi.stubGlobal('fetch', vi.fn(async () => llmResponse('Apply', 95, { mandatory_gaps: [{
+      requirement: 'expert ABAP', vacancy_quote: quote, profile_path: 'skills.limited.0.proficiency', profile_value: 'basic',
+    }] })));
+    const [result] = await rank();
+    expect(result!.assessment.engine).toBe('llm');
+    expect(result!.assessment.mandatoryGaps).toContain('expert ABAP');
+    expect(result!.assessment.recommendation).toBe('Review');
+  });
+
+  it('accepts a known insufficient qualification level with verified evidence', async () => {
+    const quote = "A master's degree is mandatory.";
+    await ingest({ description: `${strong.description}\n${quote}` });
+    enableLlm(1);
+    loadConfig().profile.education = [{ field: 'Chemical Engineering', qualification: 'Bachelor' }];
+    vi.stubGlobal('fetch', vi.fn(async () => llmResponse('Apply', 95, { mandatory_gaps: [{
+      requirement: 'master degree', vacancy_quote: quote, profile_path: 'education.0.qualification', profile_value: 'Bachelor',
+    }] })));
+    const [result] = await rank();
+    expect(result!.assessment.engine).toBe('llm');
+    expect(result!.assessment.mandatoryGaps).toContain('master degree');
+    expect(result!.assessment.recommendation).toBe('Review');
+  });
+
+  it('falls back once for the old unstructured mandatory-gap response format', async () => {
+    await ingest();
+    enableLlm(1);
+    const request = vi.fn(async () => llmResponse('Skip', 20, { mandatory_gaps: ['candidate lacks an unlisted degree'] }));
+    vi.stubGlobal('fetch', request);
+    const [result] = await rank();
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(result!.assessment.engine).toBe('rules');
+    expect(result!.assessment.missingInformation.join(' ')).toMatch(/structured requirement evidence/);
+  });
+
   it('includes declared education in the model input without inventing a diploma level', async () => {
     await ingest();
     enableLlm(1);

@@ -153,6 +153,7 @@ prescreen:
   # At least one of these must appear in the title or description.
   require_any:
     - "\\bsap\\b"
+    - "\\bsapui5\\b"
     - "s/?4 ?hana"
     - "\\bbtp\\b"
     - "\\babap\\b"
@@ -178,6 +179,7 @@ prescreen:
     - "ui5"
     - "fiori"
     - "cloud"
+    - "joule"
 
 # Phrases used to detect contract vs permanent and remote vs onsite when the
 # structured fields from the source are missing.

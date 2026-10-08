@@ -143,6 +143,7 @@ describe('notification formatting', () => {
         locationFit: 50,
         strongMatches: ['CAP', 'UI5'],
         mandatoryGaps: ['industry experience requires review'],
+        mandatoryGapEvidence: [],
         preferredGaps: [],
         missingInformation: ['rate not stated'],
         explanation: 'test',

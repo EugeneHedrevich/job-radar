@@ -4,7 +4,7 @@ import contextlib
 import io
 import json
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest.mock import Mock, patch
 
 import requests
@@ -166,6 +166,53 @@ class AgencyAdaptersTest(unittest.TestCase):
     def test_job_urls_cannot_request_another_host(self):
         with self.assertRaises(ValueError):
             sap_sources.safe_url("redglobal", "https://other.example/jobs/123")
+
+    def test_refills_after_first_five_details_reveal_old_or_expired_jobs(self):
+        today = datetime.now(timezone.utc).date()
+        stale = (today - timedelta(days=30)).isoformat()
+        fresh = today.isoformat()
+        candidates = [{"job_url": f"https://www.whitehallresources.com/job/{i}",
+                       "id": str(i), "title": "SAP CAP", "date_posted": None} for i in range(6)]
+        details = [posting(datePosted=stale) for _ in range(3)] + \
+                  [posting(datePosted=fresh, validThrough=stale) for _ in range(2)] + \
+                  [posting(datePosted=fresh)]
+        with patch("sap_sources.search_html", return_value="html"), \
+             patch("sap_sources.parse_search", return_value=(candidates, False)), \
+             patch("sap_sources.detail_html", side_effect=details) as request:
+            rows, failure = sap_sources.scrape_agency({"site_name": ["whitehall"], "results_wanted": 5,
+                                                       "fetch_description": True})
+        self.assertIsNone(failure)
+        self.assertEqual([row["id"] for row in rows], ["5"])
+        self.assertEqual(request.call_count, 6)
+
+    def test_refills_across_pages_but_never_exceeds_detail_request_limit(self):
+        stale = (datetime.now(timezone.utc).date() - timedelta(days=30)).isoformat()
+        candidates = [{"job_url": f"https://www.whitehallresources.com/job/{i}",
+                       "id": str(i), "title": "SAP CAP", "date_posted": None}
+                      for i in range(sap_sources.MAX_DETAIL_REQUESTS_PER_TASK + 5)]
+        with patch("sap_sources.search_html", return_value="html") as search, \
+             patch("sap_sources.parse_search", side_effect=[(candidates[:5], True), (candidates[5:], True)]), \
+             patch("sap_sources.detail_html", return_value=posting(datePosted=stale)) as detail:
+            rows, failure = sap_sources.scrape_agency({"site_name": ["whitehall"], "results_wanted": 5,
+                                                       "fetch_description": True})
+        self.assertEqual(rows, [])
+        self.assertIsNone(failure)
+        self.assertEqual(search.call_count, 2)
+        self.assertEqual(detail.call_count, sap_sources.MAX_DETAIL_REQUESTS_PER_TASK)
+
+    def test_listing_dates_and_duplicate_urls_do_not_spend_detail_budget(self):
+        today = datetime.now(timezone.utc).date()
+        row = {"job_url": "https://www.whitehallresources.com/job/1", "id": "1", "title": "SAP CAP"}
+        old = {**row, "job_url": "https://www.whitehallresources.com/job/old",
+               "date_posted": (today - timedelta(days=30)).isoformat()}
+        with patch("sap_sources.search_html", return_value="html"), \
+             patch("sap_sources.parse_search", return_value=([old, row, row], False)), \
+             patch("sap_sources.detail_html", return_value=posting(datePosted=today.isoformat())) as request:
+            rows, failure = sap_sources.scrape_agency({"site_name": ["whitehall"], "results_wanted": 5,
+                                                       "fetch_description": True})
+        self.assertIsNone(failure)
+        self.assertEqual(len(rows), 1)
+        request.assert_called_once()
 
 
 if __name__ == "__main__":

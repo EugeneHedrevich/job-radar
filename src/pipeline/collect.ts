@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { loadConfig } from '../config/index.js';
 import { activeCooldowns, recordOutcomes } from '../collector/health.js';
 import { planBatch, type PlanOptions } from '../collector/plan.js';
+import { reserveBatchPlan } from '../collector/rotation.js';
 import { runCollector } from '../collector/run.js';
 import type { CollectorJob, CollectorTask, TaskOutcome } from '../collector/types.js';
 import { cds, db, INSERT, UPDATE } from '../db/index.js';
@@ -32,7 +33,9 @@ export async function collect(options: CollectOptions = {}): Promise<CollectSumm
 
   const cooldowns = await activeCooldowns(startedAt);
   const skipSources = new Map([...cooldowns, ...(options.skipSources ?? new Map())]);
-  const plan = planBatch(config, { ...options, skipSources });
+  const plan = options.fixture
+    ? planBatch(config, { ...options, skipSources })
+    : await reserveBatchPlan(config, { ...options, skipSources });
 
   await cds.run(
     INSERT.into(db().CollectionRuns).entries({

@@ -34,7 +34,7 @@ export function assessmentCacheKey(
   engine: 'rules' | 'llm',
 ): string {
   return sha256(JSON.stringify({
-    revision: 6,
+    revision: 7,
     job: {
       ID: job.ID, title: job.title, company: job.company,
       location: job.location, locationCountry: job.locationCountry,
@@ -128,6 +128,7 @@ export async function rank(options: RankOptions = {}): Promise<RankedJob[]> {
       llmBudget -= 1;
       try {
         assessment = await assessWithLlm(config, job);
+        engine = assessment.engine;
       } catch (error) {
         // Stop further calls for this run when the provider is failing.
         llmBudget = 0;
@@ -169,6 +170,7 @@ async function storeAssessment(jobId: string, cacheKey: string, assessment: Asse
     locationFit: assessment.locationFit,
     strongMatches: JSON.stringify(assessment.strongMatches),
     mandatoryGaps: JSON.stringify(assessment.mandatoryGaps),
+    mandatoryGapEvidence: JSON.stringify(assessment.mandatoryGapEvidence),
     preferredGaps: JSON.stringify(assessment.preferredGaps),
     missingInformation: JSON.stringify(assessment.missingInformation),
     explanation: assessment.explanation,
@@ -205,6 +207,7 @@ export function rowToAssessment(row: any): AssessmentResult {
     locationFit: row.locationFit,
     strongMatches: parseList(row.strongMatches),
     mandatoryGaps: parseList(row.mandatoryGaps),
+    mandatoryGapEvidence: parseEvidence(row.mandatoryGapEvidence),
     preferredGaps: parseList(row.preferredGaps),
     missingInformation: parseList(row.missingInformation),
     explanation: row.explanation ?? '',
@@ -212,4 +215,13 @@ export function rowToAssessment(row: any): AssessmentResult {
     hardReject: Boolean(row.hardReject),
     hardRejectReason: row.hardRejectReason ?? null,
   };
+}
+
+function parseEvidence(value: string | null): AssessmentResult['mandatoryGapEvidence'] {
+  if (!value) return [];
+  try {
+    const parsed: unknown = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed.filter((item) => item &&
+      ['requirement', 'vacancyQuote', 'profilePath', 'profileValue'].every((key) => typeof item[key] === 'string')) : [];
+  } catch { return []; }
 }

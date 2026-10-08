@@ -119,7 +119,7 @@ ranking still makes OpenAI requests when enabled. This also applies to `cycle` a
 with `--dry-run`. `notify` reads stored assessments; its `--limit` limits notifications,
 **not AI calls**. AI requests are bounded by `llm.max_jobs_per_run`.
 
-The assessment cache revision is updated for the corrected onsite rules. A normal
+The assessment cache revision is updated for corrected matching and structured gap evidence. A normal
 `npm run rank` recalculates outdated assessments with the same five-request OpenAI budget;
 matching current assessments still use the cache. The SQLite data, older assessments,
 source cooldowns and notification history are preserved.
@@ -199,9 +199,75 @@ The existing description budget still applies: by default two search tasks per r
 fetch full descriptions. Other results remain incomplete. To dedicate that budget to a
 particular agency, use e.g.
 `npm run collect -- --batch sap-specialists --source whitehall --results 5`.
+Description slots rotate between available sources and keyword/location tasks. The per-batch
+cursors are stored in SQLite and survive restarts, including manual repeats of the same batch.
+Disabled sources, cooldowns and `--source` exclusions consume no slots and retain their cursors.
+Demo collection does not advance the live cursors. A reservation is committed before collection,
+so a crash can advance a cursor but cannot leave an open transaction during HTTP requests.
 RED Global and Whitehall search pagination is capped at three pages; Eursap uses the first
 filtered result response from its public browser search. HTTP failures and access challenges
 are reported to the existing cooldown mechanism; they are not successful empty searches.
+Agency searches check the next candidates after details reveal an expired or old listing,
+until the requested count is reached, pages end, or **10 detail requests per task** are spent.
+The 20-second HTTP timeout and source/process timeouts still apply. A detail request failure
+retains the listing identity, reports failure and stops further requests for that task.
+
+### Priority coverage and initial backfill
+
+Actual `rotation.batches` now contain small, interleaved searches for all six sources:
+
+| Direction | Batches |
+| --------- | ------- |
+| CAP / CAPM | `cap-broad`, `cap-roles`, `cap-contracts` |
+| SAPUI5 / Fiori | `ui5-broad`, `ui5-fiori`, `ui5-roles`, `ui5-contracts` |
+| Joule | `joule-broad`, `joule-roles`, `joule-contracts` |
+| BTP AI | `btp-ai-broad`, `btp-ai-hub`, `btp-ai-roles`, `btp-ai-contracts` |
+
+Broad searches include SAP CAP, SAP CAPM, SAP Cloud Application Programming Model,
+SAPUI5, SAP UI5, SAP Fiori, Fiori Elements, SAP Joule, Joule Studio, SAP Business AI,
+SAP AI Core, SAP Generative AI Hub and SAP BTP AI. Other batches add Developer,
+Consultant, Architect and separate freelance / contract / B2B queries. Broad queries
+remain in use; engagement is still evaluated after collection.
+
+Each priority batch uses two or three queries and one geography per source, producing
+12 or 18 tasks. Every configured task fits; later sources and keywords are not cut off.
+The 14 priority batches plus five existing batches form a **19-cycle / 57-hour** rotation
+at the current three-hour schedule. Starting from `cap-broad`, the first four priority
+batches cover every direction on all six sources; all phrase variants are searched within one full rotation,
+when sources are enabled and not cooling down. This is a bound on searches, not on job
+availability or complete description coverage. The two description slots advance on
+repeated runs of each batch instead of increasing request volume.
+
+For the first manual backfill, use a **7–14 day window** (`--hours 168` or `--hours 336`)
+and a small `--results` value. For example, run these separately and inspect their counters:
+
+```bash
+npm run collect -- --batch cap-broad --hours 336 --results 5
+npm run collect -- --batch ui5-broad --hours 336 --results 5
+npm run collect -- --batch ui5-fiori --hours 336 --results 5
+npm run collect -- --batch joule-broad --hours 336 --results 5
+npm run collect -- --batch btp-ai-broad --hours 336 --results 5
+npm run collect -- --batch btp-ai-hub --hours 336 --results 5
+npm run rank
+npm run notify -- --dry-run --limit 3
+```
+
+Use the other batch keys above for role and engagement variants. Repeating a batch advances
+its description rotation. Each invocation still allows at most **18 searches, two tasks
+with descriptions, five OpenAI requests and three Telegram notifications**. Several invocations
+multiply those budgets; `rank --limit` controls printed items, not OpenAI requests.
+`--hours` only changes that manual collection: regular `watch` keeps the **96-hour** window.
+The commands contact live sources/OpenAI; the final dry run only prevents Telegram delivery.
+
+`collect`, `rank`, `notify` and `status` print a compact table for CAP/CAPM, UI5/Fiori, Joule
+and BTP AI: collected unique jobs, descriptions available, prescreen passes, valid current
+LLM assessments, and jobs eligible for notification. `collect` scopes the table to that run;
+the others show all stored live jobs. LLM counts include cached assessments and are not a
+request counter. Sent jobs, active delivery claims and exhausted retries are excluded from
+notification-ready counts; the per-run Telegram cap still applies. A vacancy may count in
+several directions. Missing descriptions are visible before ranking rather than counted
+as a failed LLM request. SAP Joule titles retain relevance, while generic AI/Joule titles
+without SAP context fail prescreen.
 
 ## 4. Configuration
 
@@ -226,6 +292,7 @@ Key behaviours driven by configuration:
   fetch full descriptions (one extra HTTP request per job, and the fastest way to get
   blocked). A job without a description stays incomplete: it is shown and can be reviewed,
   but it is never given an invented assessment and can never be recommended `Apply`.
+  Persistent per-batch source and keyword/location cursors distribute those slots fairly.
 * **Scoring** — `weights` must sum to 1.0. Bumping `profile.version` or `scoring.version`
   invalidates every cached assessment.
 
@@ -257,6 +324,16 @@ Both engines return the same structured assessment: fit score 0–100, recommend
 (`Apply` / `Review` / `Skip`), strong matches, mandatory and preferred gaps, technical,
 commercial and location fit, missing information, a short explanation and a suggested CV
 variant.
+
+AI mandatory gaps also include compact evidence: requirement, a short vacancy quotation,
+and the exact known profile fact (`profilePath` / `profileValue`) proving incompatibility.
+Quotes are checked against the original vacancy. Unlisted skills, unstated education,
+unknown diploma levels and uncertain equivalency belong in `missingInformation`, not in
+proven gaps. A stated experience floor such as 7+ years is not proof of less than 10 years.
+Malformed or unsupported model conclusions fall back to rules with explicit uncertainty,
+without another OpenAI request. Deterministic mandatory gaps, hard rejects and travel
+uncertainty remain authoritative. Assessment cache revision 7 and an additive SQLite
+migration preserve old assessments, jobs, notification history and unique indexes.
 
 Rules that always apply:
 
@@ -308,6 +385,7 @@ that run, with rules used for the remaining jobs.
 * `SourceListings` — one row per (source, listing), linked to a job.
 * `CollectionRuns`, `CollectionTasks`, `CollectionErrors` — what ran, what failed, why.
 * `SourceHealth` — per-source circuit breaker that survives restarts.
+* `DescriptionRotation` — per-batch description cursors that survive restarts.
 * `Assessments` — cached match results.
 * `Notifications` — pending / sending / sent / failed state, attempt counter, delivery claim
   and Telegram message id.

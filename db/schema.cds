@@ -100,6 +100,13 @@ entity SourceHealth {
   updatedAt           : Timestamp;
 }
 
+/** Per-batch description rotation, retained across CLI runs and restarts. */
+entity DescriptionRotation {
+  key batchKey : String(200);
+  state        : LargeString;
+  updatedAt    : Timestamp;
+}
+
 /** Result of rule-based or LLM matching. Cached by cacheKey. */
 entity Assessments : cuid {
   job                : Association to Jobs;
@@ -114,6 +121,7 @@ entity Assessments : cuid {
   locationFit        : Integer;
   strongMatches      : LargeString;          // JSON string array
   mandatoryGaps      : LargeString;          // JSON string array
+  mandatoryGapEvidence : LargeString;        // JSON array: requirement, quote, profile fact
   preferredGaps      : LargeString;          // JSON string array
   missingInformation : LargeString;          // JSON string array
   explanation        : LargeString;

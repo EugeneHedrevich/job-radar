@@ -25,6 +25,8 @@ SOURCES = {
 }
 MAX_SEARCH_PAGES = 3
 REQUEST_TIMEOUT_SECONDS = 20
+# Includes detail requests whose metadata subsequently excludes the listing.
+MAX_DETAIL_REQUESTS_PER_TASK = 10
 
 
 def text(node: Any) -> str | None:
@@ -279,6 +281,8 @@ def scrape_agency(kwargs: dict[str, Any]) -> tuple[list[dict[str, Any]], BaseExc
     rows: list[dict[str, Any]] = []
     seen: set[str] = set()
     failure: BaseException | None = None
+    fetch_description = bool(kwargs.get("fetch_description"))
+    detail_requests = 0
     for page in range(1, (1 if source == "eursap" else MAX_SEARCH_PAGES) + 1):
         try:
             candidates, more = parse_search(source, search_html(source, kwargs.get("search_term", "SAP"), page))
@@ -291,21 +295,22 @@ def scrape_agency(kwargs: dict[str, Any]) -> tuple[list[dict[str, Any]], BaseExc
             seen.add(row["job_url"])
             if row.get("date_posted") and date.fromisoformat(row["date_posted"]) < cutoff:
                 continue
+            if fetch_description:
+                if detail_requests >= MAX_DETAIL_REQUESTS_PER_TASK:
+                    return rows, failure
+                detail_requests += 1
+                try:
+                    row = hydrate(source, row, detail_html(row["job_url"]), kwargs.get("description_format", "markdown"))
+                except Exception as exc:
+                    # Retain the identity, report the failure and stop requests.
+                    rows.append(row)
+                    return rows, exc
+                if row.pop("_expired", False) or (row.get("date_posted") and
+                        date.fromisoformat(row["date_posted"]) < cutoff):
+                    continue
             rows.append(row)
             if len(rows) >= wanted:
                 break
-        if len(rows) >= wanted or not more:
+        if len(rows) >= wanted or not more or (fetch_description and detail_requests >= MAX_DETAIL_REQUESTS_PER_TASK):
             break
-    if failure or not kwargs.get("fetch_description"):
-        return rows, failure
-    for index, row in enumerate(rows):
-        try:
-            rows[index] = hydrate(source, row, detail_html(row["job_url"]), kwargs.get("description_format", "markdown"))
-        except Exception as exc:
-            # Preserve collected identities while explicitly reporting a failed
-            # detail request to the existing circuit breaker.
-            failure = exc
-            break
-    rows = [row for row in rows if not row.pop("_expired", False) and
-            (not row.get("date_posted") or date.fromisoformat(row["date_posted"]) >= cutoff)]
     return rows, failure

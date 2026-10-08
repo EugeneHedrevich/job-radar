@@ -1,5 +1,12 @@
 export type Recommendation = 'Apply' | 'Review' | 'Skip';
 
+export interface MandatoryGapEvidence {
+  requirement: string;
+  vacancyQuote: string;
+  profilePath: string;
+  profileValue: string;
+}
+
 export interface AssessmentResult {
   engine: 'rules' | 'llm';
   model: string | null;
@@ -11,6 +18,7 @@ export interface AssessmentResult {
   locationFit: number;
   strongMatches: string[];
   mandatoryGaps: string[];
+  mandatoryGapEvidence: MandatoryGapEvidence[];
   preferredGaps: string[];
   missingInformation: string[];
   explanation: string;

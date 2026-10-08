@@ -15,6 +15,7 @@ export interface Entities {
   CollectionTasks: any;
   CollectionErrors: any;
   SourceHealth: any;
+  DescriptionRotation: any;
   Assessments: any;
   Notifications: any;
 }
@@ -63,12 +64,22 @@ export async function connectDb(dbPathOverride?: string): Promise<any> {
       await tx.run('UPDATE sap_jobradar_Jobs SET ID = ID WHERE 0 = 1');
       await ensureDemoProvenance(tx);
       await ensureNotificationClaims(tx);
+      await ensureMatchingState(tx);
       await ensureIndexes(tx);
     });
     entities = cds.entities(NAMESPACE) as unknown as Entities;
     return db;
   })();
   return dbPromise;
+}
+
+async function ensureMatchingState(connection: any): Promise<void> {
+  await connection.run(`CREATE TABLE IF NOT EXISTS sap_jobradar_DescriptionRotation
+    (batchKey VARCHAR(200) PRIMARY KEY NOT NULL, state TEXT, updatedAt TIMESTAMP)`);
+  const columns: Array<{ name: string }> = await connection.run('PRAGMA table_info(sap_jobradar_Assessments)');
+  if (!columns.some((column) => column.name === 'mandatoryGapEvidence')) {
+    await connection.run('ALTER TABLE sap_jobradar_Assessments ADD COLUMN mandatoryGapEvidence TEXT');
+  }
 }
 
 async function ensureNotificationClaims(connection: any): Promise<void> {
