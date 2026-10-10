@@ -86,7 +86,7 @@ def hydrate_board(source: str, row: dict[str, Any], description_format: str) -> 
                        interval=compensation.interval.value if compensation.interval else None,
                        currency=compensation.currency, salary_source=SalarySource.DIRECT_DATA.value)
     updated["date_posted"] = published_date(posting.get("datePosted")) or updated.get("date_posted")
-    return observe(updated, "active", "Public listing detail contains a description")
+    return observe(updated, "active", "Public listing detail contains a description", valid_through=posting.get("validThrough"))
 
 
 def enrich_board(source: str, rows: list[dict[str, Any]], kwargs: dict[str, Any]) -> tuple[list[dict[str, Any]], BaseException | None]:
@@ -102,7 +102,7 @@ def enrich_board(source: str, rows: list[dict[str, Any]], kwargs: dict[str, Any]
     failure: BaseException | None = None
     for row in candidates:
         url = row.get("job_url")
-        if not url or url in seen or row.get("description"):
+        if not url or url in seen or row.get("description") and not row.get("activity_refresh"):
             continue
         seen.add(url)
         if requests_used >= limit:
@@ -117,7 +117,7 @@ def enrich_board(source: str, rows: list[dict[str, Any]], kwargs: dict[str, Any]
                 failure = failure or exc
                 continue
             return [item for item in result if item is not None], exc
-        if updated.get("activity_status") != "closed" and (updated.get("date_posted") and date.fromisoformat(str(updated["date_posted"])[:10]) < cutoff):
+        if not row.get("activity_refresh") and updated.get("activity_status") != "closed" and (updated.get("date_posted") and date.fromisoformat(str(updated["date_posted"])[:10]) < cutoff):
             # Old datePosted only filters freshness; it never closes a listing.
             if url in positions:
                 result[positions[url]] = None

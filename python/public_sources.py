@@ -208,7 +208,7 @@ def hydrate(source: str, row: dict[str, Any], html: str, description_format: str
     required_location = applicant_location(posting)
     if required_location:
         updated["description"] = f"Candidate required location: {required_location}\n\n" + updated["description"]
-    return observe(updated, "active", "Public listing detail contains a description")
+    return observe(updated, "active", "Public listing detail contains a description", valid_through=posting.get("validThrough"))
 
 
 def api_url(source: str, keyword: str, page: int) -> str:
@@ -266,9 +266,9 @@ def parse_api(source: str, payload: Any, keyword: str, description_format: str) 
         if source == "jobicy":
             row["description"] = f"Candidate required location: {place or 'not stated'}\n\n" + row["description"]
         if expired(record.get("validThrough")):
-            rows.append(observe(row, "closed", f"validThrough: {record['validThrough']}", "valid_through"))
+            rows.append(observe(row, "closed", f"validThrough: {record['validThrough']}", "valid_through", record['validThrough']))
         else:
-            rows.append(observe(row, "active", "Public API returned the listing with a description"))
+            rows.append(observe(row, "active", "Public API returned the listing with a description", valid_through=record.get("validThrough")))
     more = source == "arbeitnow" and bool(payload.get("links", {}).get("next"))
     return rows, more
 
@@ -288,7 +288,7 @@ def scrape_public(kwargs: dict[str, Any]) -> tuple[list[dict[str, Any]], BaseExc
         if row.get("activity_status") == "closed":
             closures.append(row)
             return False
-        return not (row.get("date_posted") and row["date_posted"] < cutoff)
+        return row.get("activity_refresh") or not (row.get("date_posted") and row["date_posted"] < cutoff)
     def detail(row: dict[str, Any]) -> dict[str, Any]:
         nonlocal detail_requests
         detail_requests += 1

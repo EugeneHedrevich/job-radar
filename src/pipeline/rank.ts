@@ -6,7 +6,7 @@ import { assessWithRules, prescreen } from '../matching/rules.js';
 import type { AssessmentResult, MatchableJob } from '../matching/types.js';
 import { normalizeText, sha256 } from '../util/text.js';
 import { log } from '../util/log.js';
-import { closedJobIds, isJobClosed } from '../persist/activity.js';
+import { closedJobIds, expireListingDeadlines, isJobClosed } from '../persist/activity.js';
 import { aiPriority, completeAiAttempt, synchronizeAiQueue } from './ai-queue.js';
 
 export interface RankedJob {
@@ -38,7 +38,7 @@ export function assessmentCacheKey(
   engine: 'rules' | 'llm',
 ): string {
   return sha256(JSON.stringify({
-    revision: 13,
+    revision: 14,
     job: {
       ID: job.ID, title: job.title, company: job.company,
       location: job.location, locationCountry: job.locationCountry,
@@ -71,6 +71,7 @@ export async function findCurrentAssessment(config: AppConfig, job: MatchableJob
 }
 
 export async function rank(options: RankOptions = {}): Promise<RankedJob[]> {
+  await expireListingDeadlines();
   if (options.jobIds && options.jobIds.length === 0 && !options.includePendingAi) return [];
   const config = loadConfig();
   const { Jobs, Assessments } = db();

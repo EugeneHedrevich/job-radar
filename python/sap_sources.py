@@ -292,7 +292,7 @@ def hydrate(source: str, row: dict[str, Any], html: str, description_format: str
                     pass
             if "min_amount" in row or "max_amount" in row:
                 row.update(interval=interval, currency=salary.get("currency"))
-    return observe(row, "active", "Public listing detail contains a description")
+    return observe(row, "active", "Public listing detail contains a description", valid_through=posting.get("validThrough"))
 
 
 def hydrate_detail(source: str, row: dict[str, Any], description_format: str) -> dict[str, Any]:
@@ -328,7 +328,7 @@ def scrape_agency(kwargs: dict[str, Any]) -> tuple[list[dict[str, Any]], BaseExc
             if updated.get("activity_status") == "closed":
                 closures.append(updated)
                 continue
-            if updated.get("date_posted") and date.fromisoformat(updated["date_posted"]) < cutoff:
+            if not row.get("activity_refresh") and updated.get("date_posted") and date.fromisoformat(updated["date_posted"]) < cutoff:
                 continue
             enriched.append(updated)
     if kwargs.get("enrich_only"):

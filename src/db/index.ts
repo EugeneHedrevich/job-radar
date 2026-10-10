@@ -87,6 +87,7 @@ async function ensureMatchingState(connection: any): Promise<void> {
   for (const [name, type] of [
     ['activityState', "VARCHAR(20) DEFAULT 'Unknown'"], ['activityCheckedAt', 'TIMESTAMP'],
     ['closureReason', 'VARCHAR(50)'], ['activityEvidence', 'VARCHAR(2000)'],
+    ['activityAttemptedAt', 'TIMESTAMP'], ['validThrough', 'TIMESTAMP'],
   ]) {
     if (!listingColumns.some((column) => column.name === name)) {
       await connection.run(`ALTER TABLE sap_jobradar_SourceListings ADD COLUMN ${name} ${type}`);
@@ -98,6 +99,10 @@ async function ensureMatchingState(connection: any): Promise<void> {
   await connection.run(`CREATE TABLE IF NOT EXISTS sap_jobradar_ListingActivityEvents
     (ID VARCHAR(36) PRIMARY KEY NOT NULL, listing_ID VARCHAR(36), state VARCHAR(20),
       reason VARCHAR(50), evidence VARCHAR(2000), checkedAt TIMESTAMP)`);
+  const eventColumns: Array<{ name: string }> = await connection.run('PRAGMA table_info(sap_jobradar_ListingActivityEvents)');
+  if (!eventColumns.some((column) => column.name === 'validThrough')) {
+    await connection.run('ALTER TABLE sap_jobradar_ListingActivityEvents ADD COLUMN validThrough TIMESTAMP');
+  }
   await connection.run(`CREATE TABLE IF NOT EXISTS sap_jobradar_DescriptionRotation
     (batchKey VARCHAR(200) PRIMARY KEY NOT NULL, state TEXT, updatedAt TIMESTAMP)`);
   const columns: Array<{ name: string }> = await connection.run('PRAGMA table_info(sap_jobradar_Assessments)');

@@ -47,6 +47,8 @@ entity SourceListings : cuid {
   descriptionAttemptedAt : Timestamp;
   activityState   : String(20) default 'Unknown'; // Unknown | Active | Closed
   activityCheckedAt : Timestamp;
+  activityAttemptedAt : Timestamp;
+  validThrough    : Timestamp; // exclusive expiry instant (date-only means end of UTC day)
   closureReason   : String(50);
   activityEvidence : String(2000);
   // Not named `raw`: cds.ql's UPDATE.set() treats an object with a `raw`
@@ -130,6 +132,7 @@ entity ListingActivityEvents : cuid {
   reason    : String(50);
   evidence  : String(2000);
   checkedAt : Timestamp;
+  validThrough : Timestamp;
 }
 
 /** Result of rule-based or LLM matching. Cached by cacheKey. */

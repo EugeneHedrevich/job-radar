@@ -244,8 +244,8 @@ each of the five eligible description sources a slot within three priority cycle
 (up to nine hours), when all are available. Keyword/location progress remains separate
 for each batch. Disabled sources, cooldowns and `--source` restrictions consume no slots.
 
-Selected LinkedIn and agency description tasks also reserve a small share of their existing request
-allowance for stored jobs without descriptions, independently of the active search term.
+Selected public detail tasks also reserve a small share of their existing request
+allowance for stored jobs without descriptions and stale listing activity, independently of the search term.
 Reservations persist before collection and rotate unsuccessful URLs to the queue tail.
 Public detail pages may be unavailable or blocked; those failures are reported through
 the normal circuit breaker, and incomplete jobs remain visible. Backlog and fresh search
@@ -386,9 +386,12 @@ and source attribution. Searches are bounded to three pages; feed/API availabili
 not guarantee exhaustive vacancy coverage. Regional location never proves cross-border
 eligibility, and PLN rates are never treated as EUR.
 
-`enrich` spends at most two description tasks on recently seen, relevant stored listings
-and issues no new searches. It supports LinkedIn and all five recruiter adapters; Indeed
-and the public APIs already include descriptions, and Glassdoor requires its search session.
+`enrich` spends at most two description tasks on relevant stored listings and issues no
+new searches. It supports LinkedIn, all five recruiter adapters and public API providers'
+listing pages. Full descriptions are refreshed for activity after 24 hours, even when the
+listing no longer appears in search or has an old publication date. Persisted attempts
+delay retries for 24 hours and rotate failed pages behind other work. Indeed already
+includes descriptions; Glassdoor requires its search session and has no separate URL replay.
 Bad detail markup rotates to the queue tail; rate limits, blocks and transport errors stop
 requests. LinkedIn canonical redirects must preserve the same numeric listing ID within
 validated public LinkedIn domains; login/access-challenge redirects trigger cooldown.
@@ -426,7 +429,7 @@ unknown diploma levels and uncertain equivalency belong in `missingInformation`,
 proven gaps. A stated experience floor such as 7+ years is not proof of less than 10 years.
 Malformed or unsupported model conclusions fall back to rules with explicit uncertainty,
 without another OpenAI request. Deterministic mandatory gaps, hard rejects and travel
-uncertainty remain authoritative. Assessment cache revision 13 and an additive SQLite
+uncertainty remain authoritative. Assessment cache revision 14 and an additive SQLite
 migration preserve old assessments, jobs, notification history and unique indexes.
 
 Every monitoring cycle ranks both collected jobs and stored candidates awaiting their
@@ -440,16 +443,24 @@ reassessment. `status` reports pending AI work and closed listings.
 Listing activity is separate from the user's `New`, `Interested`, `Applied` or `Ignored`
 status. Confirmed detail-page HTTP 404/410, expired `validThrough` and recognized closure
 notices become collector observations stored on `SourceListings`, with observation history.
+Future expiry dates are retained and close the listing when due without HTTP. Date-only
+deadlines expire at the end of that UTC day; timestamps require an explicit timezone.
 Old publication dates, missing search results, blocks and parse/transport failures do
 not establish closure. A job is closed only when all its listings are confirmed closed;
 an active or unknown secondary listing keeps it eligible. Closed listings are excluded
 from enrichment, and closed jobs from AI work and notification delivery. Pending
 notifications recheck stored activity immediately before sending and choose a remaining
 available source URL. This check uses persisted observations and adds no network requests.
+Activity refresh shares the existing two description slots and each provider's detail
+request allowance. Transport and markup failures retain the last observation and cooldowns.
 
 Language requirements use the actual profile language list and local mandatory/preferred
 context, including multilingual requirement headings. An optional language elsewhere
-cannot cancel another mandatory language. `professional` establishes no CEFR level.
+cannot cancel another mandatory language. Declared professional proficiency satisfies a
+professional/business requirement; fluent/native and CEFR requirements stay separate.
+Country abbreviations retain case and require geographic context, so the pronoun `us`
+does not restrict residence. Explicit exclusions precede EU/Europe/worldwide permissions
+and retain the vacancy quotation and profile fact for a confirmed contradiction.
 Basic ABAP understanding, reading and debugging remain distinct from independent ABAP
 development / ABAP OO and RAP ownership; unconfirmed basic capability requires review.
 The profile's availability is passed to the AI and explicit start/workload requirements
@@ -615,6 +626,9 @@ tests exercise the installed JobSpy implementation with mocked HTTP responses; n
 boards or Telegram messages are needed.
 Concurrency tests hold one sender open while another independent process completes,
 checking that only the claimed notification is delivered.
+Suites group matching, AI evidence, queue/cache, collection, identity, listing activity,
+notifications and migrations. Shared offline fixtures and parameterized cases retain the
+regressions without repeating provider, retry or matching setup.
 Additional regressions cover blank path overrides, comma-separated requirement markers,
 optional and unclear attendance, and concurrent migration of a database missing claim columns.
 

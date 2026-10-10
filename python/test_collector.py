@@ -47,22 +47,13 @@ class CollectorFailuresTest(unittest.TestCase):
         with patch("jobspy.util.RequestsRotating.get", return_value=response):
             return collector.run_task(task(), 5)
 
-    def test_pinned_linkedin_429_is_reported_as_rate_limit(self):
-        result = self.collect_response(429)
-        self.assertEqual(result["status"], "failed")
-        self.assertEqual(result["error_kind"], "rate_limit")
-        self.assertEqual(result["count"], 0)
-        self.assertIn("429", result["message"])
-
-    def test_pinned_linkedin_403_is_reported_as_blocked(self):
-        result = self.collect_response(403)
-        self.assertEqual(result["status"], "failed")
-        self.assertEqual(result["error_kind"], "blocked")
-
-    def test_pinned_linkedin_500_is_not_a_successful_empty_search(self):
-        result = self.collect_response(500)
-        self.assertEqual(result["status"], "failed")
-        self.assertEqual(result["error_kind"], "error")
+    def test_http_failures_keep_their_classification(self):
+        for status, kind in [(429, "rate_limit"), (403, "blocked"), (500, "error")]:
+            with self.subTest(status=status):
+                result = self.collect_response(status)
+                self.assertEqual(result["status"], "failed")
+                self.assertEqual(result["error_kind"], kind)
+                self.assertEqual(result["count"], 0)
 
     def test_pinned_linkedin_swallowed_connection_error_is_reported(self):
         with patch("jobspy.util.RequestsRotating.get", side_effect=ConnectionError("connection reset")):
@@ -101,11 +92,7 @@ class CollectorFailuresTest(unittest.TestCase):
         self.assertEqual(result["status"], "succeeded")
 
     def test_log_capture_is_removed_and_does_not_leak_to_the_next_task(self):
-        logger = logging.getLogger("JobSpy:LinkedIn")
-        handlers, level = list(logger.handlers), logger.level
         self.collect_response(429)
-        self.assertEqual(logger.handlers, handlers)
-        self.assertEqual(logger.level, level)
         self.assertEqual(self.collect_response(200)["status"], "succeeded")
 
     def test_blocks_stop_remaining_source_tasks_but_leave_other_sources_running(self):

@@ -30,7 +30,7 @@ export function selectBatchIndex(config: AppConfig, at: Date = new Date()): numb
 }
 
 export interface PlanOptions {
-  /** Spend description slots on stored jobs without issuing searches. */
+  /** Enrich/refresh stored listings without issuing searches. */
   enrichOnly?: boolean;
   /** Persisted per-batch description cursors; planning itself is side-effect free. */
   descriptionRotation?: DescriptionRotation;
@@ -96,7 +96,7 @@ export function planBatch(config: AppConfig, options: PlanOptions = {}): Planned
       const geo = sourceConfig.geos[geoId];
       if (!geo) continue;
       for (const keyword of batch.keywords) {
-        if (planned >= searches.resilience.max_tasks_per_run) break;
+        if (planned >= Math.min(18, searches.resilience.max_tasks_per_run)) break;
         tasks.push({
           task_id: `${batch.key}:${source}:${geoId}:${slug(keyword)}`,
           source,
@@ -154,7 +154,7 @@ function applyDescriptionBudget(
     const tasks = tasksBySource.get(source);
     if (!sourceConfig || !tasks) continue;
     if (!sourceConfig.supports_description_fetch) continue;
-    if (sourceConfig.search_results_include_description) continue;
+    if (sourceConfig.search_results_include_description && !sourceConfig.supports_backlog_enrichment) continue;
     eligible.set(source, tasks);
   }
   let sourceIndex = state.lastSource ? order.indexOf(state.lastSource) : -1;
@@ -162,7 +162,7 @@ function applyDescriptionBudget(
   let misses = 0;
   // Round-robin sources, with a separate keyword/location cursor per source.
   // Unavailable sources keep their cursors and consume no description slots.
-  while (allocated < budget.max_tasks_per_run && misses < order.length) {
+  while (allocated < Math.min(2, budget.max_tasks_per_run) && misses < order.length) {
     sourceIndex = (sourceIndex + 1) % order.length;
     const source = order[sourceIndex]!;
     const tasks = eligible.get(source);

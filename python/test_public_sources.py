@@ -109,11 +109,15 @@ class PublicSourcesTest(unittest.TestCase):
         }
         for source, payload in fixtures.items():
             with self.subTest(source=source):
+                records = payload if isinstance(payload, list) else payload.get("jobs", payload.get("data"))
+                for record in records:
+                    record["validThrough"] = "2099-10-11"
                 rows, more = sources.parse_api(source, payload, "SAP", "markdown")
                 self.assertFalse(more)
                 self.assertEqual(len(rows), 1)
                 self.assertEqual(rows[0]["description"].splitlines()[-1], "SAP CAP")
                 self.assertEqual(rows[0]["date_posted"], today)
+                self.assertEqual(rows[0]["valid_through"], "2099-10-12T00:00:00+00:00")
         remotive = sources.parse_api("remotive", fixtures["remotive"], "SAP", "markdown")[0][0]
         self.assertIn("Poland only", remotive["description"])
         self.assertNotIn("min_amount", remotive)

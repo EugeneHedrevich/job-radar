@@ -1,167 +1,156 @@
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { loadConfig } from '../src/config/index.js';
-import { cds, db, SELECT, UPDATE, query } from '../src/db/index.js';
-import { formatNotification } from '../src/notify/format.js';
-import type { TelegramClient, TelegramSendResult } from '../src/notify/telegram.js';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { loadConfig, resetConfigCache } from '../src/config/index.js';
+import { cds, db, query, queryOne, SELECT, UPDATE } from '../src/db/index.js';
+import { assessWithRules } from '../src/matching/rules.js';
 import { normalizeJob } from '../src/normalize/index.js';
+import { formatNotification } from '../src/notify/format.js';
 import { ingestJobs } from '../src/persist/ingest.js';
 import { notify } from '../src/pipeline/notify.js';
 import { rank } from '../src/pipeline/rank.js';
-import { closeTempDb, useTempDb } from './helpers/db.js';
-
-const STRONG_JOB = {
-  id: 'li-strong',
-  title: 'Senior SAP BTP Developer (CAP / Node.js)',
-  company: 'Northwind Cloud Consulting GmbH',
-  location: 'Remote, Germany, DE',
-  job_url: 'https://www.linkedin.com/jobs/view/4242',
-  date_posted: '2026-10-04',
-  job_type: 'contract',
-  interval: 'hourly',
-  min_amount: 60,
-  max_amount: 75,
-  currency: 'EUR',
-  is_remote: true,
-  description:
-    'Freelance engagement, 100% remote within the EU. Build CAP services with Node.js, TypeScript and CDS, expose OData V4 and deploy to Cloud Foundry with XSUAA. Must have: CAP, Node.js, SAP HANA Cloud, OData. Nice to have: SAPUI5, SAP Integration Suite.',
-};
-
-/** Telegram double whose outcome is scripted per call. */
-function scriptedClient(results: TelegramSendResult[]): TelegramClient & { calls: number } {
-  const client = {
-    calls: 0,
-    async send() {
-      const result = results[Math.min(client.calls, results.length - 1)]!;
-      client.calls += 1;
-      return result;
-    },
-  };
-  return client;
-}
-
-describe('notification lifecycle', () => {
-  beforeAll(async () => {
-    await useTempDb();
-    const normalized = [normalizeJob(STRONG_JOB as any, 'linkedin')!];
-    await ingestJobs(normalized, { runId: null });
-    await rank({ rulesOnly: true });
-  });
-  afterAll(closeTempDb);
-
-  it('records a transient failure and keeps the notification retryable', async () => {
-    const client = scriptedClient([{ ok: false, error: 'HTTP 502', retryable: true }]);
-    const summary = await notify({ client, minFitScore: 50 });
-
-    expect(summary.queued).toBe(1);
-    expect(summary.failed).toBe(1);
-    expect(summary.sent).toBe(0);
-
-    const [row] = await query<any>(SELECT.from(db().Notifications));
-    expect(row.status).toBe('Failed');
-    expect(row.attempts).toBe(1);
-    expect(row.lastError).toBe('HTTP 502');
-    expect(row.telegramMessageId).toBeNull();
-  });
-
-  it('retries the failed notification and records the Telegram message id', async () => {
-    const client = scriptedClient([{ ok: true, messageId: 987, retryable: false }]);
-    const summary = await notify({ client, minFitScore: 50 });
-
-    // Nothing new is queued - the existing notification is retried.
-    expect(summary.queued).toBe(0);
-    expect(summary.retried).toBe(1);
-    expect(summary.sent).toBe(1);
-
-    const [row] = await query<any>(SELECT.from(db().Notifications));
-    expect(row.status).toBe('Sent');
-    expect(row.attempts).toBe(2);
-    expect(row.telegramMessageId).toBe(987);
-    expect(row.sentAt).toBeTruthy();
-    expect(row.lastError).toBeNull();
-  });
-
-  it('does not notify the same job twice on a later run', async () => {
-    const client = scriptedClient([{ ok: true, messageId: 1, retryable: false }]);
-    const summary = await notify({ client, minFitScore: 50 });
-
-    expect(summary.queued).toBe(0);
-    expect(summary.sent).toBe(0);
-    expect(client.calls).toBe(0);
-    expect(await query(SELECT.from(db().Notifications))).toHaveLength(1);
-  });
-
-  it('stops retrying after a permanent error', async () => {
-    const { Notifications } = db();
-    await cds.run(
-      UPDATE(Notifications).set({ status: 'Pending', attempts: 0, telegramMessageId: null, sentAt: null }),
-    );
-
-    const permanent = scriptedClient([{ ok: false, error: 'chat not found', retryable: false }]);
-    await notify({ client: permanent, minFitScore: 50 });
-    const [row] = await query<any>(SELECT.from(Notifications));
-    expect(row.status).toBe('Failed');
-    expect(row.attempts).toBe(loadConfig().settings.telegram.max_attempts);
-
-    // A further run must not call Telegram again.
-    const next = scriptedClient([{ ok: true, messageId: 5, retryable: false }]);
-    const summary = await notify({ client: next, minFitScore: 50 });
-    expect(next.calls).toBe(0);
-    expect(summary.skipped).toBe(1);
-  });
+import { closeTempDb, resetTestDb, useTempDb } from './helpers/db.js';
+import { ingestReview as ingest, reviewJob, reviewSender as sender, reviewRecord as strong } from './helpers/review.js';
+beforeAll(useTempDb);
+beforeEach(async () => { vi.unstubAllGlobals(); resetConfigCache(); await resetTestDb(); });
+afterAll(async () => { vi.unstubAllGlobals(); resetConfigCache(); await closeTempDb(); });
+describe("current notification eligibility", () => {
+    it('does not notify a weekly onsite schedule above the configured travel limit', async () => {
+        await ingest({ description: `${strong.description}\nThree onsite days every week are required.` });
+        const [result] = await rank({ rulesOnly: true });
+        expect(result!.assessment.recommendation).toBe('Skip');
+        const client = sender();
+        expect((await notify({ client })).queued).toBe(0);
+        expect(client.send).not.toHaveBeenCalled();
+    });
+    it('holds delivery if changed job content has not been reassessed yet', async () => {
+        await ingest();
+        await rank({ rulesOnly: true });
+        await ingest({ max_amount: 15 });
+        const client = sender();
+        expect((await notify({ client })).queued).toBe(0);
+        expect(client.send).not.toHaveBeenCalled();
+    });
+    it.each(['version', 'content'])('invalidates historical assessments after a scoring %s change', async (change) => {
+        await ingest();
+        await rank({ rulesOnly: true });
+        const config = loadConfig();
+        if (change === 'version')
+            config.scoring.version = 'new-version';
+        else
+            config.scoring.hard_rejects.rules.push({ id: 'test', reason: 'New incompatibility', any: ['btp'], none: [] });
+        const client = sender();
+        expect((await notify({ client })).sent).toBe(0);
+        await rank({ rulesOnly: true });
+        const summary = await notify({ client });
+        expect(summary.sent).toBe(change === 'version' ? 1 : 0);
+    });
+    it('cancels a queued preview when the job becomes a rejection before live delivery', async () => {
+        await ingest();
+        await rank({ rulesOnly: true });
+        await notify({ dryRun: true, client: sender() });
+        await ingest({ description: `${strong.description} No freelancers accepted.` });
+        await rank({ rulesOnly: true });
+        const client = sender();
+        expect((await notify({ client })).skipped).toBe(1);
+        expect(client.send).not.toHaveBeenCalled();
+        expect(await queryOne(SELECT.from(db().Notifications))).toMatchObject({ status: 'Skipped' });
+    });
+    it('rebuilds a pending payload using current details before live delivery', async () => {
+        await ingest();
+        await rank({ rulesOnly: true });
+        await notify({ dryRun: true, client: sender() });
+        await ingest({ max_amount: 90 });
+        const [current] = await rank({ rulesOnly: true });
+        const client = sender();
+        expect((await notify({ client })).sent).toBe(1);
+        expect(client.send.mock.calls[0]?.[0]).toMatchObject({ text: expect.stringContaining('90') });
+        expect(await queryOne(SELECT.from(db().Notifications))).toMatchObject({ assessment_ID: current!.assessmentId });
+    });
+    it('does not deliver fixture previews during a later live notification run', async () => {
+        await ingest({}, 'linkedin', true);
+        await rank({ rulesOnly: true });
+        expect((await notify({ dryRun: true, client: sender() })).sent).toBe(1);
+        const client = sender();
+        expect((await notify({ client })).sent).toBe(0);
+        expect(client.send).not.toHaveBeenCalled();
+    });
+    it('can queue a previously skipped vacancy once it has a current eligible assessment again', async () => {
+        await ingest();
+        await rank({ rulesOnly: true });
+        await notify({ dryRun: true, client: sender() });
+        await ingest({ description: `${strong.description} No freelancers accepted.` });
+        await rank({ rulesOnly: true });
+        await notify({ client: sender() });
+        await ingest();
+        await rank({ rulesOnly: true });
+        expect((await notify({ client: sender() })).sent).toBe(1);
+        expect(await query(SELECT.from(db().Notifications))).toHaveLength(1);
+    });
 });
-
-describe('notification formatting', () => {
-  it('shows unknown values as unknown and never invents them', () => {
-    const config = loadConfig();
-    const message = formatNotification(
-      config,
-      {
-        ID: 'x',
-        title: 'SAP Fiori Developer',
-        company: null,
-        location: null,
-        locationCountry: null,
-        isRemote: null,
-        jobType: null,
-        salaryMin: null,
-        salaryMax: null,
-        salaryInterval: null,
-        salaryCurrency: null,
-        description: null,
-        descriptionHash: null,
-        primaryUrl: 'https://example.com/job/1',
-        datePosted: null,
-      },
-      {
-        engine: 'rules',
-        model: null,
-        profileVersion: 'test',
-        fitScore: 76,
-        recommendation: 'Review',
-        technicalFit: 70,
-        commercialFit: 50,
-        locationFit: 50,
-        strongMatches: ['CAP', 'UI5'],
-        mandatoryGaps: ['industry experience requires review'],
-        mandatoryGapEvidence: [],
-        preferredGaps: [],
-        missingInformation: ['rate not stated'],
-        explanation: 'test',
-        suggestedCvVariant: 'ui5',
-        hardReject: false,
-        hardRejectReason: null,
-      },
-      ['linkedin'],
-    );
-
-    expect(message.text).toContain('76/100 — SAP Fiori Developer');
-    expect(message.text).toContain('LinkedIn');
-    expect(message.text).toContain('Rate: not stated');
-    expect(message.text).toContain('Published: unknown');
-    expect(message.text).toContain('Company: not stated');
-    expect(message.text).toContain('Gap: industry experience requires review');
-    expect(message.text).toContain('Suggested CV: UI5/Fiori');
-    expect(message.url).toBe('https://example.com/job/1');
-    expect(message.buttonText).toBe('Open vacancy');
-  });
+describe("delivery claim recovery", () => {
+    it('recovers an expired delivery claim and counts the recovery against the attempt limit', async () => {
+        await ingest();
+        await rank({ rulesOnly: true });
+        await notify({ dryRun: true, client: sender() });
+        await cds.run(UPDATE(db().Notifications).set({
+            status: 'Sending', attempts: 1, claimToken: 'old-claim', claimUntil: '2020-01-01T00:00:00.000Z',
+        }));
+        const client = sender();
+        expect((await notify({ client })).sent).toBe(1);
+        expect(client.send).toHaveBeenCalledTimes(1);
+        expect(await queryOne(SELECT.from(db().Notifications))).toMatchObject({ status: 'Sent', attempts: 2, claimToken: null });
+    });
+    it('releases the delivery claim when the sender throws, allowing a bounded retry', async () => {
+        await ingest();
+        await rank({ rulesOnly: true });
+        const client = { send: vi.fn(async () => { throw new Error('connection reset'); }) };
+        expect((await notify({ client })).failed).toBe(1);
+        expect(await queryOne(SELECT.from(db().Notifications))).toMatchObject({ status: 'Failed', attempts: 1, claimToken: null });
+        expect((await notify({ client: sender() })).sent).toBe(1);
+    });
+});
+describe("Telegram call ceiling", () => {
+    it('limits delivery calls to three, including failures and a larger explicit limit', async () => {
+        for (let index = 0; index < 6; index++) {
+            await ingestJobs([normalizeJob({ ...strong, id: `telegram-${index}`,
+                    job_url: `https://www.linkedin.com/jobs/view/telegram-${index}` }, 'linkedin')!], { runId: null });
+        }
+        await rank({ rulesOnly: true });
+        loadConfig().settings.telegram.retry_base_delay_seconds = 0;
+        const client = { send: vi.fn(async () => ({ ok: false, retryable: true, error: 'Offline failure' })) };
+        const summary = await notify({ client, limit: 99 });
+        expect(client.send).toHaveBeenCalledTimes(3);
+        expect(summary.failed).toBe(3);
+        expect(summary.sent).toBe(0);
+    });
+});
+describe('delivery outcomes and retries', () => {
+    it.each(['transient', 'thrown', 'permanent'])('handles a %s error without duplicate delivery', async (kind) => {
+        await ingest();
+        await rank({ rulesOnly: true });
+        loadConfig().settings.telegram.retry_base_delay_seconds = 0;
+        const client = { send: vi.fn(async () => {
+                if (kind === 'thrown')
+                    throw new Error('connection reset');
+                return { ok: false, error: 'Offline failure', retryable: kind !== 'permanent' };
+            }) };
+        expect((await notify({ client })).failed).toBe(1);
+        const recovered = sender();
+        expect((await notify({ client: recovered })).sent).toBe(kind === 'permanent' ? 0 : 1);
+        await notify({ client: recovered });
+        expect(recovered.send).toHaveBeenCalledTimes(kind === 'permanent' ? 0 : 1);
+    });
+    it.each([['Professional English required.', true], ['Fluent English required.', false]] as const)('uses the 75-point Telegram threshold for %s', async (language, eligible) => {
+        await ingest({ description: strong.description + '\n' + language });
+        await rank({ rulesOnly: true });
+        const client = sender();
+        expect((await notify({ client })).sent).toBe(eligible ? 1 : 0);
+        expect(client.send).toHaveBeenCalledTimes(eligible ? 1 : 0);
+    });
+    it('formats unknown source values without inventing details', () => {
+        const vacancy = reviewJob('', { company: null, datePosted: null, salaryMin: null, salaryMax: null, salaryCurrency: null });
+        const message = formatNotification(loadConfig(), vacancy, assessWithRules(loadConfig(), vacancy), ['linkedin']);
+        for (const text of ['LinkedIn', 'Rate: not stated', 'Published: unknown', 'Company: not stated'])
+            expect(message.text).toContain(text);
+        expect(message.url).toBe(vacancy.primaryUrl);
+    });
 });

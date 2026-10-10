@@ -58,6 +58,7 @@ FORWARDED_COLUMNS = [
     "company_industry",
     "company_url",
     "activity_status", "activity_reason", "activity_evidence", "activity_checked_at",
+    "valid_through",
 ]
 
 # JobSpy kwargs a task is allowed to set. Guards against passing arbitrary
@@ -276,10 +277,12 @@ def run_task(task: dict[str, Any], timeout_seconds: int) -> dict[str, Any]:
             reason = row.pop("activity_reason", None)
             evidence = row.pop("activity_evidence", None)
             checked_at = row.pop("activity_checked_at", None)
+            valid_through = row.pop("valid_through", None)
             if status in {"active", "closed"}:
                 emit({"type": "listing_activity", "task_id": task_id, "activity": {
                     "source": source, "source_job_id": row.get("id"), "job_url": row.get("job_url"),
                     "status": status, "evidence": evidence, "checked_at": checked_at,
+                    **({"valid_through": valid_through} if valid_through else {}),
                     **({"reason": reason} if reason else {}),
                 }})
             if status == "closed":

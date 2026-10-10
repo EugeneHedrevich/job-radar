@@ -33,6 +33,7 @@ export const listingActivitySchema = z.object({
   reason: z.enum(['valid_through', 'http_404', 'http_410', 'closed_message']).optional(),
   evidence: z.string().min(1).max(2000),
   checked_at: z.iso.datetime({ offset: true }),
+  valid_through: z.iso.datetime({ offset: true }).nullable().optional(),
 }).refine((value) => value.status !== 'closed' || Boolean(value.reason), {
   message: 'Closure requires explicit evidence and a reason',
 });
@@ -74,8 +75,8 @@ export interface CollectorTask {
   distance: number;
   description_format: 'markdown' | 'html';
   fetch_description: boolean;
-  /** Existing incomplete listings, hydrated independently of this search. */
-  detail_jobs?: CollectorJob[];
+  /** Stored listings for enrichment or activity refresh within the same budget. */
+  detail_jobs?: Array<CollectorJob & { activity_refresh?: boolean }>;
   enrich_only?: boolean;
   is_remote: boolean;
   job_type?: string;

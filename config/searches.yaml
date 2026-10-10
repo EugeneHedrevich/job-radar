@@ -200,6 +200,8 @@ sources:
     delay_between_tasks_seconds: 3
     task_timeout_seconds: 180
     search_results_include_description: true
+    supports_description_fetch: true
+    supports_backlog_enrichment: true
 
   arbeitnow:
     enabled: true
@@ -209,6 +211,8 @@ sources:
     delay_between_tasks_seconds: 3
     task_timeout_seconds: 180
     search_results_include_description: true
+    supports_description_fetch: true
+    supports_backlog_enrichment: true
 
   remoteok:
     enabled: true
@@ -218,6 +222,8 @@ sources:
     delay_between_tasks_seconds: 3
     task_timeout_seconds: 180
     search_results_include_description: true
+    supports_description_fetch: true
+    supports_backlog_enrichment: true
 
   jobicy:
     enabled: true
@@ -227,6 +233,8 @@ sources:
     delay_between_tasks_seconds: 3
     task_timeout_seconds: 180
     search_results_include_description: true
+    supports_description_fetch: true
+    supports_backlog_enrichment: true
 
 # Priority batches interleave four directions across the original six sources.
 # Public catalogue scans cover six more providers, including seven Michael Page markets.

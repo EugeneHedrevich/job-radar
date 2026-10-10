@@ -6,7 +6,7 @@ import { createDryRunClient, createTelegramClient, type TelegramClient, type Tel
 import { claimNotification, queueNotification } from './notification-store.js';
 import type { MatchableJob } from '../matching/types.js';
 import { log, out } from '../util/log.js';
-import { closedJobIds, isJobClosed } from '../persist/activity.js';
+import { closedJobIds, expireListingDeadlines, isJobClosed, listingIsClosed } from '../persist/activity.js';
 
 export interface NotifyOptions {
   dryRun?: boolean;
@@ -35,6 +35,7 @@ const CHANNEL = 'telegram';
  * first, so a Telegram outage never loses a match.
  */
 export async function notify(options: NotifyOptions = {}): Promise<NotifySummary> {
+  await expireListingDeadlines();
   const config = loadConfig();
   const summary: NotifySummary = {
     queued: 0,
@@ -111,9 +112,9 @@ function eligible(assessment: any, threshold: number): boolean {
 async function notificationPayload(
   config: ReturnType<typeof loadConfig>, job: MatchableJob, assessment: any,
 ) {
-  const listings = (await query<{ source: string; canonicalUrl: string; rawUrl: string | null; activityState: string | null }>(
+  const listings = (await query<{ source: string; canonicalUrl: string; rawUrl: string | null; activityState: string | null; validThrough: string | null }>(
     SELECT.from(db().SourceListings).where({ job_ID: job.ID }).orderBy('firstSeenAt', 'ID'),
-  )).filter((listing) => listing.activityState !== 'Closed');
+  )).filter((listing) => !listingIsClosed(listing));
   const available = listings.find((listing) => listing.rawUrl === job.primaryUrl || listing.canonicalUrl === job.primaryUrl) ??
     listings.find((listing) => listing.activityState === 'Active') ?? listings[0];
   return formatNotification(config, { ...job, primaryUrl: available?.rawUrl ?? available?.canonicalUrl ?? job.primaryUrl },

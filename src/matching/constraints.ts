@@ -30,7 +30,7 @@ const LANGUAGES: Record<string, { name: string; aliases: string[] }> = {
 const COUNTRIES: Record<string, string[]> = {
   Bulgaria: ['Bulgaria', 'Bulgarien', 'Bulgarie', 'Bulgarije'],
   'United Kingdom': ['UK', 'United Kingdom', 'Britain', 'Great Britain', 'Royaume-Uni', 'Vereinigtes Konigreich'],
-  'United States': ['US', 'USA', 'United States'],
+  'United States': ['US', 'USA', 'U.S.', 'U.S.A.', 'United States'],
   Germany: ['Germany', 'Deutschland', 'Allemagne', 'Niemcy', 'Duitsland'],
   Netherlands: ['Netherlands', 'Niederlande', 'Pays-Bas', 'Nederland'],
   Poland: ['Poland', 'Polska', 'Polen', 'Pologne'],
@@ -53,13 +53,29 @@ const escape = (value: string) => normalizeText(value).replace(/[.*+?^${}()|[\]\
 const hasTerm = (text: string, term: string) => new RegExp(`(?<![a-z0-9])${escape(term)}(?![a-z0-9])`).test(normalizeText(text));
 
 function locationScopes(text: string): string[] {
-  const scopes = Object.entries(COUNTRIES).filter(([, aliases]) => aliases.some((alias) => hasTerm(text, alias))).map(([country]) => country);
+  // Keep case for abbreviations: the pronoun "us" is never a country.
+  // Even uppercase abbreviations need a location/eligibility context.
+  const abbreviation = (alias: string) => [...text.matchAll(new RegExp(`\\b${alias}\\b`, 'g'))].some((match) =>
+    /candidate required location\s*:/i.test(text) ||
+    /\b(?:in|from|within|across|outside|excluding|except|location\s*:|authorization for|permit for)\s+(?:the\s+)?$/i.test(text.slice(0, match.index)) ||
+    /^\s*(?:[-/]?\s*based|residents?|citizens?|only|right to work|work authori[sz]ation|work permit)\b/i.test(text.slice(match.index + alias.length)));
+  const scopes = Object.entries(COUNTRIES).filter(([, aliases]) => aliases.some((alias) =>
+    /^[A-Z]{2,3}$/.test(alias)
+      ? abbreviation(alias)
+      : hasTerm(text, alias))).map(([country]) => country);
   for (const country of EU_COUNTRIES) if (hasTerm(text, country) && !scopes.includes(country)) scopes.push(country);
   for (const [scope, aliases] of Object.entries({ EU: ['EU', 'European Union'], EEA: ['EEA'], Europe: ['Europe', 'Europa'],
     Worldwide: ['Worldwide', 'Anywhere', 'Global', 'Monde entier'] })) {
     if (aliases.some((alias) => hasTerm(text, alias))) scopes.push(scope);
   }
   return scopes;
+}
+
+/** Exclusions belong to the residence restriction, not its permission list. */
+function residenceScopes(text: string): { allowed: string[]; excluded: string[] } {
+  const exclusions = /\b(?:excluding|exclude[ds]?|except(?:\s+for)?|other than|outside of|but not|not including)\b/gi;
+  const parts = text.split(exclusions);
+  return { allowed: locationScopes(parts[0] ?? ''), excluded: parts.slice(1).flatMap((part) => locationScopes(`excluding ${part}`)) };
 }
 
 export function constraintRequirementMatches(evidence: MandatoryGapEvidence, requirement: string): boolean {
@@ -81,7 +97,8 @@ function allowedByScope(country: string, scopes: string[]): boolean {
 
 export function nonSkillConstraintClause(clause: string): boolean {
   return Object.values(LANGUAGES).some((language) => language.aliases.some((alias) => hasTerm(clause, alias))) ||
-    /\b(?:start date|start within|start immediately|start asap|notice period|weekly capacity|workload|working hours|time ?zone|residents?|residence|work authori[sz]ation|right to work)\b/.test(clause);
+    /\b(?:start date|start within|start immediately|start asap|notice period|weekly capacity|workload|working hours|time ?zone|residen\w*|reside|work from|candidate required location|(?:based|located|living)\s+(?:in|within)|work authori[sz]ation|right to work)\b/.test(clause) ||
+    /^\s*(?:excluding|except|other than|but not|not including)\b/.test(clause);
 }
 
 /** Only explicit requirements can demonstrate a contradiction. Unknown facts
@@ -109,7 +126,9 @@ export function matchingConstraints(config: AppConfig, job: MatchableJob): Match
       const distance = (start: number, end: number) => Math.max(mention.start - end, start - mention.end, 0);
       const level = [...mention.clause.matchAll(/\b(A[12]|B[12]|C[12])\b/gi)]
         .sort((a, b) => distance(a.index, a.index + a[0].length) - distance(b.index, b.index + b[0].length))[0]?.[0].toUpperCase();
-      const fluency = /\b(?:fluent|fluency|native|business|professional|verhandlungssicher\w*|sehr gute|biegł\w*|courant|vloeiend)\b/.test(mention.clause);
+      const proficiency = [...mention.clause.matchAll(/\b(?:fluent|fluency|native|business|professional|verhandlungssicher\w*|sehr gute|biegł\w*|courant|vloeiend)\b/g)]
+        .sort((a, b) => distance(a.index, a.index + a[0].length) - distance(b.index, b.index + b[0].length))[0]?.[0];
+      const fluency = Boolean(proficiency);
       if (kind === 'unclear' && !fluency && !/\b(?:language|kenntnisse|jezyk|język|langue|taal)\b/.test(mention.clause)) continue;
       if (!held) {
         if (kind === 'mandatory') reject(`${language.name} language is mandatory and is not held in profile.languages.`,
@@ -127,8 +146,13 @@ export function matchingConstraints(config: AppConfig, job: MatchableJob): Match
             mention.quote, `languages.${config.profile.languages.indexOf(held)}.proficiency`, held.proficiency);
           else addMissing(`unclear whether ${language.name} ${level} is mandatory`);
         }
-      } else if (fluency && !['native', 'fluent'].includes(held.proficiency.toLowerCase())) {
-        addMissing(`${language.name} fluency requirement needs confirmation; declared proficiency is ${held.proficiency}`);
+      } else if (proficiency) {
+        const declared = held.proficiency.trim().toLowerCase();
+        const accepted = proficiency === 'native' ? ['native'] :
+          ['professional', 'business'].includes(proficiency) ? ['professional', 'business', 'fluent', 'native'] : ['fluent', 'native'];
+        if (!accepted.includes(declared)) {
+          addMissing(`${language.name} ${proficiency} requirement needs confirmation; declared proficiency is ${held.proficiency}`);
+        }
       }
     }
   }
@@ -209,25 +233,35 @@ export function matchingConstraints(config: AppConfig, job: MatchableJob): Match
     if (/\b(?:citizens? only|citizenship|nationality)\b/.test(clause)) {
       addMissing('candidate citizenship / nationality eligibility is not stated and cannot be inferred from residence');
     }
-    const residency = /candidate required location\s*:\s*(.+)|\b(?:residents?|residence|residency)\b|\b(?:must|only|requires?|required|mandatory)\b[^.!?]*\b(?:based|located|reside|living|work from)\b|\bremote\b[^.!?]*\b(?:only|within|from)\b|\b(?:residents? uniquement|wohnsitz|woonachtig)\b/.exec(clause);
-    if (residency && !/candidate required location:\s*(?:not stated|unknown)/.test(clause)) {
+    const residency = /candidate required location\s*:\s*(.+)|\b(?:residents?|residence|residency)\b|\b(?:must|only|requires?|required|mandatory)\b[^.!?]*\b(?:based|located|reside|living|work from)\b|\bremote\b[^.!?]*\b(?:only|within|from|worldwide|anywhere|global|europe|eu|eea)\b|\b(?:residents? uniquement|wohnsitz|woonachtig)\b/.exec(clause);
+    if (residency && !/candidate required location:\s*(?:not stated|unknown)/.test(clause) &&
+      !(/\bwork from home\b/.test(clause) && !locationScopes(block).length)) {
       residencyFound = true;
       // An EU remote format does not cancel a narrower residents-only rule.
-      const residencePart = clause.split(/,|\s+(?:but|whereas|while)\s+/)
-        .find((part) => /\b(?:residents?|residence|residency|based|located|reside|living|wohnsitz|woonachtig)\b/.test(part));
-      const scopeText = /candidate required location/.test(clause) ? clause : residencePart ?? clause;
-      const scopes = locationScopes(scopeText);
-      const specific = /\b(?:residents?|residence|residency|based|located|reside|living|wohnsitz|woonachtig)\b/.exec(scopeText);
+      const residencePart = block.split(/,|\s+(?:but(?!\s+not)|whereas|while)\s+/i)
+        .find((part) => /\b(?:residents?|residence|residency|based|located|reside|living|wohnsitz|woonachtig)\b/i.test(part));
+      const scopeText = /candidate required location/.test(clause) ? block : residencePart ?? block;
+      const { excluded } = residenceScopes(block);
+      // A narrower residents-only clause still takes precedence over a broad
+      // remote format; exclusions are read from the whole original sentence.
+      const allowed = residenceScopes(scopeText).allowed;
+      const specific = /\b(?:residents?|residence|residency|based|located|reside|living|wohnsitz|woonachtig)\b/i.exec(scopeText);
       const mention = mentionFor(block, specific?.[0] ?? residency[0]);
-      const optional = mention?.kind === 'preferred' || /\bno\s+(?:residence|residency|resident)\w*\s+requirement\b/.test(scopeText);
-      const mandatory = mention?.kind === 'mandatory' || /candidate required location|\bonly\b|\bwithin\b/.test(scopeText);
+      const optional = mention?.kind === 'preferred' || /\bno\s+(?:residence|residency|resident)\w*\s+requirement\b/i.test(scopeText);
+      const mandatory = mention?.kind === 'mandatory' || /candidate required location|\bonly\b|\bwithin\b/i.test(scopeText) || remote && excluded.length > 0;
       if (!optional) {
-        if (!scopes.length || !baseCountry) addMissing('candidate residence / permitted remote working location needs confirmation');
-        else if (!allowedByScope(baseCountry, scopes)) {
+        const excludedBase = baseCountry && allowedByScope(baseCountry, excluded);
+        if (excludedBase) {
           if (mandatory && (remote || config.profile.travel?.accepts_relocation === false)) {
-            reject(`Required candidate location (${scopes.join(' / ')}) excludes the declared base in ${baseCountry}.`, 'candidate residence',
+            reject(`Candidate location explicitly excludes ${baseCountry}.`, 'candidate residence', block,
+              'identity.base_location', config.profile.identity.base_location);
+          } else addMissing(`ability to meet the candidate location exclusion (${excluded.join(' / ')}) needs confirmation`);
+        } else if (!allowed.length || !baseCountry) addMissing('candidate residence / permitted remote working location needs confirmation');
+        else if (!allowedByScope(baseCountry, allowed)) {
+          if (mandatory && (remote || config.profile.travel?.accepts_relocation === false)) {
+            reject(`Required candidate location (${allowed.join(' / ')}) excludes the declared base in ${baseCountry}.`, 'candidate residence',
               mention?.quote ?? block, 'identity.base_location', config.profile.identity.base_location);
-          } else addMissing(`ability to meet the candidate location restriction (${scopes.join(' / ')}) needs confirmation`);
+          } else addMissing(`ability to meet the candidate location restriction (${allowed.join(' / ')}) needs confirmation`);
         }
       }
     }
@@ -241,7 +275,7 @@ export function matchingConstraints(config: AppConfig, job: MatchableJob): Match
           'work_authorization.requires_sponsorship', true);
         continue;
       }
-      const scopes = locationScopes(clause);
+      const scopes = locationScopes(block);
       const country = scopes.find((scope) => Object.hasOwn(COUNTRIES, scope) || EU_COUNTRIES.has(scope)) ??
         (scopes.includes('EU') || scopes.includes('EEA') ? 'EU/EEA local employment' : job.locationCountry);
       const key = country === 'United Kingdom' ? 'uk' : country === 'United States' ? 'usa' : country ? normalizeText(country).replace(/ /g, '_') : null;
