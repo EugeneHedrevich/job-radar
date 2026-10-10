@@ -44,6 +44,7 @@ entity SourceListings : cuid {
   rawUrl          : String(1000);
   directUrl       : String(1000);
   hasDescription  : Boolean default false;
+  descriptionAttemptedAt : Timestamp;
   // Not named `raw`: cds.ql's UPDATE.set() treats an object with a `raw`
   // property as a tagged template literal.
   rawRecord       : LargeString;             // untouched collector record (JSON)
@@ -55,6 +56,7 @@ entity SourceListings : cuid {
 /** One invocation of the collector (manual or scheduled). */
 entity CollectionRuns : cuid {
   startedAt    : Timestamp not null;
+  heartbeatAt  : Timestamp;
   finishedAt   : Timestamp;
   trigger      : String(50);                 // manual | scheduled
   batchKey     : String(200);                // which rotating batch was used

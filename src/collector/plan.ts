@@ -23,11 +23,15 @@ export interface DescriptionRotation {
  */
 export function selectBatchIndex(config: AppConfig, at: Date = new Date()): number {
   const { interval_hours, batches } = config.searches.rotation;
+  const sequence = config.searches.rotation.sequence ?? batches.map((batch) => batch.key);
   const slot = Math.floor(at.getTime() / (interval_hours * 3_600_000));
-  return ((slot % batches.length) + batches.length) % batches.length;
+  const key = sequence[((slot % sequence.length) + sequence.length) % sequence.length];
+  return batches.findIndex((batch) => batch.key === key);
 }
 
 export interface PlanOptions {
+  /** Spend description slots on stored jobs without issuing searches. */
+  enrichOnly?: boolean;
   /** Persisted per-batch description cursors; planning itself is side-effect free. */
   descriptionRotation?: DescriptionRotation;
   at?: Date;
@@ -45,8 +49,18 @@ export interface PlanOptions {
 
 export function planBatch(config: AppConfig, options: PlanOptions = {}): PlannedBatch {
   const { searches } = config;
+  for (const source of options.onlySources ?? []) {
+    if (!searches.sources[source]) {
+      throw new Error(`Unknown source "${source}". Available: ${Object.keys(searches.sources).join(', ')}`);
+    }
+  }
   const batches = searches.rotation.batches;
-  const batch = options.batchKey
+  const batch = options.enrichOnly ? {
+    key: 'description-backlog', keywords: ['SAP'],
+    targets: Object.fromEntries(Object.entries(searches.sources)
+      .filter(([, source]) => source.supports_backlog_enrichment)
+      .map(([name, source]) => [name, [Object.keys(source.geos)[0]!]])),
+  } : options.batchKey
     ? batches.find((candidate) => candidate.key === options.batchKey)
     : batches[selectBatchIndex(config, options.at)];
   if (!batch) {
@@ -54,6 +68,12 @@ export function planBatch(config: AppConfig, options: PlanOptions = {}): Planned
   }
 
   const skipped: PlannedBatch['skipped'] = [];
+  for (const source of options.onlySources ?? []) {
+    if (!batch.targets[source]?.length) {
+      const available = batches.filter((candidate) => candidate.targets[source]?.length).map((candidate) => candidate.key);
+      skipped.push({ source, reason: `not in batch "${batch.key}"; use --batch ${available.join(' or ')}` });
+    }
+  }
   const tasksBySource = new Map<string, CollectorTask[]>();
   let planned = 0;
 
@@ -84,10 +104,11 @@ export function planBatch(config: AppConfig, options: PlanOptions = {}): Planned
           ...(geo.location ? { location: geo.location } : {}),
           ...(geo.country_indeed ? { country_indeed: geo.country_indeed } : {}),
           results_wanted: options.resultsWanted ?? sourceConfig.results_wanted ?? searches.defaults.results_wanted,
-          hours_old: options.hoursOld ?? searches.defaults.hours_old,
+          hours_old: options.hoursOld ?? sourceConfig.hours_old ?? searches.defaults.hours_old,
           distance: searches.defaults.distance,
           description_format: searches.defaults.description_format,
           fetch_description: false,
+          ...(options.enrichOnly ? { enrich_only: true } : {}),
           // Remote/contract are deliberately NOT pre-filtered: most postings
           // omit those fields and would be lost. Filtering happens after
           // normalization instead.
@@ -101,6 +122,13 @@ export function planBatch(config: AppConfig, options: PlanOptions = {}): Planned
   }
 
   const descriptionRotation = applyDescriptionBudget(config, tasksBySource, options.descriptionRotation);
+  if (options.enrichOnly) {
+    for (const [source, tasks] of tasksBySource) {
+      const selected = tasks.filter((task) => task.fetch_description);
+      if (selected.length) tasksBySource.set(source, selected);
+      else tasksBySource.delete(source);
+    }
+  }
   return { batchKey: batch.key, keywords: batch.keywords, tasksBySource, skipped, descriptionRotation };
 }
 
@@ -139,12 +167,15 @@ function applyDescriptionBudget(
     const source = order[sourceIndex]!;
     const tasks = eligible.get(source);
     if (!tasks?.some((task) => !task.fetch_description)) { misses += 1; continue; }
-    const last = tasks.findIndex((task) => task.task_id === state.lastTaskBySource[source]);
+    const cursorKey = `${tasks[0]!.task_id.split(':')[0]}:${source}`;
+    // Read old per-batch cursors for compatibility; new cursors are scoped by
+    // batch while the source cursor advances across every collection cycle.
+    const last = tasks.findIndex((task) => task.task_id === (state.lastTaskBySource[cursorKey] ?? state.lastTaskBySource[source]));
     for (let offset = 1; offset <= tasks.length; offset += 1) {
       const task = tasks[(last + offset) % tasks.length]!;
       if (task.fetch_description) continue;
       task.fetch_description = true;
-      state.lastTaskBySource[source] = task.task_id;
+      state.lastTaskBySource[cursorKey] = task.task_id;
       state.lastSource = source;
       allocated += 1;
       misses = 0;

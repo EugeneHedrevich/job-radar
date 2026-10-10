@@ -9,7 +9,7 @@
 # JobSpy sources verified against python-jobspy 1.2.0.
 
 defaults:
-  hours_old: 96 # freshness window; deliberately wider than the 3h cycle so
+  hours_old: 120 # freshness window; deliberately wider than the 3h cycle so
                 # cycles overlap and nothing is lost to a failed run
   results_wanted: 25
   description_format: markdown
@@ -39,6 +39,8 @@ keywords:
   - "SAP Fiori"
   - "Fiori Elements"
   - "SAPUI5 Developer"
+  - "SAP UI5 Developer"
+  - "SAP Fiori Developer"
   - "SAP Joule Consultant"
   - "Joule Studio Developer"
   - "SAP Joule Architect"
@@ -73,12 +75,19 @@ sources:
       ch: { id: ch, location: "Switzerland" }
       bg: { id: bg, location: "Bulgaria" }
       uk: { id: uk, location: "United Kingdom" }
+      emea: { id: emea, location: "EMEA" }
+      europe: { id: europe, location: "Europe" }
+      middle-east: { id: middle-east, location: "Middle East" }
+      africa: { id: africa, location: "Africa" }
+      ae: { id: ae, location: "United Arab Emirates" }
+      dubai: { id: dubai, location: "Dubai, United Arab Emirates" }
     results_wanted: 25
     # LinkedIn rate limits aggressively; keep requests slow and few.
     delay_between_tasks_seconds: 8
     task_timeout_seconds: 240
     supports_description_fetch: true
     search_results_include_description: false
+    supports_backlog_enrichment: true
 
   indeed:
     enabled: true
@@ -88,10 +97,13 @@ sources:
       nl: { id: nl, country_indeed: "Netherlands", location: "Netherlands" }
       ch: { id: ch, country_indeed: "Switzerland", location: "Switzerland" }
       at: { id: at, country_indeed: "Austria", location: "Austria" }
-      bg: { id: bg, country_indeed: "Bulgaria", location: "Bulgaria" }
       pl: { id: pl, country_indeed: "Poland", location: "Poland" }
       uk: { id: uk, country_indeed: "UK", location: "United Kingdom" }
       ie: { id: ie, country_indeed: "Ireland", location: "Ireland" }
+      ae: { id: ae, country_indeed: "United Arab Emirates", location: "United Arab Emirates" }
+      dubai: { id: dubai, country_indeed: "United Arab Emirates", location: "Dubai" }
+      za: { id: za, country_indeed: "South Africa", location: "South Africa" }
+      eg: { id: eg, country_indeed: "Egypt", location: "Egypt" }
     results_wanted: 30
     delay_between_tasks_seconds: 2
     task_timeout_seconds: 180
@@ -125,6 +137,7 @@ sources:
     task_timeout_seconds: 180
     supports_description_fetch: true
     search_results_include_description: false
+    supports_backlog_enrichment: true
 
   eursap:
     enabled: true
@@ -135,6 +148,7 @@ sources:
     task_timeout_seconds: 180
     supports_description_fetch: true
     search_results_include_description: false
+    supports_backlog_enrichment: true
 
   whitehall:
     enabled: true
@@ -145,12 +159,116 @@ sources:
     task_timeout_seconds: 180
     supports_description_fetch: true
     search_results_include_description: false
+    supports_backlog_enrichment: true
 
-# Priority batches interleave four directions across all six sources.
+  michaelpage:
+    enabled: true
+    geos:
+      pl: { id: pl, location: "Poland" }
+      de: { id: de, location: "Germany" }
+      nl: { id: nl, location: "Netherlands" }
+      uk: { id: uk, location: "United Kingdom" }
+      ch: { id: ch, location: "Switzerland" }
+      fr: { id: fr, location: "France" }
+      ae: { id: ae, location: "United Arab Emirates" }
+    # Recruiters keep active adverts for weeks; retain the actual posting date.
+    hours_old: 2160
+    results_wanted: 25
+    delay_between_tasks_seconds: 3
+    task_timeout_seconds: 240
+    supports_description_fetch: true
+    search_results_include_description: false
+    supports_backlog_enrichment: true
+
+  nextventures:
+    enabled: true
+    geos:
+      all: { id: all }
+    hours_old: 2160
+    results_wanted: 25
+    delay_between_tasks_seconds: 3
+    task_timeout_seconds: 240
+    supports_description_fetch: true
+    search_results_include_description: false
+    supports_backlog_enrichment: true
+
+  remotive:
+    enabled: true
+    geos:
+      all: { id: all }
+    results_wanted: 25
+    delay_between_tasks_seconds: 3
+    task_timeout_seconds: 180
+    search_results_include_description: true
+
+  arbeitnow:
+    enabled: true
+    geos:
+      all: { id: all }
+    results_wanted: 25
+    delay_between_tasks_seconds: 3
+    task_timeout_seconds: 180
+    search_results_include_description: true
+
+  remoteok:
+    enabled: true
+    geos:
+      all: { id: all }
+    results_wanted: 25
+    delay_between_tasks_seconds: 3
+    task_timeout_seconds: 180
+    search_results_include_description: true
+
+  jobicy:
+    enabled: true
+    geos:
+      all: { id: all }
+    results_wanted: 25
+    delay_between_tasks_seconds: 3
+    task_timeout_seconds: 180
+    search_results_include_description: true
+
+# Priority batches interleave four directions across the original six sources.
+# Public catalogue scans cover six more providers, including seven Michael Page markets.
 # Each uses at most 3 queries x 6 geographies = 18 tasks, without tail truncation.
-# All 19 batches run in 57 hours at the current schedule, inside the 96h window.
+# Broad priority and catalogue scans recur every 33h; the 33-slot sequence
+# takes 99h at the current schedule, inside the 120h board freshness window.
 rotation:
   interval_hours: 3
+  sequence:
+    - cap-broad
+    - ui5-broad
+    - joule-broad
+    - btp-ai-broad
+    - sap-public
+    - cap-roles
+    - ui5-fiori
+    - joule-roles
+    - btp-ai-hub
+    - cap-contracts
+    - emea-frontend
+    - cap-broad
+    - ui5-broad
+    - joule-broad
+    - btp-ai-broad
+    - sap-public
+    - ui5-roles
+    - joule-contracts
+    - btp-ai-roles
+    - ui5-contracts
+    - btp-ai-contracts
+    - emea-core
+    - cap-broad
+    - ui5-broad
+    - joule-broad
+    - btp-ai-broad
+    - sap-public
+    - btp-core
+    - integration
+    - frontend
+    - architect-ai
+    - sap-specialists
+    - uae-frontend
   batches:
     - key: "cap-broad"
       keywords: ["SAP CAP", "SAP CAPM", "SAP Cloud Application Programming Model"]
@@ -163,7 +281,14 @@ rotation:
         whitehall: [all]
     - key: "ui5-broad"
       keywords: ["SAPUI5", "SAP UI5"]
-      targets: *priority_targets
+      # Search individual markets as well as the capped EU result set.
+      targets:
+        linkedin: [eu, de, nl]
+        indeed: [de, pl]
+        glassdoor: [de]
+        redglobal: [all]
+        eursap: [all]
+        whitehall: [all]
     - key: "joule-broad"
       keywords: ["SAP Joule", "Joule Studio", "SAP Joule Developer"]
       targets: *priority_targets
@@ -216,10 +341,10 @@ rotation:
         glassdoor: [nl]
 
     - key: "frontend"
-      keywords: ["SAP UI5 Developer", "SAP Fiori Developer"]
+      keywords: ["SAPUI5 Developer", "SAP UI5 Developer", "SAP Fiori Developer"]
       targets:
-        linkedin: [eu, ch]
-        indeed: [de, pl, bg]
+        linkedin: [de, ch, bg]
+        indeed: [de, pl]
         glassdoor: [ch]
 
     - key: "architect-ai"
@@ -238,15 +363,46 @@ rotation:
         eursap: [all]
         whitehall: [all]
 
+    # Wide SAP searches include functional and technical roles; matching still
+    # applies the profile after collection. One task per public catalogue/market.
+    - key: "sap-public"
+      keywords: ["SAP"]
+      targets:
+        michaelpage: [pl, de, nl, uk, ch, fr, ae]
+        nextventures: [all]
+        remotive: [all]
+        arbeitnow: [all]
+        remoteok: [all]
+        jobicy: [all]
+
+    # Broad region searches complement capped country results. UAE endpoints
+    # use their actual country value; Glassdoor does not support UAE.
+    - key: "emea-frontend"
+      keywords: ["SAPUI5", "SAP UI5", "SAP Fiori"]
+      targets:
+        linkedin: [emea, europe, middle-east, africa, ae, dubai]
+
+    - key: "emea-core"
+      keywords: ["SAP BTP", "SAP CAP", "SAP CPI"]
+      targets:
+        linkedin: [emea, middle-east, africa]
+        indeed: [ae, za, eg]
+
+    - key: "uae-frontend"
+      keywords: ["SAPUI5 Developer", "SAP UI5 Developer", "SAP Fiori Developer"]
+      targets:
+        linkedin: [ae, dubai]
+        indeed: [ae, dubai]
+
 # Descriptions cost one extra HTTP request per job and are the fastest way to
 # get blocked. They are therefore budgeted per run.
 # A job collected without a description stays incomplete - it is never given an
 # invented assessment.
 description_budget:
   max_tasks_per_run: 2
-  # Persistent round-robin between available sources and keyword/location tasks.
+  # Global persistent source cursor; independent batch keyword/location cursors.
   # Sources that already ship descriptions in search results are skipped here.
-  prefer_sources: ["linkedin", "glassdoor", "redglobal", "eursap", "whitehall"]
+  prefer_sources: ["linkedin", "glassdoor", "redglobal", "eursap", "whitehall", "michaelpage", "nextventures"]
 
 resilience:
   max_tasks_per_run: 18

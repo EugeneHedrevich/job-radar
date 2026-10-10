@@ -61,12 +61,29 @@ export async function ingestJobs(
 
   // Guard against the same listing appearing twice inside one collection run
   // (e.g. two keywords returning the same vacancy).
-  const seenInBatch = new Set<string>();
-
+  const combined = new Map<string, NormalizedJob>();
   for (const job of normalized) {
-    const batchKey = `${job.listing.source}|${job.listing.sourceJobId ?? job.listing.canonicalUrl}`;
-    if (seenInBatch.has(batchKey)) continue;
-    seenInBatch.add(batchKey);
+    const key = `${job.listing.source}|${job.listing.sourceJobId ?? job.listing.canonicalUrl}`;
+    const previous = combined.get(key);
+    if (!previous) { combined.set(key, job); continue; }
+    // A later search or retry may have retrieved the description. Missing
+    // fields from another search must never erase that enrichment.
+    const raw = { ...JSON.parse(previous.listing.raw) };
+    for (const [field, value] of Object.entries(JSON.parse(job.listing.raw))) {
+      if (value !== null && value !== undefined && value !== '') raw[field] = value;
+    }
+    const merged = { ...previous };
+    for (const field of Object.keys(job) as Array<keyof NormalizedJob>) {
+      if (field !== 'listing' && job[field] !== null && job[field] !== undefined) {
+        Object.assign(merged, { [field]: job[field] });
+      }
+    }
+    merged.listing = { ...previous.listing, ...job.listing,
+      hasDescription: Boolean(merged.description), raw: JSON.stringify(raw) };
+    combined.set(key, merged);
+  }
+
+  for (const job of combined.values()) {
 
     const existingListing = await findListing(job);
     if (existingListing) {
@@ -248,13 +265,19 @@ async function touchListing(
   seenAt: string,
   runId: string | null,
 ): Promise<void> {
+  const previous = await queryOne<{ rawRecord: string; hasDescription: boolean }>(SELECT.from(db().SourceListings)
+    .columns('rawRecord', 'hasDescription').where({ ID: listingId }));
+  const raw = previous ? JSON.parse(previous.rawRecord) : {};
+  for (const [key, value] of Object.entries(JSON.parse(job.listing.raw))) {
+    if (value !== null && value !== undefined && value !== '') raw[key] = value;
+  }
   await cds.run(
     UPDATE(db().SourceListings)
       .set({
         lastSeenAt: seenAt,
         run_ID: runId,
-        rawRecord: job.listing.raw,
-        hasDescription: job.listing.hasDescription,
+        rawRecord: JSON.stringify(raw),
+        hasDescription: job.listing.hasDescription || Boolean(previous?.hasDescription),
       })
       .where({ ID: listingId }),
   );

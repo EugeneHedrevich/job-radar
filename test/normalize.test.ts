@@ -57,6 +57,30 @@ describe('normalizeJob', () => {
 });
 
 describe('extractCountry', () => {
+  it.each([
+    ['Dubai, AE', 'United Arab Emirates'],
+    ['Dubai, UAE', 'United Arab Emirates'],
+    ['Dubai, U.A.E.', 'United Arab Emirates'],
+    ['Abu Dhabi, United Arab Emirates', 'United Arab Emirates'],
+    ['Johannesburg, ZA', 'South Africa'],
+    ['Cairo, EG', 'Egypt'],
+    ['Riyadh, SA', 'Saudi Arabia'],
+    ['Doha, QA', 'Qatar'],
+    ['Tel Aviv, IL', 'Israel'],
+    ['Amman, Jordan', 'Jordan'],
+    ['Istanbul, TR', 'Turkey'],
+    ['Lagos, Nigeria', 'Nigeria'],
+    ['Nairobi, KE', 'Kenya'],
+    ['Tunis, TN', 'Tunisia'],
+    ['Belgrade, RS', 'Serbia'],
+  ])('recognises actual Middle Eastern and African locations: %s', (location, country) => {
+    expect(extractCountry(location)).toBe(country);
+  });
+
+  it.each(['EMEA', 'Europe', 'Middle East', 'Africa', 'Dubai'])('does not invent a country for %s', (location) => {
+    expect(extractCountry(location)).toBeNull();
+  });
+
   it('resolves country codes and names, and gives up when unclear', () => {
     expect(extractCountry('Berlin, Berlin, DE')).toBe('Germany');
     expect(extractCountry('Amsterdam, North Holland, Netherlands')).toBe('Netherlands');

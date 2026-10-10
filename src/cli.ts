@@ -1,11 +1,12 @@
 import path from 'node:path';
 import { loadConfig, PROJECT_ROOT } from './config/index.js';
 import { readHealth } from './collector/health.js';
+import { recoverInterruptedRuns } from './collector/lifecycle.js';
 import { connectDb, db, disconnectDb, SELECT, query } from './db/index.js';
 import { loadFixture } from './fixtures/load.js';
 import { collect } from './pipeline/collect.js';
 import { notify } from './pipeline/notify.js';
-import { rank } from './pipeline/rank.js';
+import { rank, readTop } from './pipeline/rank.js';
 import { directionCounters } from './pipeline/coverage.js';
 import { startScheduler } from './scheduler.js';
 import { log, out } from './util/log.js';
@@ -57,6 +58,7 @@ Usage: npm run <command> -- [flags]   (or: npx tsx src/cli.ts <command> [flags])
 
 Commands
   collect     Collect the current rotating batch and store deduplicated jobs
+  enrich      Fetch descriptions for stored jobs without repeating searches
   rank        Score stored jobs against the profile and print the top results
   top         Print the current top results without re-scoring
   notify      Send queued Telegram notifications (supports --dry-run)
@@ -73,6 +75,7 @@ Common flags
   --fixture <file>     Use offline demo data instead of live sources
   --demo               Shorthand for --fixture fixtures/demo-jobs.jsonl
   --limit <n>          Limit printed/sent items (default 20 for rank/top)
+  --search <text>      Filter top results by title (for example UI5 or Fiori)
   --rules-only         Skip the LLM stage even when OPENAI_API_KEY is set
   --force              Ignore cached assessments
   --min-score <n>      Override the notification threshold
@@ -88,6 +91,7 @@ function fixtureFile(flags: Args['flags']): string | undefined {
 async function runCollect(flags: Args['flags']) {
   const file = fixtureFile(flags);
   const summary = await collect({
+    enrichOnly: Boolean(flags.get('enrich-only')),
     ...(str(flags, 'batch') ? { batchKey: str(flags, 'batch')! } : {}),
     ...(list(flags, 'source') ? { onlySources: list(flags, 'source')! } : {}),
     ...(num(flags, 'hours') !== undefined ? { hoursOld: num(flags, 'hours')! } : {}),
@@ -108,7 +112,8 @@ async function runCollect(flags: Args['flags']) {
   if (summary.outcomes.length) {
     out('  tasks:');
     for (const outcome of summary.outcomes) {
-      const detail = outcome.status === 'Succeeded' ? `${outcome.resultCount} listings` : `${outcome.errorKind}: ${outcome.message ?? ''}`;
+      const detail = outcome.status === 'Succeeded' ? `${outcome.resultCount} listings`
+        : `${outcome.resultCount} listings; ${outcome.errorKind}: ${outcome.message ?? ''}`;
       out(`    [${outcome.status}] ${outcome.source} "${outcome.searchTerm}" @ ${outcome.location ?? outcome.countryIndeed ?? '-'} - ${detail}`);
     }
   }
@@ -120,7 +125,7 @@ async function runCollect(flags: Args['flags']) {
 function printTable(rows: Awaited<ReturnType<typeof rank>>): void {
   out('');
   if (!rows.length) {
-    out('No jobs stored yet. Run `npm run collect` (or `npm run collect -- --demo`) first.');
+    out('No current ranked results. Collect jobs and run `npm run rank` to evaluate them.');
     return;
   }
   out('  #  Score  Rec     Source-ready title                                   Company                        Location                  Posted');
@@ -147,8 +152,9 @@ function truncatePad(value: string, width: number): string {
   return (clean.length > width ? `${clean.slice(0, width - 1)}\u2026` : clean).padEnd(width);
 }
 
-async function runRank(flags: Args['flags']) {
+async function runRank(flags: Args['flags'], jobIds?: string[]) {
   const ranked = await rank({
+    jobIds,
     limit: num(flags, 'limit') ?? 20,
     rulesOnly: Boolean(flags.get('rules-only')),
     force: Boolean(flags.get('force')),
@@ -184,13 +190,14 @@ async function runNotify(flags: Args['flags']) {
 }
 
 async function runCycle(flags: Args['flags']) {
-  await runCollect(flags);
-  await runRank(flags);
+  const collected = await runCollect(flags);
+  await runRank(flags, collected.ingest.jobIds);
   await runNotify(flags);
 }
 
 async function runStatus() {
   const config = loadConfig();
+  await recoverInterruptedRuns(config);
   const { Jobs, SourceListings, CollectionRuns, Assessments, Notifications } = db();
   const count = async (entity: any, where?: Record<string, unknown>) => {
     const statement = where ? SELECT.from(entity).where(where) : SELECT.from(entity);
@@ -255,12 +262,17 @@ async function main(): Promise<number> {
     case 'collect':
       await runCollect(flags);
       break;
+    case 'enrich':
+      flags.set('enrich-only', true);
+      await runCollect(flags);
+      break;
     case 'rank':
       await runRank(flags);
       break;
     case 'top': {
-      const ranked = await rank({ limit: num(flags, 'limit') ?? 20, rulesOnly: true });
+      const ranked = await readTop(num(flags, 'limit') ?? 20, str(flags, 'search'));
       printTable(ranked);
+      if (!ranked.length) out('No current assessments. Run npm run rank to evaluate stored jobs.');
       break;
     }
     case 'notify':

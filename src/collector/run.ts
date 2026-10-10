@@ -3,7 +3,7 @@ import { createInterface } from 'node:readline';
 import { existsSync } from 'node:fs';
 import type { AppConfig } from '../config/index.js';
 import { log } from '../util/log.js';
-import { collectorLineSchema, type CollectorOutput, type CollectorTask, type TaskOutcome } from './types.js';
+import { collectorLineSchema, type CollectorOutput, type CollectorTask } from './types.js';
 
 export interface RunCollectorOptions {
   tasks: CollectorTask[];
@@ -131,11 +131,4 @@ export async function runCollector(config: AppConfig, options: RunCollectorOptio
   }
 
   return output;
-}
-
-export function summarizeOutcomes(outcomes: TaskOutcome[]): string {
-  const ok = outcomes.filter((outcome) => outcome.status === 'Succeeded').length;
-  const failed = outcomes.filter((outcome) => outcome.status === 'Failed').length;
-  const results = outcomes.reduce((sum, outcome) => sum + outcome.resultCount, 0);
-  return `${ok} succeeded, ${failed} failed, ${results} listings`;
 }

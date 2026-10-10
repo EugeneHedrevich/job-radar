@@ -117,6 +117,8 @@ export function unknownSkillRequirements(config: AppConfig, job: MatchableJob): 
     for (const marker of markers) capability = capability.replace(new RegExp(marker, 'gi'), '');
     capability = capability.replace(/^(?:[-*#]+|\d+[.)])\s*/, '')
       .replace(/\b(?:is|are|a|an|skills?|requirements?|qualifications?)\b/g, '').replace(/[:.!?]/g, '').trim();
+    // Connective fragments under a requirement heading are not capabilities.
+    if (/^(?:(?:and|or|with|in|of|to|for|the|you|will|we|our|your|mit|und|oder|der|die|das)\s*)+$/.test(capability)) continue;
     if (!capability || termsInQuote(capability, known) ||
       /\b(?:onsite|on-site|office|remote|hybrid|travel|attendance|relocat\w*|days?|hours?|years?|degree|bachelor\w*|master\w*|education|english|german|french|dutch|italian|spanish|polish|russian|language|rate|salary|contract|freelanc\w*|b2b|work permit|authori[sz]ation)\b/.test(capability)) continue;
     if (requirementKind(config, text, capability) === 'mandatory') {
@@ -133,12 +135,22 @@ export function deterministicGapEvidence(config: AppConfig, job: MatchableJob): 
   for (const [index, claim] of config.profile.not_claimed.entries()) {
     const terms = [claim, ...(config.profile.not_claimed_aliases[claim] ?? [])];
     if (!terms.some((term) => requirementKind(config, text, term) === 'mandatory')) continue;
-    const relevant = sentences(source).filter((part) => termsInQuote(sourceText(part), terms));
-    const quote = relevant.find((part) => terms.some((term) => requirementKind(config, sourceText(part), term) === 'mandatory')) ??
-      relevant.find((part) => {
-        const term = termsInQuote(sourceText(part), terms)!;
-        return requirementKind(config, sourceText(part), term) !== 'preferred';
-      });
+    const blocks = sentences(source);
+    let quote: string | undefined;
+    for (let end = 0; end < blocks.length && !quote; end++) {
+      const part = blocks[end]!;
+      const term = termsInQuote(sourceText(part), terms);
+      if (!term || requirementKind(config, sourceText(part), term) === 'preferred') continue;
+      // Include the nearest section/list heading when the item itself has no
+      // marker. A bare skill from earlier duties is not requirement evidence.
+      for (let start = end; start >= 0; start--) {
+        const candidate = blocks.slice(start, end + 1).join('\n');
+        if (requirementKind(config, candidate, term) === 'mandatory') {
+          quote = candidate;
+          break;
+        }
+      }
+    }
     if (quote) evidence.push({ requirement: claim, vacancyQuote: quote, profilePath: `not_claimed.${index}`, profileValue: claim });
   }
   const limit = config.profile.travel?.max_onsite_days_per_month;

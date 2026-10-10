@@ -74,6 +74,7 @@ ALLOWED_TASK_PARAMS = {
     "hours_old",
     "fetch_description",
     "enforce_annual_salary",
+    "enrich_only",
 }
 
 
@@ -130,6 +131,8 @@ def classify_error(exc: BaseException) -> str:
         return "timeout"
     if "connection" in text or "ssl" in text or "dns" in text or "proxy" in text:
         return "network"
+    if isinstance(exc, ValueError):
+        return "parse"
     return "error"
 
 
@@ -138,6 +141,8 @@ def build_kwargs(task: dict[str, Any]) -> dict[str, Any]:
     for key, value in task.items():
         if key in ALLOWED_TASK_PARAMS and value is not None:
             kwargs[key] = value
+    if task.get("fetch_description") and task.get("detail_jobs"):
+        kwargs["detail_jobs"] = task["detail_jobs"]
     return kwargs
 
 
@@ -166,6 +171,12 @@ class UpstreamFailures(logging.Handler):
 
 def scrape_with_failures(kwargs: dict[str, Any]) -> tuple[Any, tuple[str, str] | None]:
     from sap_sources import SOURCES, scrape_agency
+    from public_sources import PUBLIC_SOURCES, scrape_public
+
+    if kwargs["site_name"][0] in PUBLIC_SOURCES:
+        import pandas as pd
+        records, failure = scrape_public(kwargs)
+        return pd.DataFrame(records), ((classify_error(failure), f"{type(failure).__name__}: {failure}") if failure else None)
 
     if kwargs["site_name"][0] in SOURCES:
         import pandas as pd
@@ -175,6 +186,12 @@ def scrape_with_failures(kwargs: dict[str, Any]) -> tuple[Any, tuple[str, str] |
 
     from jobspy import scrape_jobs
 
+    if kwargs.get("enrich_only"):
+        import pandas as pd
+        from details import enrich_board
+        records, failure = enrich_board(kwargs["site_name"][0], [], kwargs)
+        return pd.DataFrame(records), ((classify_error(failure), f"{type(failure).__name__}: {failure}") if failure else None)
+
     capture = UpstreamFailures()
     loggers = [logging.getLogger(name) for name in list(logging.root.manager.loggerDict)
                if name.startswith("JobSpy:")]
@@ -182,8 +199,26 @@ def scrape_with_failures(kwargs: dict[str, Any]) -> tuple[Any, tuple[str, str] |
     for logger in loggers:
         logger.addHandler(capture)
     try:
-        frame = scrape_jobs(**kwargs)
-        return frame, capture.worst()
+        # A backlog reuses this task's description request allowance rather
+        # than requesting full search details plus a second set of URLs.
+        backlog = kwargs.get("detail_jobs")
+        search_kwargs = {key: value for key, value in kwargs.items() if key not in {"detail_jobs", "enrich_only"}}
+        if backlog:
+            search_kwargs["fetch_description"] = False
+        frame = scrape_jobs(**search_kwargs)
+        failure = capture.worst()
+        if backlog and not failure:
+            import pandas as pd
+            from details import enrich_board
+
+            columns = [column for column in FORWARDED_COLUMNS if column in frame.columns]
+            rows = [{key: clean_value(value) for key, value in row.items()}
+                    for row in frame[columns].to_dict(orient="records")]
+            records, detail_failure = enrich_board(kwargs["site_name"][0], rows, kwargs)
+            frame = pd.DataFrame(records)
+            if detail_failure:
+                failure = (classify_error(detail_failure), f"{type(detail_failure).__name__}: {detail_failure}")
+        return frame, failure
     finally:
         for logger, level in zip(loggers, levels):
             logger.removeHandler(capture)

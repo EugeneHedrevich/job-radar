@@ -10,8 +10,9 @@ Python collectors -> JSON Lines -> Node.js / SAP CAP -> SQLite -> matching -> Te
                                       deduplication
 ```
 
-* **Collection**: `python-jobspy` (LinkedIn, Indeed, Glassdoor) and public SAP agency adapters
-  (RED Global, Eursap, Whitehall Resources), run as a subprocess.
+* **Collection**: `python-jobspy` (LinkedIn, Indeed, Glassdoor), public recruiter pages
+  (RED Global, Eursap, Whitehall Resources, Michael Page, Next Ventures), and the
+  Remotive, Arbeitnow, Remote OK and Jobicy public APIs, run as subprocesses.
 * **Orchestration & persistence**: SAP CAP (Node.js + TypeScript) on SQLite.
 * **Matching**: deterministic rules first, optional structured OpenAI evaluation second.
 * **Notification**: Telegram Bot API.
@@ -159,6 +160,7 @@ machine.
 | `npm run watch`              | Run the cycle on the configured schedule (every 3h by default)    |
 | `npm run cycle:demo`         | Complete cycle on offline demo fixtures, dry run                  |
 | `npm run status`             | Database counts, source health, configuration state               |
+| `npm run enrich`             | Fetch stored descriptions within the budget, without new searches |
 | `npm test`                   | Test suite                                                        |
 | `npm run test:collector`    | Python collector regressions against pinned JobSpy, mocked HTTP  |
 
@@ -214,7 +216,7 @@ retains the listing identity, reports failure and stops further requests for tha
 
 ### Priority coverage and initial backfill
 
-Actual `rotation.batches` now contain small, interleaved searches for all six sources:
+Priority `rotation.batches` contain small, interleaved searches for the original six sources:
 
 | Direction | Batches |
 | --------- | ------- |
@@ -229,14 +231,29 @@ SAP AI Core, SAP Generative AI Hub and SAP BTP AI. Other batches add Developer,
 Consultant, Architect and separate freelance / contract / B2B queries. Broad queries
 remain in use; engagement is still evaluated after collection.
 
-Each priority batch uses two or three queries and one geography per source, producing
-12 or 18 tasks. Every configured task fits; later sources and keywords are not cut off.
-The 14 priority batches plus five existing batches form a **19-cycle / 57-hour** rotation
-at the current three-hour schedule. Starting from `cap-broad`, the first four priority
-batches cover every direction on all six sources; all phrase variants are searched within one full rotation,
+Each priority batch uses two or three queries and selected source geographies, producing
+at most 18 tasks. Every configured task fits; later sources and keywords are not cut off.
+The priority, specialist, regional and public-catalogue batches use an explicit **33-cycle / 99-hour**
+`rotation.sequence` at the current three-hour schedule. The four broad priority batches
+repeat every **33 hours**; role and engagement variants remain in the sequence. Starting
+from `cap-broad`, the first four priority batches cover every direction across the six sources;
+all phrase variants are searched within one full rotation,
 when sources are enabled and not cooling down. This is a bound on searches, not on job
-availability or complete description coverage. The two description slots advance on
-repeated runs of each batch instead of increasing request volume.
+availability or complete description coverage. A global, persisted source cursor gives
+each of the five eligible description sources a slot within three priority cycles
+(up to nine hours), when all are available. Keyword/location progress remains separate
+for each batch. Disabled sources, cooldowns and `--source` restrictions consume no slots.
+
+Selected LinkedIn and agency description tasks also reserve a small share of their existing request
+allowance for stored jobs without descriptions, independently of the active search term.
+Reservations persist before collection and rotate unsuccessful URLs to the queue tail.
+Public detail pages may be unavailable or blocked; those failures are reported through
+the normal circuit breaker, and incomplete jobs remain visible. Backlog and fresh search
+details share the same allowance: at most `results_wanted` requests on LinkedIn, and
+ten on agencies. No third description task is added. Agency searches still refill after
+old/expired detail pages, within their three-page and ten-detail-request bounds.
+Glassdoor keeps JobSpy's search-session description fetch; its stored URLs are not
+replayed separately. Indeed already includes descriptions in search results.
 
 For the first manual backfill, use a **7–14 day window** (`--hours 168` or `--hours 336`)
 and a small `--results` value. For example, run these separately and inspect their counters:
@@ -253,10 +270,11 @@ npm run notify -- --dry-run --limit 3
 ```
 
 Use the other batch keys above for role and engagement variants. Repeating a batch advances
-its description rotation. Each invocation still allows at most **18 searches, two tasks
+its description rotation; other batches advance the shared source cursor too.
+Each invocation still allows at most **18 searches, two tasks
 with descriptions, five OpenAI requests and three Telegram notifications**. Several invocations
 multiply those budgets; `rank --limit` controls printed items, not OpenAI requests.
-`--hours` only changes that manual collection: regular `watch` keeps the **96-hour** window.
+`--hours` only changes that manual collection: regular `watch` keeps the **120-hour** window.
 The commands contact live sources/OpenAI; the final dry run only prevents Telegram delivery.
 
 `collect`, `rank`, `notify` and `status` print a compact table for CAP/CAPM, UI5/Fiori, Joule
@@ -268,6 +286,31 @@ notification-ready counts; the per-run Telegram cap still applies. A vacancy may
 several directions. Missing descriptions are visible before ranking rather than counted
 as a failed LLM request. SAP Joule titles retain relevance, while generic AI/Joule titles
 without SAP context fail prescreen.
+
+### EMEA and Dubai / UAE searches
+
+Regional batches are included in the regular rotation:
+
+| Batch | Coverage | Tasks |
+| ----- | -------- | ----: |
+| `emea-frontend` | SAPUI5, SAP UI5 and Fiori on LinkedIn across EMEA, Europe, the Middle East, Africa, UAE and Dubai | 18 |
+| `emea-core` | BTP, CAP and CPI on LinkedIn across EMEA, the Middle East and Africa; Indeed in UAE, South Africa and Egypt | 18 |
+| `uae-frontend` | Developer queries on LinkedIn and Indeed in UAE/Dubai | 12 |
+
+```bash
+npm run collect -- --batch emea-frontend --hours 720 --results 25
+npm run collect -- --batch emea-core --hours 720 --results 25
+npm run collect -- --batch uae-frontend --hours 720 --results 25
+npm run rank -- --rules-only
+```
+
+The public SAP batch also searches Michael Page UAE with the broad `SAP` keyword.
+Narrow UAE developer routes returned 404 and are excluded from the scheduled batch.
+Glassdoor has no supported UAE country endpoint. Bulgaria uses LinkedIn because the
+tested Indeed Bulgaria endpoint returned HTTP 400. Search coverage does not establish
+work authorisation or acceptance of relocation: the existing profile still controls ranking.
+Regional searches supplement country searches; provider result caps, cooldowns and
+description budgets mean a scan cannot guarantee every advertised EMEA vacancy.
 
 ## 4. Configuration
 
@@ -283,7 +326,7 @@ Key behaviours driven by configuration:
 
 * **Rotation** — `searches.rotation` defines small batches. One batch runs per cycle, so a
   3-hourly schedule walks the whole rotation instead of running every keyword against every
-  country every time. The freshness window (`defaults.hours_old`, 96h) deliberately overlaps
+  country every time. The freshness window (`defaults.hours_old`, 120h) deliberately overlaps
   several cycles so a failed run loses nothing.
 * **Per-source geography** — LinkedIn only understands free-text `location`; Indeed and
   Glassdoor need `country_indeed` with JobSpy's exact spelling, and Glassdoor supports fewer
@@ -292,7 +335,8 @@ Key behaviours driven by configuration:
   fetch full descriptions (one extra HTTP request per job, and the fastest way to get
   blocked). A job without a description stays incomplete: it is shown and can be reviewed,
   but it is never given an invented assessment and can never be recommended `Apply`.
-  Persistent per-batch source and keyword/location cursors distribute those slots fairly.
+  A persistent global source cursor and per-batch keyword/location cursors distribute
+  those slots. Existing incomplete listings share the selected slots for enrichment.
 * **Scoring** — `weights` must sum to 1.0. Bumping `profile.version` or `scoring.version`
   invalidates every cached assessment.
 
@@ -302,8 +346,58 @@ Computer Science degree or a particular diploma level.
 
 ### Changing the notification threshold
 
-`config/settings.yaml` → `telegram.min_fit_score` (default `75`). Mirror it in
-`scoring.thresholds.notify` if you also want the recommendation wording to change.
+`config/settings.yaml` → `telegram.min_fit_score` (default `75`) is the single delivery
+threshold. Recommendation wording is controlled independently by `scoring.thresholds.apply`
+and `scoring.thresholds.review`.
+
+`npm run top` only reads current saved assessments. After a content/configuration or cache
+revision change, run `npm run rank` to produce current results; old assessments remain in
+history. Completed AI attempts, including unsupported answers and provider failures,
+are cached with their rules fallback and reason. A subsequent normal run does not pay
+for the same attempt again; changed inputs or `npm run rank -- --force` permit a retry.
+
+### Expanded public SAP coverage
+
+The `sap-public` batch searches six additional providers with a broad `SAP` query.
+It runs every 33 hours in the rotation and uses 12 of the 18 allowed tasks.
+
+| Provider | Coverage | Descriptions |
+| -------- | -------- | ------------ |
+| [Michael Page](https://www.michaelpage.pl/jobs/sap) | Poland, Germany, Netherlands, UK, Switzerland, France and UAE | Budgeted public detail pages |
+| [Next Ventures](https://next-ventures.com/jobs/?s=SAP) | Public international SAP recruiter vacancies | Budgeted public detail pages |
+| [Remotive](https://remotive.com/api/remote-jobs?search=SAP) | Remote jobs, retaining candidate location restrictions | Included in API results |
+| [Arbeitnow](https://www.arbeitnow.com/blog/job-board-api) | Employer listings, including regional Arbeitnow URLs | Included in API results |
+| [Remote OK](https://remoteok.com/api) | Latest public remote job feed | Included in API results |
+| [Jobicy](https://jobicy.com/jobs-rss-feed) | Public remote SAP keyword search | Included in API results |
+
+```bash
+npm run collect -- --batch sap-public --results 10
+npm run collect -- --batch sap-public --source michaelpage --results 10
+npm run enrich -- --source linkedin,redglobal,whitehall,michaelpage,nextventures --results 5 --hours 336
+npm run rank -- --rules-only
+```
+
+Michael Page and Next Ventures use a 90-day source freshness window because open
+recruiter adverts often remain active for weeks. The original posting date is retained;
+explicit expiries are respected. `--hours` overrides the window for every selected source.
+Broad collection preserves functional as well as technical SAP roles; the existing profile
+still determines ranking and Telegram eligibility. API sources retain their platform URLs
+and source attribution. Searches are bounded to three pages; feed/API availability does
+not guarantee exhaustive vacancy coverage. Regional location never proves cross-border
+eligibility, and PLN rates are never treated as EUR.
+
+`enrich` spends at most two description tasks on recently seen, relevant stored listings
+and issues no new searches. It supports LinkedIn and all five recruiter adapters; Indeed
+and the public APIs already include descriptions, and Glassdoor requires its search session.
+Bad detail markup rotates to the queue tail; rate limits, blocks and transport errors stop
+requests. LinkedIn canonical redirects must preserve the same numeric listing ID within
+validated public LinkedIn domains; login/access-challenge redirects trigger cooldown.
+Unknown `--source` values fail with the available names, and sources absent from a batch
+report which batch to use.
+
+Freelancermap, Global Enterprise Partners, Linksap and SAP Careers returned HTTP 403
+during public access checks on 2026-10-09 and remain unintegrated. Access challenges are
+not bypassed. Additional sources belong in bounded batches with a tested adapter.
 
 ## 5. How matching works
 
@@ -332,20 +426,40 @@ unknown diploma levels and uncertain equivalency belong in `missingInformation`,
 proven gaps. A stated experience floor such as 7+ years is not proof of less than 10 years.
 Malformed or unsupported model conclusions fall back to rules with explicit uncertainty,
 without another OpenAI request. Deterministic mandatory gaps, hard rejects and travel
-uncertainty remain authoritative. Assessment cache revision 7 and an additive SQLite
+uncertainty remain authoritative. Assessment cache revision 12 and an additive SQLite
 migration preserve old assessments, jobs, notification history and unique indexes.
 
 Rules that always apply:
 
+* **Focused frontend roles use frontend skills.** Full SAPUI5/Fiori adverts with at least
+  three matched role skills, including declared SAPUI5, also use the weights in
+  `technical.role_profiles.ui5`. A remote UI5/JavaScript/TypeScript/OData contract can qualify
+  without CAP, Node.js or BTP. Title-only and incidental UI5 mentions do not gain these
+  points, and mandatory ABAP or other incompatibilities still force `Skip`.
+  UI5 broad searches include Germany, the Netherlands and Poland explicitly, and
+  the frontend batch searches `SAPUI5 Developer`, `SAP UI5 Developer` and `SAP Fiori Developer`.
+  Use `npm run top -- --search UI5 --limit 50` or `--search Fiori` to inspect matching titles.
+  If a capability explicitly absent from the profile is mentioned with an unclear obligation,
+  both matching engines cap the score below `Apply` pending review. A confirmed mandatory
+  requirement remains a hard rejection; an explicitly optional requirement does not block a match.
+  Undocumented mandatory capabilities, such as SAP MDK, also require review. They are
+  reported as missing profile evidence, rather than treated as proven incompatibilities.
 * **Mandatory incompatibility overrides a high score.** Permanent-only, ABAP-centric,
   predominantly functional, heavily on-site and unheld-mandatory-language roles are capped at
   `hard_rejects.score_cap` and forced to `Skip` — the LLM cannot override this.
+  An explicitly unclaimed capability that is mandatory also forces `Skip`, including
+  ABAP requirements in mixed BTP/Fiori roles; positive keyword matches cannot compensate.
+  Confirmed AI proficiency/qualification gaps cap the score below the `Apply` threshold.
 * **Requirement boundaries are preserved.** List items and mandatory/preferred sections are
   evaluated separately, and markers are attached to their skill. Known mandatory gaps remain
   mandatory in model results and prevent `Apply`. Short names can be configured in
   `profile.not_claimed_aliases` (for example, `ABAP OO` for `ABAP OO development`).
   A shared marker also covers comma-separated lists without a colon (`Must have CAP,
   Node.js, ABAP OO development`); an explicit preferred marker changes the list context.
+  Recruiter requirement sections are configurable in `signals.mandatory_sections`,
+  `preferred_sections` and `non_requirement_sections`. Polish, German, French and Dutch
+  profile headings are recognized, including Polish `Bardzo dobra znajomość` lists.
+  Evidence includes the governing heading when a skill appears as a bare list item.
 * **Travel limits are enforced for required attendance.** Explicitly mandatory onsite days
   per week/month/year are compared with
   `travel.max_onsite_days_per_month` before accepting a role. Weekly attendance is converted
@@ -426,6 +540,9 @@ marked to prevent live delivery.
 
 * Each source runs in its **own subprocess**, so a hanging or blocked board cannot affect the
   others.
+* Collection runs heartbeat every 30 seconds. Runs with five-minute stale heartbeats are
+  recovered as failed by collection/status; legacy runs receive the full process/retry
+  allowance for their recorded batch. Unexpected pipeline errors also close the run as failed.
 * Timeouts, rate limits, blocks and network errors are classified separately. Timeouts and
   network errors get one bounded retry; **rate limits and blocks are never retried** — the
   source goes on cooldown (`resilience.cooldown_minutes`) and is reported in `npm run status`.
@@ -493,7 +610,8 @@ Deliberately out of scope for this MVP, with the hooks that would be used:
   contract as `python/collector.py`; nothing else changes.
 * **More SAP agencies** — follow the public adapters in `python/sap_sources.py`, emit the
   same collector contract and register a source and batch in `config/searches.yaml`.
-* **Additional APIs** (Adzuna, Jooble, Arbeitnow) — same collector contract.
+* **Additional authenticated APIs** (Adzuna, Jooble) — same collector contract;
+  Arbeitnow and three public remote-job APIs are already integrated.
 * **CV tailoring** — `config/cv-variants.yaml` already carries variant metadata; a generator
   would consume `Assessments.suggestedCvVariant` plus the gap lists.
 * **Dashboard** — the CAP model is already there; add a `srv/` service and expose

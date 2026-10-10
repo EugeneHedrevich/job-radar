@@ -16,7 +16,7 @@ describe('priority search coverage within operational limits', () => {
   it('executes every configured task, including each batch tail, in one bounded rotation', () => {
     const config = loadConfig();
     const seen = new Set<string>();
-    const count = config.searches.rotation.batches.length;
+    const count = config.searches.rotation.sequence?.length ?? config.searches.rotation.batches.length;
     expect(count * config.searches.rotation.interval_hours).toBeLessThan(config.searches.defaults.hours_old);
     for (let slot = 0; slot < count; slot += 1) {
       const at = new Date(slot * config.searches.rotation.interval_hours * 3_600_000);
@@ -35,12 +35,23 @@ describe('priority search coverage within operational limits', () => {
       }
       seen.add(batch.key);
     }
-    expect(seen.size).toBe(count);
+    expect(seen.size).toBe(config.searches.rotation.batches.length);
+  });
+
+  it('revisits every broad priority group and public catalogue within 33 hours', () => {
+    const config = loadConfig();
+    const sequence = config.searches.rotation.sequence!;
+    for (const key of ['cap-broad', 'ui5-broad', 'joule-broad', 'btp-ai-broad', 'sap-public']) {
+      const positions = sequence.flatMap((item, index) => item === key ? [index] : []);
+      expect(positions).toHaveLength(3);
+      const wrapped = [...positions, positions[0]! + sequence.length];
+      expect(Math.max(...positions.map((position, i) => (wrapped[i + 1]! - position) * config.searches.rotation.interval_hours))).toBe(33);
+    }
   });
 
   it('covers broad technologies, roles and engagement variants on all six sources', () => {
     const config = loadConfig();
-    const allSources = Object.keys(config.searches.sources);
+    const allSources = ['linkedin', 'indeed', 'glassdoor', 'redglobal', 'eursap', 'whitehall'];
     const required = ['SAP CAP', 'SAP CAPM', 'SAP Cloud Application Programming Model', 'SAPUI5', 'SAP UI5', 'SAP Fiori', 'Fiori Elements',
       'SAP Joule', 'Joule Studio', 'SAP Joule Developer', 'SAP Business AI', 'SAP AI Core', 'SAP Generative AI Hub', 'SAP BTP AI'];
     for (const source of allSources) {
@@ -59,6 +70,53 @@ describe('priority search coverage within operational limits', () => {
     expect(config.settings.llm.max_jobs_per_run).toBe(5);
     expect(config.settings.telegram.max_per_run).toBe(3);
     expect(config.settings.telegram.min_fit_score).toBe(75);
+  });
+
+  it('searches every new public source and Michael Page market without using API description slots', () => {
+    const config = loadConfig();
+    const plan = planBatch(config, { batchKey: 'sap-public' });
+    expect([...plan.tasksBySource.keys()]).toEqual(['michaelpage', 'nextventures', 'remotive', 'arbeitnow', 'remoteok', 'jobicy']);
+    expect(plan.tasksBySource.get('michaelpage')!.map((task) => task.location)).toEqual(
+      ['Poland', 'Germany', 'Netherlands', 'United Kingdom', 'Switzerland', 'France', 'United Arab Emirates']);
+    expect([...plan.tasksBySource.values()].flat()).toHaveLength(12);
+    expect([...plan.tasksBySource.values()].flat().every((task) => task.search_term === 'SAP')).toBe(true);
+    const descriptions = [...plan.tasksBySource.values()].flat().filter((task) => task.fetch_description);
+    expect(descriptions.map((task) => task.source)).toEqual(['michaelpage', 'nextventures']);
+    expect(plan.tasksBySource.get('michaelpage')!.every((task) => task.hours_old === 2160)).toBe(true);
+    expect(planBatch(config, { batchKey: 'sap-public', hoursOld: 168 }).tasksBySource.get('michaelpage')!
+      .every((task) => task.hours_old === 168)).toBe(true);
+  });
+
+  it('covers UI5 individual markets and both compact and spaced developer names', () => {
+    const config = loadConfig();
+    const broad = planBatch(config, { batchKey: 'ui5-broad' });
+    expect(broad.tasksBySource.get('linkedin')!.map((task) => task.location))
+      .toEqual(expect.arrayContaining(['European Union', 'Germany', 'Netherlands']));
+    expect(broad.tasksBySource.get('indeed')!.map((task) => task.country_indeed))
+      .toEqual(expect.arrayContaining(['Germany', 'Poland']));
+    expect([...broad.tasksBySource.values()].flat()).toHaveLength(18);
+    const frontend = planBatch(config, { batchKey: 'frontend' });
+    expect(frontend.keywords).toEqual(['SAPUI5 Developer', 'SAP UI5 Developer', 'SAP Fiori Developer']);
+    expect([...frontend.tasksBySource.values()].flat()).toHaveLength(18);
+    expect(frontend.tasksBySource.get('linkedin')!.some((task) => task.location === 'Bulgaria')).toBe(true);
+    expect(frontend.tasksBySource.get('indeed')!.some((task) => task.country_indeed === 'Bulgaria')).toBe(false);
+  });
+
+  it('covers all three EMEA regions and uses supported UAE endpoints', () => {
+    const config = loadConfig();
+    const frontend = planBatch(config, { batchKey: 'emea-frontend' });
+    expect([...frontend.tasksBySource.values()].flat()).toHaveLength(18);
+    expect(frontend.tasksBySource.get('linkedin')!.map((task) => task.location))
+      .toEqual(expect.arrayContaining(['EMEA', 'Europe', 'Middle East', 'Africa', 'United Arab Emirates', 'Dubai, United Arab Emirates']));
+    const core = planBatch(config, { batchKey: 'emea-core' });
+    expect(core.tasksBySource.get('indeed')!.map((task) => task.country_indeed))
+      .toEqual(expect.arrayContaining(['United Arab Emirates', 'South Africa', 'Egypt']));
+    const uae = planBatch(config, { batchKey: 'uae-frontend' });
+    expect([...uae.tasksBySource.values()].flat()).toHaveLength(12);
+    expect(uae.tasksBySource.get('indeed')!.every((task) => task.country_indeed === 'United Arab Emirates')).toBe(true);
+    expect(planBatch(config, { batchKey: 'sap-public' }).tasksBySource.get('michaelpage')!
+      .some((task) => task.location === 'United Arab Emirates' && task.search_term === 'SAP')).toBe(true);
+    expect(config.searches.sources.glassdoor!.geos.ae).toBeUndefined();
   });
 
   it.each(['SAP Joule Developer', 'SAP Joule Architect', 'SAPUI5 Developer', 'SAP BTP AI Consultant'])

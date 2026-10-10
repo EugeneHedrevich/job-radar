@@ -38,7 +38,7 @@ export const collectorLineSchema = z.discriminatedUnion('type', [
     task_id: z.string(),
     source: z.string(),
     status: z.enum(['succeeded', 'failed']),
-    error_kind: z.enum(['rate_limit', 'blocked', 'timeout', 'network', 'error']).optional(),
+    error_kind: z.enum(['rate_limit', 'blocked', 'timeout', 'network', 'error', 'parse']).optional(),
     message: z.string().optional(),
     count: z.number(),
     duration_ms: z.number(),
@@ -60,6 +60,9 @@ export interface CollectorTask {
   distance: number;
   description_format: 'markdown' | 'html';
   fetch_description: boolean;
+  /** Existing incomplete listings, hydrated independently of this search. */
+  detail_jobs?: CollectorJob[];
+  enrich_only?: boolean;
   is_remote: boolean;
   job_type?: string;
 }

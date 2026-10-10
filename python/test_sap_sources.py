@@ -44,6 +44,17 @@ def posting(**overrides):
 
 
 class AgencyAdaptersTest(unittest.TestCase):
+    def test_middle_eastern_and_african_locations_keep_the_explicit_country(self):
+        for source, expected in [
+            ("Dubai, UAE", "Dubai, United Arab Emirates"),
+            ("AE, Abu Dhabi", "Abu Dhabi, United Arab Emirates"),
+            ("Johannesburg, ZA", "Johannesburg, South Africa"),
+            ("Cairo, EG", "Cairo, Egypt"),
+        ]:
+            with self.subTest(source=source):
+                self.assertEqual(sap_sources.location(source), expected)
+        self.assertEqual(sap_sources.location("Dubai"), "Dubai")
+
     def tearDown(self):
         sap_sources.search_html.cache_clear()
         sap_sources.detail_html.cache_clear()
@@ -184,6 +195,22 @@ class AgencyAdaptersTest(unittest.TestCase):
         self.assertIsNone(failure)
         self.assertEqual([row["id"] for row in rows], ["5"])
         self.assertEqual(request.call_count, 6)
+
+    def test_existing_cap_job_is_enriched_during_ui5_search_with_shared_detail_budget(self):
+        current = datetime.now(timezone.utc).date().isoformat()
+        stored = {"job_url": "https://www.whitehallresources.com/job/stored-cap", "id": "stored-cap", "title": "SAP CAP"}
+        fresh = [{"job_url": f"https://www.whitehallresources.com/job/ui5-{i}", "id": str(i), "title": "SAP UI5"}
+                 for i in range(12)]
+        with patch("sap_sources.search_html", return_value="html") as search, \
+             patch("sap_sources.parse_search", return_value=(fresh, False)), \
+             patch("sap_sources.detail_html", return_value=posting(datePosted=current)) as detail:
+            rows, failure = sap_sources.scrape_agency({"site_name": ["whitehall"], "search_term": "SAP UI5", "results_wanted": 12,
+                                                       "fetch_description": True, "detail_jobs": [stored]})
+        self.assertIsNone(failure)
+        self.assertEqual(rows[0]["id"], "stored-cap")
+        self.assertTrue(rows[0]["description"])
+        self.assertEqual(detail.call_count, sap_sources.MAX_DETAIL_REQUESTS_PER_TASK)
+        self.assertEqual(search.call_args.args[1], "SAP UI5")
 
     def test_refills_across_pages_but_never_exceeds_detail_request_limit(self):
         stale = (datetime.now(timezone.utc).date() - timedelta(days=30)).isoformat()

@@ -140,6 +140,15 @@ describe('source failure isolation', () => {
 });
 
 describe('batch planning', () => {
+  it('rejects unknown source names before creating a zero-task plan', () => {
+    expect(() => planBatch(loadConfig(), { onlySources: ['michaeil'] })).toThrow(/Unknown source.*michaeil/);
+  });
+
+  it('explains which batch to use when a configured source is absent from the active batch', () => {
+    const plan = planBatch(loadConfig(), { batchKey: 'btp-core', onlySources: ['michaelpage'] });
+    expect(plan.tasksBySource.size).toBe(0);
+    expect(plan.skipped).toEqual([{ source: 'michaelpage', reason: 'not in batch "btp-core"; use --batch sap-public' }]);
+  });
   it('plans SAP specialists without assumed geography and within the existing budgets', () => {
     const config = loadConfig();
     const plan = planBatch(config, { batchKey: 'sap-specialists' });
@@ -162,8 +171,9 @@ describe('batch planning', () => {
   it('rotates through the configured batches over time', () => {
     const config = loadConfig();
     const batches = config.searches.rotation.batches.length;
+    const cycles = config.searches.rotation.sequence?.length ?? batches;
     const seen = new Set<number>();
-    for (let hours = 0; hours < batches * config.searches.rotation.interval_hours; hours += config.searches.rotation.interval_hours) {
+    for (let hours = 0; hours < cycles * config.searches.rotation.interval_hours; hours += config.searches.rotation.interval_hours) {
       seen.add(selectBatchIndex(config, new Date(Date.UTC(2026, 0, 1, hours))));
     }
     expect(seen.size).toBe(batches);

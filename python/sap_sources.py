@@ -69,10 +69,15 @@ def location(value: str | None) -> str | None:
     parts = [part for part in parts if part.lower() not in regions]
     countries = {"Austria", "Belgium", "Bulgaria", "France", "Germany", "Ireland", "Italy",
                  "Netherlands", "Poland", "Portugal", "Romania", "Spain", "Sweden", "Switzerland",
-                 "United Kingdom", "United States", "India", "Japan", "China"}
+                 "United Kingdom", "United States", "India", "Japan", "China",
+                 "United Arab Emirates", "South Africa", "Egypt", "Saudi Arabia", "Qatar"}
     aliases = {"DE": "Germany", "FR": "France", "NL": "Netherlands", "GB": "United Kingdom",
+               "PL": "Poland", "Polska": "Poland", "CH": "Switzerland",
+               "Schweiz": "Switzerland", "Suisse": "Switzerland",
+               "AE": "United Arab Emirates", "UAE": "United Arab Emirates",
+               "ZA": "South Africa", "EG": "Egypt", "SA": "Saudi Arabia", "QA": "Qatar",
                "US": "United States", "Deutschland": "Germany", "United States of America": "United States"}
-    parts = [aliases.get(part, part) for part in parts]
+    parts = list(dict.fromkeys(aliases.get(part, part) for part in parts))
     explicit = [part for part in parts if part in countries]
     if len(explicit) == 1:
         parts = [part for part in parts if part != explicit[0]] + explicit
@@ -283,6 +288,21 @@ def scrape_agency(kwargs: dict[str, Any]) -> tuple[list[dict[str, Any]], BaseExc
     failure: BaseException | None = None
     fetch_description = bool(kwargs.get("fetch_description"))
     detail_requests = 0
+    enriched = []
+    if fetch_description:
+        for row in kwargs.get("detail_jobs", [])[:min(wanted, MAX_DETAIL_REQUESTS_PER_TASK)]:
+            detail_requests += 1
+            try:
+                url = safe_url(source, row["job_url"])
+                updated = hydrate(source, row, detail_html(url), kwargs.get("description_format", "markdown"))
+            except Exception as exc:
+                return enriched, exc
+            seen.add(url)
+            if updated.pop("_expired", False) or (updated.get("date_posted") and date.fromisoformat(updated["date_posted"]) < cutoff):
+                continue
+            enriched.append(updated)
+    if kwargs.get("enrich_only"):
+        return enriched, failure
     for page in range(1, (1 if source == "eursap" else MAX_SEARCH_PAGES) + 1):
         try:
             candidates, more = parse_search(source, search_html(source, kwargs.get("search_term", "SAP"), page))
@@ -297,14 +317,14 @@ def scrape_agency(kwargs: dict[str, Any]) -> tuple[list[dict[str, Any]], BaseExc
                 continue
             if fetch_description:
                 if detail_requests >= MAX_DETAIL_REQUESTS_PER_TASK:
-                    return rows, failure
+                    return enriched + rows, failure
                 detail_requests += 1
                 try:
                     row = hydrate(source, row, detail_html(row["job_url"]), kwargs.get("description_format", "markdown"))
                 except Exception as exc:
                     # Retain the identity, report the failure and stop requests.
                     rows.append(row)
-                    return rows, exc
+                    return enriched + rows, exc
                 if row.pop("_expired", False) or (row.get("date_posted") and
                         date.fromisoformat(row["date_posted"]) < cutoff):
                     continue
@@ -313,4 +333,4 @@ def scrape_agency(kwargs: dict[str, Any]) -> tuple[list[dict[str, Any]], BaseExc
                 break
         if len(rows) >= wanted or not more or (fetch_description and detail_requests >= MAX_DETAIL_REQUESTS_PER_TASK):
             break
-    return rows, failure
+    return enriched + rows, failure

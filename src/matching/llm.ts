@@ -117,6 +117,7 @@ Rules you must follow:
 - If a fact (rate, contract type, location eligibility, work authorisation, language requirement) is not stated, put it in missing_information. Do not guess it, and do not treat it as either a pass or a fail.
 - Use the stated education field. Do not infer a qualification level or institution, or equate Chemical Engineering with Computer Science. Distinguish an unspecified degree requirement from a requirement for a specific field or qualification level.
 - Mixed BTP/ABAP or BTP/IS-U roles must be judged on what the description actually requires, not on the title.
+- Evaluate a focused SAPUI5/Fiori frontend role against the candidate's frontend skills. Do not penalize it for lacking CAP, Node.js or BTP requirements that the vacancy does not ask for. Explicit mandatory ABAP requirements still take precedence.
 - suggested_cv_variant must be exactly one of the allowed CV variant ids.
 - Never invent requirements, technologies, rates or CV content that are not in the inputs.`;
 
@@ -229,7 +230,12 @@ export async function assessWithLlm(config: AppConfig, job: MatchableJob): Promi
   if (deterministic.hardReject) {
     fitScore = Math.min(fitScore, config.scoring.hard_rejects.score_cap);
     recommendation = 'Skip';
-  } else if (recommendation === 'Apply' && (mandatoryGaps.length > 0 || fitScore < config.scoring.thresholds.apply)) {
+  } else if (mandatoryGaps.length > 0 || deterministic.missingInformation.some((item) =>
+    item.startsWith('unclear whether "') && item.endsWith('" is mandatory') ||
+    item.startsWith('profile evidence for required capability "') && item.endsWith('" is not stated'))) {
+    fitScore = Math.min(fitScore, config.scoring.thresholds.apply - 1);
+    if (recommendation === 'Apply') recommendation = 'Review';
+  } else if (recommendation === 'Apply' && fitScore < config.scoring.thresholds.apply) {
     // Keep "Apply" honest: it must clear the configured threshold and have no
     // open mandatory gap.
     recommendation = 'Review';

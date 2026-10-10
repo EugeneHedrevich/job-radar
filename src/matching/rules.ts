@@ -57,6 +57,9 @@ export function findHardRejects(config: AppConfig, text: JobText): HardRejectHit
     if (rule.none.length && matchesAny(text.all, rule.none)) continue;
     hits.push({ id: rule.id, reason: rule.reason });
   }
+  for (const gap of collectGaps(config, text).mandatoryGaps) {
+    hits.push({ id: 'unclaimed_mandatory_skill', reason: `Required capability is explicitly not claimed in the profile: ${gap}.` });
+  }
   return hits;
 }
 
@@ -67,6 +70,7 @@ function clamp(value: number, max: number): number {
 interface TechnicalResult {
   score: number;
   matches: string[];
+  focus: string | null;
 }
 
 function scoreTechnical(config: AppConfig, text: JobText): TechnicalResult {
@@ -96,7 +100,20 @@ function scoreTechnical(config: AppConfig, text: JobText): TechnicalResult {
     /\b(btp|cap|capm|cpi|integration suite|sapui5|ui5|fiori|joule|architect|ai|cloud)\b/.test(text.title);
   if (titleIsRelevant) total = Math.max(total, config.scoring.technical.relevant_title_floor);
 
-  return { score: clamp(total, config.scoring.technical.max), matches: [...new Set(matches)] };
+  let focus: string | null = null;
+  if (text.hasDescription) {
+    const matched = new Set(matches);
+    for (const role of Object.values(config.scoring.technical.role_profiles)) {
+      if (!matchesAny(text.title, role.title_any) || matchesAny(text.title, role.title_none)) continue;
+      if (!role.required_skills.every((skill) => matched.has(skill))) continue;
+      const relevant = Object.entries(role.skills).filter(([skill]) => matched.has(skill));
+      if (relevant.length < role.min_matches) continue;
+      const roleScore = relevant.reduce((sum, [, points]) => sum + points, 0);
+      if (roleScore > total) { total = roleScore; focus = role.label; }
+    }
+  }
+
+  return { score: clamp(total, config.scoring.technical.max), matches: [...new Set(matches)], focus };
 }
 
 interface DimensionResult {
@@ -247,18 +264,26 @@ export function assessWithRules(config: AppConfig, job: MatchableJob): Assessmen
     technical.score * weights.technical + commercial.score * weights.commercial + location.score * weights.location,
   );
 
+  const undocumentedRequirements = unknownSkillRequirements(config, job);
   const missingInformation = [...commercial.missing, ...location.missing, ...gaps.unclear,
-    ...educationUncertainty(config, job), ...unknownSkillRequirements(config, job)];
+    ...educationUncertainty(config, job), ...undocumentedRequirements];
   if (!text.hasDescription) {
     missingInformation.unshift('full description was not retrieved - assessment is based on the title only');
     fitScore = Math.min(fitScore, config.scoring.uncertainty.cap_without_description);
+  }
+  // A known missing skill with an unresolved obligation needs review before
+  // it can qualify for an application or a high-score notification.
+  if (gaps.unclear.length || undocumentedRequirements.length) {
+    fitScore = Math.min(fitScore, config.scoring.thresholds.apply - 1);
   }
 
   const mandatoryGaps = [...gaps.mandatoryGaps];
   let hardRejectReason: string | null = null;
   if (hardRejects.length) {
     hardRejectReason = hardRejects.map((hit) => hit.reason).join(' ');
-    for (const hit of hardRejects) mandatoryGaps.push(hit.reason);
+    for (const hit of hardRejects) {
+      if (hit.id !== 'unclaimed_mandatory_skill') mandatoryGaps.push(hit.reason);
+    }
     fitScore = Math.min(fitScore, config.scoring.hard_rejects.score_cap);
   }
 
@@ -270,6 +295,7 @@ export function assessWithRules(config: AppConfig, job: MatchableJob): Assessmen
   const explanation = buildExplanation({
     hardRejectReason,
     technicalMatches: technical.matches,
+    technicalFocus: technical.focus,
     commercialNotes: commercial.notes,
     locationNotes: location.notes,
     missing: missingInformation,
@@ -299,6 +325,7 @@ export function assessWithRules(config: AppConfig, job: MatchableJob): Assessmen
 function buildExplanation(input: {
   hardRejectReason: string | null;
   technicalMatches: string[];
+  technicalFocus: string | null;
   commercialNotes: string[];
   locationNotes: string[];
   missing: string[];
@@ -307,6 +334,7 @@ function buildExplanation(input: {
   const parts: string[] = [];
   if (input.technicalMatches.length) parts.push(`Matches ${input.technicalMatches.slice(0, 6).join(', ')}.`);
   else parts.push('No profile skill matched the posting text.');
+  if (input.technicalFocus) parts.push(`${input.technicalFocus} role matches the profile's frontend skills.`);
   parts.push(...input.commercialNotes.map(capitalise));
   parts.push(...input.locationNotes.map(capitalise));
   if (input.missing.length) parts.push(`Unknown: ${input.missing.slice(0, 3).join('; ')}.`);

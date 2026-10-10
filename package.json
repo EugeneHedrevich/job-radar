@@ -5,6 +5,7 @@
   "main": "index.js",
   "scripts": {
     "collect": "tsx src/cli.ts collect",
+    "enrich": "tsx src/cli.ts enrich",
     "rank": "tsx src/cli.ts rank",
     "top": "tsx src/cli.ts top",
     "notify": "tsx src/cli.ts notify",

@@ -4,7 +4,7 @@ import { cds, db, SELECT, INSERT, UPDATE, query, queryOne } from '../db/index.js
 import { assessWithLlm, LlmUnavailableError } from '../matching/llm.js';
 import { assessWithRules, prescreen } from '../matching/rules.js';
 import type { AssessmentResult, MatchableJob } from '../matching/types.js';
-import { sha256 } from '../util/text.js';
+import { normalizeText, sha256 } from '../util/text.js';
 import { log } from '../util/log.js';
 
 export interface RankedJob {
@@ -34,7 +34,7 @@ export function assessmentCacheKey(
   engine: 'rules' | 'llm',
 ): string {
   return sha256(JSON.stringify({
-    revision: 7,
+    revision: 12,
     job: {
       ID: job.ID, title: job.title, company: job.company,
       location: job.location, locationCountry: job.locationCountry,
@@ -67,6 +67,7 @@ export async function findCurrentAssessment(config: AppConfig, job: MatchableJob
 }
 
 export async function rank(options: RankOptions = {}): Promise<RankedJob[]> {
+  if (options.jobIds && options.jobIds.length === 0) return [];
   const config = loadConfig();
   const { Jobs, Assessments } = db();
 
@@ -140,17 +141,36 @@ export async function rank(options: RankOptions = {}): Promise<RankedJob[]> {
             message: error instanceof Error ? error.message : String(error),
           });
         }
+        assessment = { ...assessment,
+          missingInformation: [...assessment.missingInformation, 'AI assessment unavailable; cached rules fallback. Use rank --force to retry.'],
+          explanation: `${assessment.explanation} AI request failed; rules fallback used: ${error instanceof Error ? error.message.slice(0, 500) : 'provider failure'}.`,
+        };
         engine = 'rules';
       }
     }
 
-    const storedKey = assessmentCacheKey(config, job, engine);
+    // Cache the performed attempt, including rejected model output or provider
+    // failure. The fallback still reports its actual rules engine and reason.
+    const storedKey = assessmentCacheKey(config, job, shouldUseLlm ? 'llm' : engine);
     const assessmentId = await storeAssessment(job.ID, storedKey, assessment);
     ranked.push({ job, assessment, assessmentId, cached: false });
   }
 
   ranked.sort((a, b) => b.assessment.fitScore - a.assessment.fitScore);
   return options.limit ? ranked.slice(0, options.limit) : ranked;
+}
+
+/** Viewing results never creates or replaces an assessment. */
+export async function readTop(limit = 20, titleSearch?: string): Promise<RankedJob[]> {
+  const config = loadConfig();
+  const ranked: RankedJob[] = [];
+  const needle = normalizeText(titleSearch);
+  for (const job of await query<MatchableJob>(SELECT.from(db().Jobs))) {
+    if (needle && !normalizeText(job.title).includes(needle)) continue;
+    const current = await findCurrentAssessment(config, job);
+    if (current) ranked.push({ job, assessment: rowToAssessment(current), assessmentId: current.ID, cached: true });
+  }
+  return ranked.sort((a, b) => b.assessment.fitScore - a.assessment.fitScore).slice(0, limit);
 }
 
 async function storeAssessment(jobId: string, cacheKey: string, assessment: AssessmentResult): Promise<string> {

@@ -26,7 +26,7 @@ llm:
 
 telegram:
   enabled: true
-  # Minimum fit score required to notify. Mirrors scoring.thresholds.notify.
+  # Single authoritative minimum fit score for Telegram delivery.
   min_fit_score: 75
   # Never send more than this per cycle, however many jobs match.
   max_per_run: 3

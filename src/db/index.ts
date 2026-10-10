@@ -74,6 +74,14 @@ export async function connectDb(dbPathOverride?: string): Promise<any> {
 }
 
 async function ensureMatchingState(connection: any): Promise<void> {
+  const runColumns: Array<{ name: string }> = await connection.run('PRAGMA table_info(sap_jobradar_CollectionRuns)');
+  if (!runColumns.some((column) => column.name === 'heartbeatAt')) {
+    await connection.run('ALTER TABLE sap_jobradar_CollectionRuns ADD COLUMN heartbeatAt TIMESTAMP');
+  }
+  const listingColumns: Array<{ name: string }> = await connection.run('PRAGMA table_info(sap_jobradar_SourceListings)');
+  if (!listingColumns.some((column) => column.name === 'descriptionAttemptedAt')) {
+    await connection.run('ALTER TABLE sap_jobradar_SourceListings ADD COLUMN descriptionAttemptedAt TIMESTAMP');
+  }
   await connection.run(`CREATE TABLE IF NOT EXISTS sap_jobradar_DescriptionRotation
     (batchKey VARCHAR(200) PRIMARY KEY NOT NULL, state TEXT, updatedAt TIMESTAMP)`);
   const columns: Array<{ name: string }> = await connection.run('PRAGMA table_info(sap_jobradar_Assessments)');

@@ -1,7 +1,7 @@
 # SAP Job Radar - candidate profile.
 # Bump `version` whenever you change anything here: cached assessments are keyed
 # on it, so a bump forces re-evaluation of all jobs.
-version: "2026-10-08.1"
+version: "2026-10-10.1"
 
 identity:
   name: "Yauhen Hedrevich"
@@ -101,9 +101,7 @@ skills:
     - { name: "RAG", proficiency: strong, aliases: ["Retrieval Augmented Generation"] }
     - { name: "Embeddings", proficiency: strong }
     - { name: "HANA Vector Engine", proficiency: strong, aliases: ["Vector Engine"] }
-  limited:
-    # Declared explicitly so the matcher does not over-claim them.
-    - { name: "ABAP", proficiency: basic, note: "reading and troubleshooting only; no recent development ownership" }
+  limited: []
 
 # Capabilities deliberately NOT claimed. Used to produce mandatory gaps instead
 # of silently assuming experience.
@@ -116,7 +114,16 @@ not_claimed:
   - "SAP SD/MM functional consulting"
   - "SAP Basis administration"
   - "ABAP HANA (AMDP/CDS ABAP) development"
+  - "ABAP development"
 
 # Short skill names used in requirement lists refer to the same unclaimed capability.
 not_claimed_aliases:
-  "ABAP OO development": ["ABAP OO", "object-oriented ABAP"]
+  "RAP ownership": ["RAP", "RESTful Application Programming Model", "RESTful ABAP Programming Model"]
+  "ABAP OO development": ["ABAP OO", "object-oriented ABAP", "ABAP Objects"]
+  "ABAP on-premise custom development": ["ABAP custom development"]
+  "SAP IS-U functional consulting": ["IS-U functional consulting"]
+  "SAP FI/CO functional consulting": ["FI/CO functional consulting"]
+  "SAP SD/MM functional consulting": ["SD/MM functional consulting"]
+  "SAP Basis administration": ["Basis administration"]
+  "ABAP HANA (AMDP/CDS ABAP) development": ["AMDP", "CDS ABAP development"]
+  "ABAP development": ["ABAP"]

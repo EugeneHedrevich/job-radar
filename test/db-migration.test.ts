@@ -69,6 +69,7 @@ async function createLegacyTemplate(): Promise<string> {
       ALTER TABLE sap_jobradar_Notifications DROP COLUMN claimToken;
       ALTER TABLE sap_jobradar_Notifications DROP COLUMN claimUntil;
       ALTER TABLE sap_jobradar_Jobs DROP COLUMN isDemo;
+      ALTER TABLE sap_jobradar_SourceListings DROP COLUMN descriptionAttemptedAt;
       ALTER TABLE sap_jobradar_Assessments DROP COLUMN mandatoryGapEvidence;
       DROP TABLE sap_jobradar_DescriptionRotation;
       INSERT INTO sap_jobradar_Jobs
@@ -118,6 +119,7 @@ describe('serialized legacy database migrations', () => {
       const columns = migrated.prepare('PRAGMA table_info(sap_jobradar_Notifications)').all();
       expect(columns.map((column) => column.name)).toEqual(expect.arrayContaining(['claimToken', 'claimUntil']));
       expect(migrated.prepare('PRAGMA table_info(sap_jobradar_Assessments)').all().map((column) => column.name)).toContain('mandatoryGapEvidence');
+      expect(migrated.prepare('PRAGMA table_info(sap_jobradar_SourceListings)').all().map((column) => column.name)).toContain('descriptionAttemptedAt');
       expect(migrated.prepare('PRAGMA table_info(sap_jobradar_DescriptionRotation)').all().map((column) => column.name)).toEqual(['batchKey', 'state', 'updatedAt']);
       expect(migrated.prepare('SELECT ID, cacheKey, fitScore, mandatoryGaps, mandatoryGapEvidence FROM sap_jobradar_Assessments').all()).toEqual([{
         ID: 'legacy-assessment', cacheKey: 'revision-6-cache', fitScore: 60, mandatoryGaps: '["original gap"]', mandatoryGapEvidence: null,
@@ -155,6 +157,7 @@ describe('serialized legacy database migrations', () => {
       expect(columns).not.toContain('claimUntil');
       expect(rolledBack.prepare('PRAGMA table_info(sap_jobradar_Jobs)').all().map((column) => column.name)).not.toContain('isDemo');
       expect(rolledBack.prepare('PRAGMA table_info(sap_jobradar_Assessments)').all().map((column) => column.name)).not.toContain('mandatoryGapEvidence');
+      expect(rolledBack.prepare('PRAGMA table_info(sap_jobradar_SourceListings)').all().map((column) => column.name)).not.toContain('descriptionAttemptedAt');
       expect(rolledBack.prepare('PRAGMA table_info(sap_jobradar_DescriptionRotation)').all()).toEqual([]);
       expect(rolledBack.prepare("SELECT status FROM sap_jobradar_Notifications WHERE ID = 'pending-copy'").get()?.status).toBe('Pending');
       expect(rolledBack.prepare('SELECT ID FROM sap_jobradar_Jobs').all()).toHaveLength(2);

@@ -35,12 +35,28 @@ export interface NormalizedJob {
 }
 
 const COUNTRY_CODES: Record<string, string> = {
-  at: 'Austria', be: 'Belgium', bg: 'Bulgaria', ch: 'Switzerland', cz: 'Czech Republic',
+  ae: 'United Arab Emirates', at: 'Austria', be: 'Belgium', bg: 'Bulgaria', ch: 'Switzerland', cz: 'Czech Republic',
   de: 'Germany', dk: 'Denmark', ee: 'Estonia', es: 'Spain', fi: 'Finland', fr: 'France',
   gb: 'United Kingdom', gr: 'Greece', hr: 'Croatia', hu: 'Hungary', ie: 'Ireland',
   it: 'Italy', lt: 'Lithuania', lu: 'Luxembourg', lv: 'Latvia', nl: 'Netherlands',
   no: 'Norway', pl: 'Poland', pt: 'Portugal', ro: 'Romania', se: 'Sweden',
   si: 'Slovenia', sk: 'Slovakia', uk: 'United Kingdom', us: 'United States',
+  za: 'South Africa', eg: 'Egypt', sa: 'Saudi Arabia', qa: 'Qatar',
+  bh: 'Bahrain', kw: 'Kuwait', om: 'Oman', ma: 'Morocco', ng: 'Nigeria', ke: 'Kenya',
+  il: 'Israel', jo: 'Jordan', lb: 'Lebanon', iq: 'Iraq', ir: 'Iran', sy: 'Syria',
+  ye: 'Yemen', ps: 'Palestine', tr: 'Turkey', cy: 'Cyprus', mt: 'Malta', is: 'Iceland',
+  al: 'Albania', ad: 'Andorra', ba: 'Bosnia and Herzegovina', by: 'Belarus',
+  xk: 'Kosovo', li: 'Liechtenstein', md: 'Moldova', mc: 'Monaco', me: 'Montenegro',
+  mk: 'North Macedonia', ru: 'Russia', sm: 'San Marino', rs: 'Serbia', ua: 'Ukraine', va: 'Vatican City',
+  dz: 'Algeria', ao: 'Angola', bj: 'Benin', bw: 'Botswana', bf: 'Burkina Faso', bi: 'Burundi',
+  cv: 'Cape Verde', cm: 'Cameroon', cf: 'Central African Republic', td: 'Chad', km: 'Comoros',
+  cg: 'Congo', cd: 'Democratic Republic of the Congo', ci: 'Ivory Coast', dj: 'Djibouti',
+  gq: 'Equatorial Guinea', er: 'Eritrea', sz: 'Eswatini', et: 'Ethiopia', ga: 'Gabon', gm: 'Gambia',
+  gh: 'Ghana', gn: 'Guinea', gw: 'Guinea-Bissau', ls: 'Lesotho', lr: 'Liberia', ly: 'Libya',
+  mg: 'Madagascar', mw: 'Malawi', ml: 'Mali', mr: 'Mauritania', mu: 'Mauritius', mz: 'Mozambique',
+  na: 'Namibia', ne: 'Niger', rw: 'Rwanda', st: 'Sao Tome and Principe', sn: 'Senegal',
+  sc: 'Seychelles', sl: 'Sierra Leone', so: 'Somalia', ss: 'South Sudan', sd: 'Sudan',
+  tz: 'Tanzania', tg: 'Togo', tn: 'Tunisia', ug: 'Uganda', zm: 'Zambia', zw: 'Zimbabwe',
 };
 
 const COUNTRY_NAMES = new Set(Object.values(COUNTRY_CODES).map((name) => name.toLowerCase()));
@@ -52,6 +68,7 @@ export function extractCountry(location: string | null | undefined): string | nu
   const last = parts.at(-1);
   if (!last) return null;
   const lower = last.toLowerCase();
+  if (['uae', 'u.a.e.'].includes(lower)) return 'United Arab Emirates';
   if (lower.length === 2 && COUNTRY_CODES[lower]) return COUNTRY_CODES[lower];
   if (COUNTRY_NAMES.has(lower)) {
     return Object.values(COUNTRY_CODES).find((name) => name.toLowerCase() === lower) ?? null;

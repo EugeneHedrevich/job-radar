@@ -21,14 +21,6 @@ export function matchesAny(text: string, patterns: readonly string[]): boolean {
   return patterns.some((source) => pattern(source).test(text));
 }
 
-export function firstMatch(text: string, patterns: readonly string[]): string | null {
-  for (const source of patterns) {
-    const found = text.match(pattern(source));
-    if (found) return found[0];
-  }
-  return null;
-}
-
 /** Searchable, normalised view of a job. */
 export interface JobText {
   title: string;
@@ -109,7 +101,10 @@ export function hourlyRate(config: AppConfig, job: MatchableJob): HourlyRate {
   if (currency && currency !== target.toUpperCase()) {
     return { value, currency, comparable: false, note: `rate stated in ${currency}, target is ${target}` };
   }
-  return { value, currency: currency ?? target, comparable: true, note: null };
+  if (!currency) {
+    return { value, currency: null, comparable: false, note: 'salary currency not stated; rate cannot be compared with the profile' };
+  }
+  return { value, currency, comparable: true, note: null };
 }
 
 /** Preserve list items and clauses, without splitting technology names at dots. */
@@ -144,17 +139,39 @@ export function requirementKind(config: AppConfig, text: string, term: string): 
   let preferred = false;
   let section: Requirement | null = null;
   for (const block of sentences(text)) {
+    const heading = normalizeText(block).replace(/^(?:[-+*#]+|\d+[.)])\s*/, '')
+      .replace(/[:*#]+$/g, '').trim();
+    // Recruiter requirement sections often have no marker on each list item.
+    // Section boundaries also keep benefits/responsibilities out of that list.
+    if (matchesAny(heading, config.scoring.signals.mandatory_sections ?? [])) {
+      section = 'mandatory';
+      continue;
+    }
+    if (matchesAny(heading, config.scoring.signals.preferred_sections ?? [])) {
+      section = 'preferred';
+      continue;
+    }
+    if (matchesAny(heading, config.scoring.signals.non_requirement_sections ?? [])) {
+      section = null;
+      continue;
+    }
     // A shared marker governs the remaining comma-separated items in this
     // sentence, until an item supplies its own mandatory/preferred marker.
     let listKind: Requirement | null = section;
     for (const part of block.split(/,|\s+[|•]\s*/)) {
-      const clause = normalizeText(part).replace(/^(?:[-*#]+|\d+[.)])\s*/, '');
+      const clause = normalizeText(part).replace(/^(?:[-+*#]+|\d+[.)])\s*/, '');
       const attendancePart = pattern(ONSITE).test(clause) || pattern(SCHEDULE).test(clause) ||
         /\b(?:attendance|relocation)\b/.test(clause);
       // An attendance obligation ends an inline skill list. Its marker must
       // not turn a neighboring, unqualified skill into a mandatory requirement.
       if (attendancePart) listKind = section;
-      const negated = markers(clause, ['\\b(?:not|never)\\s+(?:strictly\\s+)?(?:required|mandatory|essential)\\b'], 'preferred' as const);
+      const negated = markers(clause, [
+        '\\b(?:not|never)\\s+(?:strictly\\s+)?(?:require[ds]?|mandatory|essential|compulsory|obligatory)\\b',
+        '\\bnie\\s+(?:(?:jest|sa)\\s+)?wymagan(?:e|a|y)\\b',
+        '\\bnicht\\s+(?:erforderlich|zwingend)\\b',
+        '\\bnon\\s+(?:requis|obligatoire)\\b',
+        '\\bniet\\s+vereist\\b',
+      ], 'preferred' as const);
       const foundMarkers = [
         ...markers(clause, mandatoryMarkers, 'mandatory' as const)
           .filter((marker) => !negated.some((negative) => marker.start >= negative.start && marker.end <= negative.end)),
@@ -179,7 +196,8 @@ export function requirementKind(config: AppConfig, text: string, term: string): 
         section = null;
         listKind = null;
       }
-      for (const occurrence of clause.matchAll(new RegExp(needle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g'))) {
+      const escapedNeedle = needle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      for (const occurrence of clause.matchAll(new RegExp(`(?<![a-z0-9])${escapedNeedle}(?![a-z0-9])`, 'g'))) {
         found = true;
         const kind = nearestMarker(foundMarkers, occurrence.index, occurrence.index + needle.length)?.kind ?? listKind;
         if (kind === 'mandatory') return 'mandatory';

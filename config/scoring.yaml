@@ -6,7 +6,7 @@
 # The output is a FIT SCORE (0-100): how well the vacancy matches the profile.
 # It is NOT a probability of being hired.
 
-version: "2026-10-07.1"
+version: "2026-10-10.4"
 
 # Final score = sum(dimension score x weight). Weights must sum to 1.0.
 weights:
@@ -17,15 +17,12 @@ weights:
 thresholds:
   apply: 75 # >= -> recommendation "Apply"
   review: 55 # >= -> recommendation "Review"; below -> "Skip"
-  notify: 75 # >= -> eligible for a Telegram notification
   # Jobs that pass the LLM screen gate are sent to the LLM (stage 2).
   llm_screen_gate: 45
 
 # Unknown facts must not silently become a yes or a no.
-# These neutral values are used when a dimension cannot be judged, and the fact
-# is recorded in `missingInformation`.
+# Missing facts are recorded in `missingInformation`.
 uncertainty:
-  neutral_score: 50
   # A job whose description was never retrieved can never be recommended
   # "Apply" by the deterministic engine, only "Review".
   cap_without_description: 70
@@ -42,6 +39,23 @@ technical:
     data: { points_per_hit: 7, cap: 21 }
     platform: { points_per_hit: 6, cap: 18 }
     ai: { points_per_hit: 9, cap: 27 }
+  # A focused frontend role is assessed against its own skill set. Unrequested
+  # CAP/Node.js/BTP skills must not be needed to clear the Apply threshold.
+  # This only uses skills actually held in the profile and found in a full ad.
+  role_profiles:
+    ui5:
+      label: "SAPUI5 frontend"
+      title_any: ["\\b(?:sapui5|ui5|fiori)\\b"]
+      title_none: ["\\b(?:abap|rap|btp|capm?|cpi|basis)\\b"]
+      required_skills: ["SAPUI5"]
+      min_matches: 3
+      skills:
+        "SAPUI5": 40
+        "SAP Fiori": 15
+        "JavaScript": 15
+        "TypeScript": 10
+        "OData": 10
+        "REST": 10
   # A title hit is worth this multiplier on top of a description hit.
   title_multiplier: 1.5
   # Floor applied when the title clearly names an SAP BTP-family role.
@@ -90,7 +104,7 @@ hard_rejects:
       none: []
 
     - id: abap_only
-      reason: "ABAP-centric development role; profile has reading-level ABAP only."
+      reason: "ABAP-centric development role; profile does not claim ABAP development."
       any:
         - "abap (developer|consultant|programmer)"
         - "senior abap"
@@ -144,6 +158,7 @@ hard_rejects:
         - "(fluent|native|business) (french|dutch|italian|spanish|polish)"
         - "(french|dutch|italian|spanish|polish) (language )?(is )?(required|mandatory|a must)"
         - "sehr gute deutschkenntnisse"
+        - "sehr gute deutsch[- ]+und\\b"
       none:
         - "english (only|speaking|is sufficient|is enough)"
         - "german (is )?(a plus|nice to have|optional|not required|beneficial)"
@@ -224,10 +239,15 @@ signals:
   mandatory_markers:
     - "must have"
     - "required"
+    - "\\b(?:requires?|must|compulsory|obligatory)\\b"
     - "mandatory"
     - "essential"
     - "is a must"
     - "minimum requirement"
+    - "\\bwymagan(?:e|a|y)\\b"
+    - "bardzo dobra znajomosc"
+    - "\\b(?:erforderlich|zwingend|unverzichtbar)\\b"
+    - "\\b(?:obligatoire|requis|indispensable|vereist)\\b"
   preferred_markers:
     - "nice to have"
     - "preferred"
@@ -235,6 +255,23 @@ signals:
     - "beneficial"
     - "desirable"
     - "would be an advantage"
+    - "mile widzian(?:e|a|y)\\b"
+    - "(?:dodatkowym )?atutem"
+    - "\\b(?:wunschenswert|von vorteil|souhaite|souhaitee|wenselijk)\\b"
+  mandatory_sections:
+    - "^(?:requirements|qualifications|candidate profile|your profile|what you bring)$"
+    - "^(?:key )?responsibilities (?:&|and) requirements$"
+    - "^(?:profil kandydata|(?:nasze )?wymagania|oczekiwania)$"
+    - "^(?:profil|(?:dein|ihr) profil|anforderungen|qualifikationen)$"
+    - "^(?:profil recherche|votre profil|jouw profiel|functie-eisen)$"
+  preferred_sections:
+    - "^(?:nice to have|preferred (?:skills|qualifications)|desirable skills)$"
+    - "^(?:mile widziane|dodatkowe atuty|wunschenswert|von vorteil)$"
+  non_requirement_sections:
+    - "^(?:responsibilities|(?:your |the )?role|job description|about (?:us|the (?:company|client))|(?:what )?we offer|benefits)$"
+    - "^(?:opis stanowiska|zakres obowiazkow|o naszym kliencie|oferujemy)$"
+    - "^(?:aufgaben|(?:deine|ihre) aufgaben|wir bieten|vorteile)$"
+    - "^(?:missions|vos missions|nous offrons|avantages|aanbod|wij bieden)$"
 
 # Countries considered inside the preferred working region.
 preferred_countries:

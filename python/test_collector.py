@@ -20,6 +20,28 @@ def task(task_id="test", source="linkedin"):
 
 
 class CollectorFailuresTest(unittest.TestCase):
+    def test_description_only_never_calls_board_search(self):
+        stored = {"id": "123", "title": "SAP CAP", "job_url": "https://www.linkedin.com/jobs/view/123"}
+        with patch("jobspy.scrape_jobs") as scrape, patch("details.enrich_board", return_value=([stored], None)) as enrich:
+            frame, failure = collector.scrape_with_failures({"site_name": ["linkedin"], "enrich_only": True,
+                "fetch_description": True, "results_wanted": 5, "detail_jobs": [stored]})
+        scrape.assert_not_called()
+        self.assertEqual(enrich.call_args.args[1], [])
+        self.assertIsNone(failure)
+        self.assertEqual(len(frame), 1)
+
+    def test_backlog_uses_search_without_details_and_reports_enrichment_failure(self):
+        stored = {"id": "stored", "title": "SAP CAP", "job_url": "https://www.linkedin.com/jobs/view/1"}
+        frame = pd.DataFrame([{**stored, "id": "fresh", "description": float("nan")}])
+        with patch("jobspy.scrape_jobs", return_value=frame) as scrape, \
+             patch("details.enrich_board", return_value=([stored], RuntimeError("429 detail request"))) as enrich:
+            _, failure = collector.scrape_with_failures({"site_name": ["linkedin"], "fetch_description": True,
+                                                        "results_wanted": 5, "detail_jobs": [stored]})
+        self.assertFalse(scrape.call_args.kwargs["fetch_description"])
+        self.assertNotIn("detail_jobs", scrape.call_args.kwargs)
+        self.assertIsNone(enrich.call_args.args[1][0]["description"])
+        self.assertEqual(failure[0], "rate_limit")
+
     def collect_response(self, status):
         response = SimpleNamespace(status_code=status, text="")
         with patch("jobspy.util.RequestsRotating.get", return_value=response):

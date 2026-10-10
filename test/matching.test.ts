@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { loadConfig } from '../src/config/index.js';
 import { assessWithRules, findHardRejects, prescreen, suggestCvVariant } from '../src/matching/rules.js';
+import { validateGapEvidence } from '../src/matching/evidence.js';
 import { detectWorkMode, jobText, onsiteDaysPerMonth, requirementKind } from '../src/matching/signals.js';
 import type { MatchableJob } from '../src/matching/types.js';
 
@@ -49,6 +50,94 @@ describe('deterministic matching (no LLM key required)', () => {
   });
 });
 
+describe('focused SAPUI5 frontend scoring', () => {
+  const frontendDescription = 'Develop SAPUI5 and SAP Fiori applications with JavaScript, TypeScript and OData. Fully remote freelance contract, English-speaking team.';
+
+  it.each(['SAPUI5 Developer', 'SAP UI5 Developer', 'SAP Fiori Developer'])
+    ('recognizes a strong frontend match without requiring BTP or CAP: %s', (title) => {
+      const result = assessWithRules(config, job({ title, description: frontendDescription }));
+      expect(result.technicalFit).toBe(90);
+      expect(result.fitScore).toBe(94);
+      expect(result.recommendation).toBe('Apply');
+      expect(result.mandatoryGaps).toEqual([]);
+      expect(result.strongMatches).not.toContain('CAP');
+      expect(result.strongMatches).not.toContain('SAP BTP');
+    });
+
+  it('retains a mandatory ABAP rejection even with a strong frontend match', () => {
+    const result = assessWithRules(config, job({ title: 'SAPUI5 Developer',
+      description: `${frontendDescription}\n**Profil**\n- ABAP Objects\n**Wir bieten**\nRemote work.` }));
+    expect(result.technicalFit).toBe(90);
+    expect(result.recommendation).toBe('Skip');
+    expect(result.fitScore).toBe(config.scoring.hard_rejects.score_cap);
+  });
+
+  it('keeps a frontend role eligible when ABAP is explicitly optional', () => {
+    const result = assessWithRules(config, job({ title: 'SAPUI5 Developer',
+      description: `${frontendDescription}\nABAP knowledge is nice to have.` }));
+    expect(result.recommendation).toBe('Apply');
+    expect(result.mandatoryGaps).toEqual([]);
+  });
+
+  it('requires review when a frontend role mentions ABAP with an unclear obligation', () => {
+    const result = assessWithRules(config, job({ title: 'SAPUI5 Developer',
+      description: `${frontendDescription}\nWe also use ABAP.` }));
+    expect(result.hardReject).toBe(false);
+    expect(result.mandatoryGaps).toEqual([]);
+    expect(result.fitScore).toBe(config.scoring.thresholds.apply - 1);
+    expect(result.recommendation).toBe('Review');
+    expect(result.missingInformation.join(' ')).toMatch(/unclear whether "ABAP development" is mandatory/);
+  });
+
+  it('recognises ABAP under a combined responsibilities and requirements heading', () => {
+    const result = assessWithRules(config, job({ title: 'SAPUI5 Developer',
+      description: `${frontendDescription}\n**Key Responsibilities & Requirements**\n* 6+ years of hands-on experience in SAP ABAP development.\n* Experience with SAP RAP.\n* ABAP Cloud is preferred.` }));
+    expect(result.hardReject).toBe(true);
+    expect(result.recommendation).toBe('Skip');
+    expect(result.mandatoryGaps.join(' ')).toMatch(/ABAP development/);
+    expect(result.mandatoryGaps.join(' ')).toMatch(/RAP ownership/);
+  });
+
+  it('requires confirmation of an undocumented mandatory skill without rejecting the candidate', () => {
+    const result = assessWithRules(config, job({ title: 'SAPUI5 Developer',
+      description: `${frontendDescription}\nSAP MDK is mandatory.` }));
+    expect(result.hardReject).toBe(false);
+    expect(result.mandatoryGaps).toEqual([]);
+    expect(result.recommendation).toBe('Review');
+    expect(result.fitScore).toBe(config.scoring.thresholds.apply - 1);
+    expect(result.missingInformation.join(' ')).toMatch(/required capability "sap mdk"/);
+  });
+
+  it('keeps a match eligible when an undocumented skill is only preferred', () => {
+    const result = assessWithRules(config, job({ title: 'SAPUI5 Developer',
+      description: `${frontendDescription}\nSAP MDK is preferred.` }));
+    expect(result.recommendation).toBe('Apply');
+    expect(result.fitScore).toBe(94);
+  });
+
+  it('recognises the combined German and English language requirement', () => {
+    const result = assessWithRules(config, job({ title: 'SAPUI5 Developer',
+      description: `${frontendDescription}\nSehr gute Deutsch- und gute Englischkenntnisse.` }));
+    expect(result.recommendation).toBe('Skip');
+    expect(result.hardRejectReason).toMatch(/language/i);
+  });
+
+  it('requires detailed frontend evidence rather than just a title or incidental UI5 mention', () => {
+    for (const vacancy of [
+      job({ title: 'SAPUI5 Developer', description: null }),
+      job({ title: 'SAPUI5 Developer', description: 'Maintain SAPUI5 applications. Fully remote contract.' }),
+      job({ title: 'SAP BTP Developer', description: frontendDescription }),
+    ]) expect(assessWithRules(config, vacancy).technicalFit).toBeLessThan(90);
+  });
+
+  it('does not award focused-role points for a skill absent from the candidate profile', () => {
+    const withoutUi5 = { ...config, profile: { ...config.profile, skills: { ...config.profile.skills, frontend: [] } } };
+    const result = assessWithRules(withoutUi5, job({ title: 'SAPUI5 Developer', description: frontendDescription }));
+    expect(result.technicalFit).toBeLessThan(90);
+    expect(result.recommendation).not.toBe('Apply');
+  });
+});
+
 describe('mandatory-gap filtering', () => {
   it.each([
     'Requirements:\n- ABAP OO development is mandatory\n- SAPUI5 is preferred',
@@ -67,7 +156,7 @@ describe('mandatory-gap filtering', () => {
     const result = assessWithRules(config, vacancy);
     expect(result.mandatoryGaps.join(' ')).toMatch(/ABAP OO/);
     expect(result.preferredGaps.join(' ')).not.toMatch(/ABAP OO/);
-    expect(result.recommendation).toBe('Review');
+    expect(result.recommendation).toBe('Skip');
   });
 
   it('keeps the strongest requirement when the same skill appears as both preferred and mandatory', () => {
@@ -86,7 +175,7 @@ describe('mandatory-gap filtering', () => {
       description: `${job().description}\nMandatory:\n- ABAP OO\nPreferred:\n- SAPUI5`,
     }));
     expect(result.mandatoryGaps).toContain('ABAP OO development appears to be mandatory');
-    expect(result.recommendation).toBe('Review');
+    expect(result.recommendation).toBe('Skip');
   });
 
   it('does not transfer a preferred marker to a neighboring mandatory skill', () => {
@@ -127,14 +216,84 @@ describe('mandatory-gap filtering', () => {
     expect(result.commercialFit).toBeLessThan(assessWithRules(config, job()).commercialFit);
   });
 
-  it('downgrades a high-scoring mixed role when ABAP OO development is mandatory', () => {
+  it('rejects a high-scoring mixed role when ABAP OO development is mandatory', () => {
     const result = assessWithRules(config, job({
       description: `${job().description} ABAP OO development is mandatory.`,
     }));
-    expect(result.hardReject).toBe(false);
-    expect(result.fitScore).toBeGreaterThanOrEqual(config.scoring.thresholds.apply);
+    expect(result.hardReject).toBe(true);
+    expect(result.fitScore).toBeLessThanOrEqual(config.scoring.hard_rejects.score_cap);
     expect(result.mandatoryGaps.join(' ')).toMatch(/ABAP OO/);
-    expect(result.recommendation).toBe('Review');
+    expect(result.recommendation).toBe('Skip');
+  });
+
+  it('rejects the Michael Page mixed role with mandatory Polish ABAP Objects requirements', () => {
+    const vacancy = job({
+      title: 'SAP S/4HANA Technical Developer (ABAP, Fiori and SAP BTP)',
+      location: 'Warszawa, Polska, PL', locationCountry: 'Poland',
+      salaryMin: 170, salaryMax: 190, salaryCurrency: 'PLN',
+      description: [
+        '**Opis stanowiska**',
+        'SAP CAP, Node.js, SAPUI5, SAP Fiori, SAP HANA Cloud, CDS, OData, REST, SAP Integration Suite, SAP Build Process Automation.',
+        '* Projektowanie i rozwój rozwiązań opartych o:',
+        '  + ABAP Objects,',
+        '**Profil kandydata**',
+        '* Bardzo dobra znajomość:',
+        '  + ABAP Objects,',
+        '  + SAPUI5,',
+        '  + SAP BTP.',
+        '**Oferujemy**',
+        '* Praca w 100% zdalna',
+      ].join('\n'),
+    });
+    const result = assessWithRules(config, vacancy);
+    expect(result.technicalFit).toBe(95);
+    expect(result.fitScore).toBe(config.scoring.hard_rejects.score_cap);
+    expect(result.recommendation).toBe('Skip');
+    expect(result.mandatoryGaps).toContain('ABAP OO development appears to be mandatory');
+    expect(result.mandatoryGapEvidence.find((gap) => gap.requirement === 'ABAP OO development')?.vacancyQuote)
+      .toBe('* Bardzo dobra znajomość:\n+ ABAP Objects,');
+    for (const gap of result.mandatoryGapEvidence) expect(validateGapEvidence(config, vacancy, gap)).toBeNull();
+  });
+
+  it('carries an English requires marker through the required SAP components list', () => {
+    const vacancy = job({ description: `${job().description}\nThis role requires working and knowledge of SAP RISE, SAP BTP, SAP ABAP, FIORI, BASIS and Cloud Integrator, and SAP standard reports.` });
+    const result = assessWithRules(config, vacancy);
+    expect(result.mandatoryGaps).toContain('ABAP development appears to be mandatory');
+    expect(result.recommendation).toBe('Skip');
+    expect(result.fitScore).toBe(config.scoring.hard_rejects.score_cap);
+  });
+
+  it.each([
+    'Profil kandydata:\n+ ABAP Objects\nMile widziane:\n+ RAP',
+    '<h2>Profil kandydata</h2><ul><li>ABAP Objects</li></ul><h2>Mile widziane</h2><ul><li>RAP</li></ul>',
+    'Anforderungen:\n- ABAP Objects\nWünschenswert:\n- RAP',
+    'Profil recherché:\n- ABAP Objects\nNice to have:\n- RAP',
+    'Jouw profiel:\n- ABAP Objects\nNice to have:\n- RAP',
+  ])('recognizes recruiter requirement sections and optional alternatives: %s', (description) => {
+    const text = jobText(job({ description })).all;
+    expect(requirementKind(config, text, 'ABAP Objects')).toBe('mandatory');
+    expect(requirementKind(config, text, 'RAP')).toBe('preferred');
+  });
+
+  it('ends the Polish requirements section before benefits', () => {
+    const text = jobText(job({ description: '**Profil kandydata**\n* SAP BTP\n**Oferujemy**\n* Szkolenia ABAP Objects' })).all;
+    expect(requirementKind(config, text, 'SAP BTP')).toBe('mandatory');
+    expect(requirementKind(config, text, 'ABAP Objects')).toBe('unclear');
+    expect(assessWithRules(config, job({ description: text })).mandatoryGaps).toEqual([]);
+  });
+
+  it.each([
+    'This role does not require ABAP Objects.',
+    'ABAP Objects are not compulsory.',
+    'ABAP Objects nie jest wymagany.',
+    'ABAP Objects nicht erforderlich.',
+    'ABAP Objects non requis.',
+    'ABAP Objects niet vereist.',
+    'ABAP Objects mile widziane.',
+  ])('does not reject optional or negated ABAP requirements: %s', (description) => {
+    const vacancy = job({ description: `${job().description}\n${description}` });
+    expect(requirementKind(config, jobText(vacancy).all, 'ABAP Objects')).toBe('preferred');
+    expect(assessWithRules(config, vacancy).recommendation).toBe('Apply');
   });
 
   it('keeps Apply for a positive contract offer with only preferred ABAP OO knowledge', () => {

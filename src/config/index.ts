@@ -94,10 +94,12 @@ const sourceSchema = z.object({
   enabled: z.boolean(),
   geos: z.record(z.string(), geoSchema),
   results_wanted: z.number().int().positive(),
+  hours_old: z.number().int().positive().optional(),
   delay_between_tasks_seconds: z.number().nonnegative().default(0),
   task_timeout_seconds: z.number().int().positive(),
   supports_description_fetch: z.boolean().default(false),
   search_results_include_description: z.boolean().default(false),
+  supports_backlog_enrichment: z.boolean().default(false),
 });
 
 export const searchesSchema = z.object({
@@ -113,6 +115,7 @@ export const searchesSchema = z.object({
   sources: z.record(z.string(), sourceSchema),
   rotation: z.object({
     interval_hours: z.number().positive(),
+    sequence: z.array(z.string()).min(1).optional(),
     batches: z
       .array(
         z.object({
@@ -158,16 +161,22 @@ export const scoringSchema = z.object({
   thresholds: z.object({
     apply: z.number(),
     review: z.number(),
-    notify: z.number(),
     llm_screen_gate: z.number(),
   }),
   uncertainty: z.object({
-    neutral_score: z.number(),
     cap_without_description: z.number(),
     require_description_for_llm: z.boolean(),
   }),
   technical: z.object({
     groups: z.record(z.string(), z.object({ points_per_hit: z.number(), cap: z.number() })),
+    role_profiles: z.record(z.string(), z.object({
+      label: z.string().min(1),
+      title_any: z.array(z.string()).min(1),
+      title_none: z.array(z.string()).default([]),
+      required_skills: z.array(z.string()).min(1),
+      min_matches: z.number().int().positive(),
+      skills: z.record(z.string(), z.number().nonnegative()),
+    })).default({}),
     title_multiplier: z.number(),
     relevant_title_floor: z.number(),
     max: z.number(),
@@ -294,6 +303,10 @@ export function loadConfig(options: { reload?: boolean } = {}): AppConfig {
     throw new Error(`cv-variants.yaml: default "${cvVariants.default}" is not a configured variant`);
   }
   for (const batch of searches.rotation.batches) {
+    const taskCount = Object.values(batch.targets).reduce((count, geos) => count + geos.length * batch.keywords.length, 0);
+    if (taskCount > searches.resilience.max_tasks_per_run) {
+      throw new Error(`searches.yaml: batch "${batch.key}" has ${taskCount} tasks; split it into smaller batches`);
+    }
     for (const [source, geoIds] of Object.entries(batch.targets)) {
       const sourceConfig = searches.sources[source];
       if (!sourceConfig) throw new Error(`searches.yaml: batch "${batch.key}" targets unknown source "${source}"`);
@@ -303,6 +316,14 @@ export function loadConfig(options: { reload?: boolean } = {}): AppConfig {
         }
       }
     }
+  }
+  for (const key of searches.rotation.sequence ?? []) {
+    if (!searches.rotation.batches.some((batch) => batch.key === key)) {
+      throw new Error(`searches.yaml: rotation sequence references unknown batch "${key}"`);
+    }
+  }
+  if (searches.rotation.sequence && searches.rotation.batches.some((batch) => !searches.rotation.sequence!.includes(batch.key))) {
+    throw new Error('searches.yaml: rotation sequence must include every batch');
   }
 
   const dbDir = path.resolve(PROJECT_ROOT, envPath('JOB_RADAR_DB_DIR', settings.storage.db_dir));

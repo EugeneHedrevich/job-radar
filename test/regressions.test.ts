@@ -5,7 +5,7 @@ import { normalizeJob } from '../src/normalize/index.js';
 import type { CollectorJob } from '../src/collector/types.js';
 import { ingestJobs } from '../src/persist/ingest.js';
 import { notify } from '../src/pipeline/notify.js';
-import { rank } from '../src/pipeline/rank.js';
+import { rank, readTop } from '../src/pipeline/rank.js';
 import { directionCounters } from '../src/pipeline/coverage.js';
 import { assessWithLlm } from '../src/matching/llm.js';
 import type { NotificationPayload } from '../src/notify/format.js';
@@ -44,6 +44,14 @@ function enableLlm(budget: number) {
   config.settings.llm.max_jobs_per_run = budget;
 }
 
+// These tests exercise proficiency evidence for a hypothetical candidate who
+// declares basic ABAP; the real profile explicitly does not claim ABAP.
+function declareBasicAbap() {
+  const profile = loadConfig().profile;
+  profile.skills.limited = [{ name: 'ABAP', proficiency: 'basic' }];
+  profile.not_claimed = profile.not_claimed.filter((claim) => claim !== 'ABAP development');
+}
+
 beforeAll(useTempDb);
 afterAll(closeTempDb);
 beforeEach(async () => {
@@ -56,6 +64,20 @@ beforeEach(async () => {
 afterAll(() => { vi.unstubAllGlobals(); resetConfigCache(); });
 
 describe('vacancy identity and refresh', () => {
+  it.each([false, true])('retains same-run description and rates regardless of sparse-result order (%s)', async (reverse) => {
+    const sparse = normalizeJob({ ...strong, description: null, currency: null, min_amount: null, max_amount: null }, 'linkedin')!;
+    const full = normalizeJob(strong, 'linkedin')!;
+    const result = await ingestJobs(reverse ? [full, sparse] : [sparse, full], { runId: null });
+    expect(result.created).toBe(1);
+    expect(result.jobIds).toHaveLength(1);
+    const stored = await queryOne<any>(SELECT.from(db().Jobs));
+    expect(stored.description).toBe(strong.description);
+    expect(Number(stored.salaryMin)).toBe(60);
+    await ingest({ description: null });
+    const listing = await queryOne<any>(SELECT.from(db().SourceListings));
+    expect(listing.hasDescription).toBeTruthy();
+    expect(JSON.parse(listing.rawRecord).description).toBe(strong.description);
+  });
   it.each([
     ['Berlin, Germany', 'Austin, TX, US'],
     ['Berlin, Germany', 'Munich, Germany'],
@@ -146,6 +168,100 @@ describe('vacancy identity and refresh', () => {
   it('does not report an update when stored decimal values are unchanged', async () => {
     await ingest();
     expect((await ingest()).updated).toBe(0);
+  });
+});
+
+describe('review regressions: read-only results, attempt cache and matching uncertainty', () => {
+  it('filters UI5 titles before applying the top limit without re-scoring', async () => {
+    await ingest({ description: `${strong.description} REST APIs, OAuth and Destinations.` });
+    await ingest({ id: 'ui5-title', title: 'SAPUI5 Developer',
+      job_url: 'https://www.linkedin.com/jobs/view/ui5-title',
+      description: 'Build SAPUI5 and SAP Fiori apps with JavaScript, TypeScript and OData. Fully remote freelance contract.' });
+    await rank({ rulesOnly: true });
+    const before = await query(SELECT.from(db().Assessments));
+    const [first] = await readTop(1);
+    expect(first!.job.title).toBe(strong.title);
+    const filtered = await readTop(1, 'ui5');
+    expect(filtered).toHaveLength(1);
+    expect(filtered[0]!.job.title).toBe('SAPUI5 Developer');
+    expect(await query(SELECT.from(db().Assessments))).toEqual(before);
+  });
+
+  it('top reads the current LLM assessment without writing a rules assessment', async () => {
+    await ingest(); enableLlm(1);
+    const request = vi.fn(async () => llmResponse()); vi.stubGlobal('fetch', request);
+    const [ranked] = await rank();
+    const before = await query(SELECT.from(db().Assessments));
+    const [shown] = await readTop();
+    expect(shown!.assessmentId).toBe(ranked!.assessmentId);
+    expect(shown!.assessment.engine).toBe('llm');
+    expect(await query(SELECT.from(db().Assessments))).toEqual(before);
+    expect(request).toHaveBeenCalledTimes(1);
+  });
+
+  it('an explicit empty job list does not assess the whole database', async () => {
+    await ingest(); enableLlm(5);
+    const request = vi.fn(async () => llmResponse()); vi.stubGlobal('fetch', request);
+    expect(await rank({ jobIds: [] })).toEqual([]);
+    expect(await query(SELECT.from(db().Assessments))).toEqual([]);
+    expect(request).not.toHaveBeenCalled();
+  });
+
+  it('caches a rejected AI response until explicit retry or changed input', async () => {
+    await ingest(); enableLlm(1);
+    const request = vi.fn(async () => llmResponse('Skip', 10, { mandatory_gaps: [{
+      requirement: 'Rust', vacancy_quote: 'Rust is mandatory.', profile_path: 'not_claimed.0', profile_value: 'RAP ownership',
+    }] }));
+    vi.stubGlobal('fetch', request);
+    const [first] = await rank();
+    expect(first!.assessment.engine).toBe('rules');
+    expect(first!.assessment.missingInformation.join(' ')).toMatch(/AI assessment uncertainty/);
+    const [cached] = await rank();
+    expect(cached!.cached).toBe(true);
+    expect(cached!.assessmentId).toBe(first!.assessmentId);
+    expect(request).toHaveBeenCalledTimes(1);
+    await rank({ force: true });
+    expect(request).toHaveBeenCalledTimes(2);
+    await ingest({ description: `${strong.description}\nA changed project scope.` });
+    await rank();
+    expect(request).toHaveBeenCalledTimes(3);
+  });
+
+  it('does not retry a cached provider failure when explicitly ranking the same job again', async () => {
+    const ingested = await ingest(); enableLlm(5);
+    const request = vi.fn(async () => new Response('unavailable', { status: 503 })); vi.stubGlobal('fetch', request);
+    await rank({ jobIds: ingested.jobIds });
+    const [cached] = await rank({ jobIds: ingested.jobIds });
+    expect(cached!.cached).toBe(true);
+    expect(cached!.assessment.explanation).toMatch(/AI request failed/);
+    expect(request).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects mandatory RAP without an AI request and matches RAP on word boundaries', async () => {
+    await ingest({ description: `${strong.description}\nRAP is required.` }); enableLlm(1);
+    const request = vi.fn(async () => llmResponse());
+    vi.stubGlobal('fetch', request);
+    const [result] = await rank();
+    expect(result!.assessment.mandatoryGaps.join(' ')).toMatch(/RAP ownership/);
+    expect(result!.assessment.recommendation).toBe('Skip');
+    expect(request).not.toHaveBeenCalled();
+    await ingest({ description: `${strong.description}\nMust have wrapper development.` });
+    const [changed] = await rank({ rulesOnly: true });
+    expect(changed!.assessment.mandatoryGaps.join(' ')).not.toMatch(/RAP ownership/);
+  });
+
+  it('does not infer EUR or a below-minimum rejection from a rate with no currency', async () => {
+    await ingest({ min_amount: 20, max_amount: 30, currency: null });
+    const [result] = await rank({ rulesOnly: true });
+    expect(result!.assessment.hardReject).toBe(false);
+    expect(result!.assessment.missingInformation.join(' ')).toMatch(/currency not stated/);
+  });
+
+  it('does not invent connective skills under a mandatory list heading', async () => {
+    await ingest({ description: `${strong.description}\nMust have:\nCAP\nwith\nand\nmit\nyou will\nSuccessFactors integration` });
+    const [result] = await rank({ rulesOnly: true });
+    expect(result!.assessment.missingInformation.join(' ')).not.toMatch(/required capability "(?:with|and|mit|you will)"/);
+    expect(result!.assessment.missingInformation.join(' ')).toMatch(/successfactors integration/);
   });
 });
 
@@ -339,6 +455,7 @@ describe('LLM request budget and refreshed evaluations', () => {
   });
 
   it('does not use a neighboring preferred proficiency as proof of a mandatory skill gap', async () => {
+    declareBasicAbap();
     const quote = 'Expert SAPUI5 is preferred, basic ABAP is mandatory.';
     await ingest({ description: `${strong.description}\n${quote}` });
     enableLlm(1);
@@ -373,16 +490,34 @@ describe('LLM request budget and refreshed evaluations', () => {
     expect(result.missingInformation.join(' ')).toMatch(/AI assessment uncertainty/);
   });
 
-  it('persists verified structured evidence for an explicitly unclaimed mandatory skill', async () => {
+  it.each(['We also use ABAP.', 'SAP MDK is mandatory.'])('keeps an unresolved skill below Apply after a model assessment: %s', async (requirement) => {
+    await ingest({ title: 'SAPUI5 Developer', description: `SAPUI5, SAP Fiori, JavaScript, TypeScript and OData. Fully remote B2B contract, EUR 60 per hour. ${requirement}` });
+    enableLlm(1);
+    const request = vi.fn(async () => llmResponse('Apply', 99));
+    vi.stubGlobal('fetch', request);
+    const job = await queryOne<any>(SELECT.from(db().Jobs));
+    const result = await assessWithLlm(loadConfig(), job);
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(result.hardReject).toBe(false);
+    expect(result.mandatoryGaps).toEqual([]);
+    expect(result.recommendation).toBe('Review');
+    expect(result.fitScore).toBe(loadConfig().scoring.thresholds.apply - 1);
+    expect(result.missingInformation.join(' ')).toMatch(/unclear whether "ABAP development" is mandatory|required capability "sap mdk"/);
+  });
+
+  it('persists verified deterministic evidence for an explicitly unclaimed mandatory skill', async () => {
     const quote = 'ABAP OO development is mandatory.';
     await ingest({ description: `${strong.description}\n${quote}` });
     enableLlm(1);
-    vi.stubGlobal('fetch', vi.fn(async () => llmResponse('Apply', 95, { mandatory_gaps: [{
+    const request = vi.fn(async () => llmResponse('Apply', 95, { mandatory_gaps: [{
       requirement: 'ABAP OO development', vacancy_quote: quote, profile_path: 'not_claimed.1', profile_value: 'ABAP OO development',
-    }] })));
+    }] }));
+    vi.stubGlobal('fetch', request);
     const [result] = await rank();
-    expect(result!.assessment.engine).toBe('llm');
-    expect(result!.assessment.recommendation).toBe('Review');
+    expect(result!.assessment.engine).toBe('rules');
+    expect(result!.assessment.recommendation).toBe('Skip');
+    expect(result!.assessment.fitScore).toBe(loadConfig().scoring.hard_rejects.score_cap);
+    expect(request).not.toHaveBeenCalled();
     expect(result!.assessment.mandatoryGapEvidence).toContainEqual({
       requirement: 'ABAP OO development', vacancyQuote: quote, profilePath: 'not_claimed.1', profileValue: 'ABAP OO development',
     });
@@ -392,6 +527,7 @@ describe('LLM request budget and refreshed evaluations', () => {
   });
 
   it('accepts a confirmed insufficient skill level without treating other unlisted skills as absent', async () => {
+    declareBasicAbap();
     const quote = 'Expert ABAP knowledge is mandatory.';
     await ingest({ description: `${strong.description}\n${quote}` });
     enableLlm(1);
@@ -402,6 +538,7 @@ describe('LLM request budget and refreshed evaluations', () => {
     expect(result!.assessment.engine).toBe('llm');
     expect(result!.assessment.mandatoryGaps).toContain('expert ABAP');
     expect(result!.assessment.recommendation).toBe('Review');
+    expect(result!.assessment.fitScore).toBeLessThan(loadConfig().scoring.thresholds.apply);
   });
 
   it('accepts a known insufficient qualification level with verified evidence', async () => {
@@ -444,15 +581,17 @@ describe('LLM request budget and refreshed evaluations', () => {
     'Mandatory requirements:\n- ABAP OO development\nPreferred skills:\n- SAPUI5',
     'Must have CAP, Node.js, ABAP OO development. Nice to have SAPUI5.',
     'SAPUI5 is preferred, ABAP OO development is mandatory.',
+    '**Profil kandydata**\n* Bardzo dobra znajomość:\n  + ABAP Objects,\n**Oferujemy**\n* Praca w 100% zdalna',
   ])('preserves a deterministic mandatory skill gap when a valid model response omits it: %s', async (requirements) => {
     await ingest({ description: `${strong.description}\n${requirements}` });
     enableLlm(1);
     vi.stubGlobal('fetch', vi.fn(async () => llmResponse()));
-    const [result] = await rank();
-    expect(result!.assessment.engine).toBe('llm');
-    expect(result!.assessment.fitScore).toBe(95);
-    expect(result!.assessment.mandatoryGaps.join(' ')).toMatch(/ABAP OO development/);
-    expect(result!.assessment.recommendation).toBe('Review');
+    const job = await queryOne<any>(SELECT.from(db().Jobs));
+    const result = await assessWithLlm(loadConfig(), job);
+    expect(result.engine).toBe('llm');
+    expect(result.fitScore).toBe(loadConfig().scoring.hard_rejects.score_cap);
+    expect(result.mandatoryGaps.join(' ')).toMatch(/ABAP OO development/);
+    expect(result.recommendation).toBe('Skip');
   });
 
   it.each([
