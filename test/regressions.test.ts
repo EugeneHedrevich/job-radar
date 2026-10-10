@@ -502,7 +502,7 @@ describe('LLM request budget and refreshed evaluations', () => {
     expect(result.mandatoryGaps).toEqual([]);
     expect(result.recommendation).toBe('Review');
     expect(result.fitScore).toBe(loadConfig().scoring.thresholds.apply - 1);
-    expect(result.missingInformation.join(' ')).toMatch(/unclear whether "ABAP development" is mandatory|required capability "sap mdk"/);
+    expect(result.missingInformation.join(' ')).toMatch(/required ABAP capability and level|required capability "sap mdk"/);
   });
 
   it('persists verified deterministic evidence for an explicitly unclaimed mandatory skill', async () => {

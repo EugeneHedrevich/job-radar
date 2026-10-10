@@ -6,6 +6,7 @@ import { createDryRunClient, createTelegramClient, type TelegramClient, type Tel
 import { claimNotification, queueNotification } from './notification-store.js';
 import type { MatchableJob } from '../matching/types.js';
 import { log, out } from '../util/log.js';
+import { closedJobIds, isJobClosed } from '../persist/activity.js';
 
 export interface NotifyOptions {
   dryRun?: boolean;
@@ -78,7 +79,9 @@ async function queueCandidates(
 ): Promise<number> {
   const { Jobs } = db();
   const candidates: Array<{ job: MatchableJob; assessment: any }> = [];
+  const closed = await closedJobIds();
   for (const job of await query<MatchableJob>(SELECT.from(Jobs))) {
+    if (closed.has(job.ID)) continue;
     if (options.jobIds?.length && !options.jobIds.includes(job.ID)) continue;
     if (job.isDemo && !options.dryRun) continue;
     const assessment = await findCurrentAssessment(config, job);
@@ -108,10 +111,13 @@ function eligible(assessment: any, threshold: number): boolean {
 async function notificationPayload(
   config: ReturnType<typeof loadConfig>, job: MatchableJob, assessment: any,
 ) {
-  const listings = await query<{ source: string }>(
-    SELECT.from(db().SourceListings).columns('source').where({ job_ID: job.ID }),
-  );
-  return formatNotification(config, job, rowToAssessment(assessment), listings.map((listing) => listing.source));
+  const listings = (await query<{ source: string; canonicalUrl: string; rawUrl: string | null; activityState: string | null }>(
+    SELECT.from(db().SourceListings).where({ job_ID: job.ID }).orderBy('firstSeenAt', 'ID'),
+  )).filter((listing) => listing.activityState !== 'Closed');
+  const available = listings.find((listing) => listing.rawUrl === job.primaryUrl || listing.canonicalUrl === job.primaryUrl) ??
+    listings.find((listing) => listing.activityState === 'Active') ?? listings[0];
+  return formatNotification(config, { ...job, primaryUrl: available?.rawUrl ?? available?.canonicalUrl ?? job.primaryUrl },
+    rowToAssessment(assessment), listings.map((listing) => listing.source));
 }
 
 async function flushQueue(
@@ -121,7 +127,7 @@ async function flushQueue(
 ): Promise<{ sent: number; failed: number; retried: number; skipped: number }> {
   const { Notifications } = db();
   const maxAttempts = config.settings.telegram.max_attempts;
-  const limit = options.limit ?? config.settings.telegram.max_per_run;
+  const limit = Math.min(3, options.limit ?? config.settings.telegram.max_per_run, config.settings.telegram.max_per_run);
 
   const pending = await query<any>(
     SELECT.from(Notifications)
@@ -133,10 +139,11 @@ async function flushQueue(
   let failed = 0;
   let retried = 0;
   let skipped = 0;
+  let deliveryAttempts = 0;
 
   for (const [index, candidate] of pending.entries()) {
     if (options.jobIds?.length && !options.jobIds.includes(candidate.job_ID)) continue;
-    if (sent >= limit) {
+    if (deliveryAttempts >= limit) {
       skipped += 1;
       continue;
     }
@@ -151,12 +158,13 @@ async function flushQueue(
       // Revalidate retries and dry-run queues, not just newly queued candidates.
       const job = await queryOne<MatchableJob>(SELECT.from(db().Jobs).where({ ID: row.job_ID }));
       const assessment = job && await findCurrentAssessment(config, job);
-      if (!job || (job.isDemo && !options.dryRun) ||
+      const closed = job && await isJobClosed(job.ID);
+      if (!job || closed || (job.isDemo && !options.dryRun) ||
         !eligible(assessment, options.minFitScore ?? config.settings.telegram.min_fit_score)) {
         await cds.run(UPDATE(Notifications).set({
           status: 'Skipped',
           claimToken: null, claimUntil: null,
-          lastError: job?.isDemo && !options.dryRun
+          lastError: closed ? 'All source listings are confirmed closed' : job?.isDemo && !options.dryRun
             ? 'Demo data cannot be delivered live'
             : 'No eligible assessment for the current job and configuration',
         }).where(owned));
@@ -171,9 +179,17 @@ async function flushQueue(
         assessment_ID: assessment.ID, payload: JSON.stringify(payload),
       }).where(owned));
       if (!prepared) { skipped += 1; continue; }
+      // Activity can change while a payload or a retry is being prepared.
+      if (await isJobClosed(job.ID)) {
+        await cds.run(UPDATE(Notifications).set({ status: 'Skipped', claimToken: null, claimUntil: null,
+          lastError: 'All source listings are confirmed closed' }).where(owned));
+        skipped += 1;
+        continue;
+      }
 
       let result: TelegramSendResult;
       try {
+        deliveryAttempts += 1;
         result = await client.send(payload);
       } catch (error) {
         result = { ok: false, retryable: true, error: error instanceof Error ? error.message : String(error) };

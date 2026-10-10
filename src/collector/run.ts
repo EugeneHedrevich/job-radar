@@ -29,7 +29,7 @@ export async function runCollector(config: AppConfig, options: RunCollectorOptio
     throw new Error(`Collector script not found at ${config.collectorScript}`);
   }
 
-  const output: CollectorOutput = { jobspyVersion: undefined, jobs: [], outcomes: [], malformedLines: 0 };
+  const output: CollectorOutput = { jobspyVersion: undefined, jobs: [], activities: [], outcomes: [], malformedLines: 0 };
   const pending = new Map<string, CollectorTask>(options.tasks.map((task) => [task.task_id, task]));
 
   const child = spawn(config.pythonPath, [config.collectorScript], {
@@ -83,6 +83,9 @@ export async function runCollector(config: AppConfig, options: RunCollectorOptio
       output.jobspyVersion = record.jobspy_version;
     } else if (record.type === 'job') {
       output.jobs.push({ taskId: record.task_id, source: record.source, job: record.job });
+    } else if (record.type === 'listing_activity') {
+      const task = pending.get(record.task_id);
+      if (task?.source === record.activity.source) output.activities.push(record.activity);
     } else if (record.type === 'task_result') {
       const task = pending.get(record.task_id);
       pending.delete(record.task_id);

@@ -14,9 +14,10 @@ from urllib.parse import urlencode, urljoin, urlparse, urlunparse, parse_qsl
 
 import requests
 from markdownify import markdownify
+from activity import expired, http_closure, observe, page_closure
 
 from sap_sources import (MAX_DETAIL_REQUESTS_PER_TASK, MAX_SEARCH_PAGES, REQUEST_TIMEOUT_SECONDS,
-                         job_posting, job_type, location, page_soup, published_date, text)
+                         applicant_location, job_posting, job_type, location, page_soup, published_date, text)
 
 MICHAEL_MARKETS = {
     "Poland": "https://www.michaelpage.pl",
@@ -179,13 +180,14 @@ def apply_posting(row: dict[str, Any], posting: dict[str, Any]) -> None:
             high = number(value.get("maxValue", value.get("value")))
             if low is not None or high is not None:
                 row.update(min_amount=low, max_amount=high, currency=salary["currency"], interval=interval)
-    expiry = published_date(posting.get("validThrough"))
-    row["_expired"] = bool(expiry and expiry < datetime.now(timezone.utc).date().isoformat())
 
 
 def hydrate(source: str, row: dict[str, Any], html: str, description_format: str) -> dict[str, Any]:
     soup = page_soup(html)
     posting = job_posting(soup) or {}
+    closure = page_closure(row, soup, posting)
+    if closure:
+        return closure
     updated = dict(row)
     apply_posting(updated, posting)
     description = posting.get("description")
@@ -203,7 +205,10 @@ def hydrate(source: str, row: dict[str, Any], html: str, description_format: str
     if not description:
         raise ValueError(f"{source} detail page has no description")
     updated["description"] = markdownify(description).strip() if description_format == "markdown" else description
-    return updated
+    required_location = applicant_location(posting)
+    if required_location:
+        updated["description"] = f"Candidate required location: {required_location}\n\n" + updated["description"]
+    return observe(updated, "active", "Public listing detail contains a description")
 
 
 def api_url(source: str, keyword: str, page: int) -> str:
@@ -258,7 +263,12 @@ def parse_api(source: str, payload: Any, keyword: str, description_format: str) 
         if source == "jobicy" and record.get("salaryPeriod") in {"hourly", "daily", "monthly", "yearly"} and record.get("salaryCurrency"):
             row.update(min_amount=number(record.get("salaryMin")), max_amount=number(record.get("salaryMax")),
                        currency=record["salaryCurrency"], interval=record["salaryPeriod"])
-        rows.append(row)
+        if source == "jobicy":
+            row["description"] = f"Candidate required location: {place or 'not stated'}\n\n" + row["description"]
+        if expired(record.get("validThrough")):
+            rows.append(observe(row, "closed", f"validThrough: {record['validThrough']}", "valid_through"))
+        else:
+            rows.append(observe(row, "active", "Public API returned the listing with a description"))
     more = source == "arbeitnow" and bool(payload.get("links", {}).get("next"))
     return rows, more
 
@@ -273,13 +283,23 @@ def scrape_public(kwargs: dict[str, Any]) -> tuple[list[dict[str, Any]], BaseExc
     seen: set[str] = set()
     detail_requests = 0
     failure: BaseException | None = None
+    closures: list[dict[str, Any]] = []
     def keep(row: dict[str, Any]) -> bool:
-        return not row.pop("_expired", False) and not (row.get("date_posted") and row["date_posted"] < cutoff)
+        if row.get("activity_status") == "closed":
+            closures.append(row)
+            return False
+        return not (row.get("date_posted") and row["date_posted"] < cutoff)
     def detail(row: dict[str, Any]) -> dict[str, Any]:
         nonlocal detail_requests
         detail_requests += 1
         url = safe_public_url(source, row["job_url"])
-        return hydrate(source, row, fetch(url), fmt)
+        try:
+            return hydrate(source, row, fetch(url), fmt)
+        except requests.HTTPError as exc:
+            closure = http_closure(row, exc)
+            if closure:
+                return closure
+            raise
     for row in kwargs.get("detail_jobs", [])[:min(wanted, MAX_DETAIL_REQUESTS_PER_TASK)]:
         try:
             updated = detail(row)
@@ -289,9 +309,9 @@ def scrape_public(kwargs: dict[str, Any]) -> tuple[list[dict[str, Any]], BaseExc
         except ValueError as exc:
             failure = failure or exc
         except Exception as exc:
-            return rows, exc
+            return rows + closures, exc
     if kwargs.get("enrich_only"):
-        return rows, failure
+        return rows + closures, failure
     keyword = kwargs.get("search_term", "SAP")
     root = market_root(kwargs.get("location")) if source == "michaelpage" else PUBLIC_SOURCES[source][0]
     for page in range(1, MAX_SEARCH_PAGES + 1):
@@ -301,7 +321,7 @@ def scrape_public(kwargs: dict[str, Any]) -> tuple[list[dict[str, Any]], BaseExc
             else:
                 candidates, more = parse_search(source, fetch(search_url(source, keyword, kwargs.get("location"), page)), root)
         except Exception as exc:
-            return rows, exc
+            return rows + closures, exc
         for row in candidates:
             if row["job_url"] in seen:
                 continue
@@ -313,11 +333,11 @@ def scrape_public(kwargs: dict[str, Any]) -> tuple[list[dict[str, Any]], BaseExc
                     failure = failure or exc
                 except Exception as exc:
                     rows.append(row)
-                    return rows, exc
+                    return rows + closures, exc
             if keep(row):
                 rows.append(row)
             if len(rows) >= wanted:
-                return rows, failure
+                return rows + closures, failure
         if not more:
             break
-    return rows, failure
+    return rows + closures, failure

@@ -86,7 +86,7 @@ describe('focused SAPUI5 frontend scoring', () => {
     expect(result.mandatoryGaps).toEqual([]);
     expect(result.fitScore).toBe(config.scoring.thresholds.apply - 1);
     expect(result.recommendation).toBe('Review');
-    expect(result.missingInformation.join(' ')).toMatch(/unclear whether "ABAP development" is mandatory/);
+    expect(result.missingInformation.join(' ')).toMatch(/required ABAP capability and level/);
   });
 
   it('recognises ABAP under a combined responsibilities and requirements heading', () => {
@@ -117,7 +117,7 @@ describe('focused SAPUI5 frontend scoring', () => {
 
   it('recognises the combined German and English language requirement', () => {
     const result = assessWithRules(config, job({ title: 'SAPUI5 Developer',
-      description: `${frontendDescription}\nSehr gute Deutsch- und gute Englischkenntnisse.` }));
+      description: `${frontendDescription}\nAnforderungen:\nSehr gute Deutsch- und gute Englischkenntnisse.` }));
     expect(result.recommendation).toBe('Skip');
     expect(result.hardRejectReason).toMatch(/language/i);
   });
@@ -255,12 +255,13 @@ describe('mandatory-gap filtering', () => {
     for (const gap of result.mandatoryGapEvidence) expect(validateGapEvidence(config, vacancy, gap)).toBeNull();
   });
 
-  it('carries an English requires marker through the required SAP components list', () => {
+  it('keeps an unspecified ABAP capability unresolved under a shared required marker', () => {
     const vacancy = job({ description: `${job().description}\nThis role requires working and knowledge of SAP RISE, SAP BTP, SAP ABAP, FIORI, BASIS and Cloud Integrator, and SAP standard reports.` });
     const result = assessWithRules(config, vacancy);
-    expect(result.mandatoryGaps).toContain('ABAP development appears to be mandatory');
-    expect(result.recommendation).toBe('Skip');
-    expect(result.fitScore).toBe(config.scoring.hard_rejects.score_cap);
+    expect(result.mandatoryGaps).not.toContain('ABAP development appears to be mandatory');
+    expect(result.hardReject).toBe(false);
+    expect(result.missingInformation.join(' ')).toMatch(/required ABAP capability and level/);
+    expect(result.recommendation).toBe('Review');
   });
 
   it.each([

@@ -426,8 +426,37 @@ unknown diploma levels and uncertain equivalency belong in `missingInformation`,
 proven gaps. A stated experience floor such as 7+ years is not proof of less than 10 years.
 Malformed or unsupported model conclusions fall back to rules with explicit uncertainty,
 without another OpenAI request. Deterministic mandatory gaps, hard rejects and travel
-uncertainty remain authoritative. Assessment cache revision 12 and an additive SQLite
+uncertainty remain authoritative. Assessment cache revision 13 and an additive SQLite
 migration preserve old assessments, jobs, notification history and unique indexes.
+
+Every monitoring cycle ranks both collected jobs and stored candidates awaiting their
+current AI cache key. `AiAssessmentQueue` retains the rules score and original waiting
+time across restarts. Priority is rules score plus one point per three waiting hours,
+with waiting time and job ID as stable tie breakers. All candidates share the same
+five-request ceiling; saved valid answers and AI fallbacks finish that attempt. Input
+changes create a new key; `rank --force` explicitly retries. Normal cycles never force
+reassessment. `status` reports pending AI work and closed listings.
+
+Listing activity is separate from the user's `New`, `Interested`, `Applied` or `Ignored`
+status. Confirmed detail-page HTTP 404/410, expired `validThrough` and recognized closure
+notices become collector observations stored on `SourceListings`, with observation history.
+Old publication dates, missing search results, blocks and parse/transport failures do
+not establish closure. A job is closed only when all its listings are confirmed closed;
+an active or unknown secondary listing keeps it eligible. Closed listings are excluded
+from enrichment, and closed jobs from AI work and notification delivery. Pending
+notifications recheck stored activity immediately before sending and choose a remaining
+available source URL. This check uses persisted observations and adds no network requests.
+
+Language requirements use the actual profile language list and local mandatory/preferred
+context, including multilingual requirement headings. An optional language elsewhere
+cannot cancel another mandatory language. `professional` establishes no CEFR level.
+Basic ABAP understanding, reading and debugging remain distinct from independent ABAP
+development / ABAP OO and RAP ownership; unconfirmed basic capability requires review.
+The profile's availability is passed to the AI and explicit start/workload requirements
+are checked against stated notice, earliest start and weekly capacity. Remote format,
+office location and mandatory candidate residence are evaluated separately. Unknown
+authorization, schedules, timezone compatibility and eligibility remain visible as
+missing information; EU contractor permission never establishes local employment rights.
 
 Rules that always apply:
 

@@ -70,8 +70,15 @@ async function createLegacyTemplate(): Promise<string> {
       ALTER TABLE sap_jobradar_Notifications DROP COLUMN claimUntil;
       ALTER TABLE sap_jobradar_Jobs DROP COLUMN isDemo;
       ALTER TABLE sap_jobradar_SourceListings DROP COLUMN descriptionAttemptedAt;
+      DROP INDEX idx_listing_activity;
+      ALTER TABLE sap_jobradar_SourceListings DROP COLUMN activityState;
+      ALTER TABLE sap_jobradar_SourceListings DROP COLUMN activityCheckedAt;
+      ALTER TABLE sap_jobradar_SourceListings DROP COLUMN closureReason;
+      ALTER TABLE sap_jobradar_SourceListings DROP COLUMN activityEvidence;
       ALTER TABLE sap_jobradar_Assessments DROP COLUMN mandatoryGapEvidence;
       DROP TABLE sap_jobradar_DescriptionRotation;
+      DROP TABLE sap_jobradar_AiAssessmentQueue;
+      DROP TABLE sap_jobradar_ListingActivityEvents;
       INSERT INTO sap_jobradar_Jobs
         (ID, fingerprint, title, description, primaryUrl, firstSeenAt, lastSeenAt)
         VALUES ('legacy-job', 'legacy-fingerprint', 'Original vacancy', 'Original description',
@@ -82,6 +89,10 @@ async function createLegacyTemplate(): Promise<string> {
           ('pending-copy', 'legacy-job', 'telegram', 'Pending', 0, 'original pending payload', NULL, '2026-10-01T00:00:00Z'),
           ('sent-copy', 'legacy-job', 'telegram', 'Sent', 1, 'original sent payload', 42, '2026-10-02T00:00:00Z'),
           ('older-history', 'legacy-job', 'telegram', 'Superseded', 2, 'original history payload', 7, '2026-09-01T00:00:00Z');
+      INSERT INTO sap_jobradar_SourceListings
+        (ID, job_ID, source, sourceJobId, canonicalUrl, rawRecord, firstSeenAt, lastSeenAt)
+        VALUES ('legacy-listing', 'legacy-job', 'linkedin', 'legacy-id', 'https://example.com/legacy',
+          '{"title":"Original vacancy"}', '2026-10-01T00:00:00Z', '2026-10-02T00:00:00Z');
       INSERT INTO sap_jobradar_Assessments
         (ID, job_ID, cacheKey, engine, fitScore, mandatoryGaps, createdAt)
         VALUES ('legacy-assessment', 'legacy-job', 'revision-6-cache', 'llm', 60,
@@ -120,6 +131,15 @@ describe('serialized legacy database migrations', () => {
       expect(columns.map((column) => column.name)).toEqual(expect.arrayContaining(['claimToken', 'claimUntil']));
       expect(migrated.prepare('PRAGMA table_info(sap_jobradar_Assessments)').all().map((column) => column.name)).toContain('mandatoryGapEvidence');
       expect(migrated.prepare('PRAGMA table_info(sap_jobradar_SourceListings)').all().map((column) => column.name)).toContain('descriptionAttemptedAt');
+      expect(migrated.prepare('PRAGMA table_info(sap_jobradar_SourceListings)').all().map((column) => column.name))
+        .toEqual(expect.arrayContaining(['activityState', 'activityCheckedAt', 'closureReason', 'activityEvidence']));
+      expect(migrated.prepare('PRAGMA table_info(sap_jobradar_AiAssessmentQueue)').all().map((column) => column.name))
+        .toEqual(['cacheKey', 'job_ID', 'rulesScore', 'queuedAt', 'completedAt', 'status']);
+      expect(migrated.prepare('PRAGMA table_info(sap_jobradar_ListingActivityEvents)').all().map((column) => column.name))
+        .toEqual(['ID', 'listing_ID', 'state', 'reason', 'evidence', 'checkedAt']);
+      expect(migrated.prepare('SELECT ID, sourceJobId, rawRecord, activityState FROM sap_jobradar_SourceListings').all()).toEqual([
+        { ID: 'legacy-listing', sourceJobId: 'legacy-id', rawRecord: '{"title":"Original vacancy"}', activityState: 'Unknown' },
+      ]);
       expect(migrated.prepare('PRAGMA table_info(sap_jobradar_DescriptionRotation)').all().map((column) => column.name)).toEqual(['batchKey', 'state', 'updatedAt']);
       expect(migrated.prepare('SELECT ID, cacheKey, fitScore, mandatoryGaps, mandatoryGapEvidence FROM sap_jobradar_Assessments').all()).toEqual([{
         ID: 'legacy-assessment', cacheKey: 'revision-6-cache', fitScore: 60, mandatoryGaps: '["original gap"]', mandatoryGapEvidence: null,
@@ -158,6 +178,9 @@ describe('serialized legacy database migrations', () => {
       expect(rolledBack.prepare('PRAGMA table_info(sap_jobradar_Jobs)').all().map((column) => column.name)).not.toContain('isDemo');
       expect(rolledBack.prepare('PRAGMA table_info(sap_jobradar_Assessments)').all().map((column) => column.name)).not.toContain('mandatoryGapEvidence');
       expect(rolledBack.prepare('PRAGMA table_info(sap_jobradar_SourceListings)').all().map((column) => column.name)).not.toContain('descriptionAttemptedAt');
+      expect(rolledBack.prepare('PRAGMA table_info(sap_jobradar_SourceListings)').all().map((column) => column.name)).not.toContain('activityState');
+      expect(rolledBack.prepare('PRAGMA table_info(sap_jobradar_AiAssessmentQueue)').all()).toEqual([]);
+      expect(rolledBack.prepare('PRAGMA table_info(sap_jobradar_ListingActivityEvents)').all()).toEqual([]);
       expect(rolledBack.prepare('PRAGMA table_info(sap_jobradar_DescriptionRotation)').all()).toEqual([]);
       expect(rolledBack.prepare("SELECT status FROM sap_jobradar_Notifications WHERE ID = 'pending-copy'").get()?.status).toBe('Pending');
       expect(rolledBack.prepare('SELECT ID FROM sap_jobradar_Jobs').all()).toHaveLength(2);

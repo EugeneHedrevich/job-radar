@@ -150,19 +150,6 @@ hard_rejects:
         - "relocation (is )?(required|mandatory)"
       none: []
 
-    - id: language_barrier
-      reason: "A language the profile does not hold is mandatory."
-      any:
-        - "(fluent|native|business|verhandlungssicher)\\w* (german|deutsch)"
-        - "german (language )?(is )?(required|mandatory|a must|erforderlich)"
-        - "(fluent|native|business) (french|dutch|italian|spanish|polish)"
-        - "(french|dutch|italian|spanish|polish) (language )?(is )?(required|mandatory|a must)"
-        - "sehr gute deutschkenntnisse"
-        - "sehr gute deutsch[- ]+und\\b"
-      none:
-        - "english (only|speaking|is sufficient|is enough)"
-        - "german (is )?(a plus|nice to have|optional|not required|beneficial)"
-
 # Cheap stage-1 screening. Jobs failing this never reach the LLM.
 prescreen:
   # At least one of these must appear in the title or description.

@@ -117,6 +117,19 @@ export function sentences(text: string): string[] {
 
 export type Requirement = 'mandatory' | 'preferred' | 'unclear';
 
+export interface RequirementMention {
+  kind: Requirement;
+  clause: string;
+  quote: string;
+  start: number;
+  end: number;
+}
+
+/** Original wording and list boundaries for evidence shared by both engines. */
+export function requirementSource(job: MatchableJob): string {
+  return `${job.title}\n${(job.description ?? '').replace(/<\/?(?:li|p|div|h[1-6])\b[^>]*>|<br\s*\/?\s*>/gi, '\n').replace(/<[^>]+>/g, '')}`;
+}
+
 interface Marker<T> { start: number; end: number; kind: T }
 
 function markers<T>(text: string, sources: readonly string[], kind: T): Marker<T>[] {
@@ -130,29 +143,33 @@ function nearestMarker<T>(found: Marker<T>[], start: number, end: number): Marke
 }
 
 /** Decide whether a term appears as a must-have or a nice-to-have. */
-export function requirementKind(config: AppConfig, text: string, term: string): Requirement | null {
+export function requirementMentions(config: AppConfig, text: string, term: string): RequirementMention[] {
   const needle = normalizeText(term);
-  if (!needle) return null;
+  if (!needle) return [];
   const mandatoryMarkers = config.scoring.signals.mandatory_markers ?? [];
   const preferredMarkers = config.scoring.signals.preferred_markers ?? [];
-  let found = false;
-  let preferred = false;
+  const mentions: RequirementMention[] = [];
   let section: Requirement | null = null;
-  for (const block of sentences(text)) {
+  let sectionStart = 0;
+  const blocks = sentences(text);
+  for (const [blockIndex, block] of blocks.entries()) {
     const heading = normalizeText(block).replace(/^(?:[-+*#]+|\d+[.)])\s*/, '')
       .replace(/[:*#]+$/g, '').trim();
     // Recruiter requirement sections often have no marker on each list item.
     // Section boundaries also keep benefits/responsibilities out of that list.
     if (matchesAny(heading, config.scoring.signals.mandatory_sections ?? [])) {
       section = 'mandatory';
+      sectionStart = blockIndex;
       continue;
     }
     if (matchesAny(heading, config.scoring.signals.preferred_sections ?? [])) {
       section = 'preferred';
+      sectionStart = blockIndex;
       continue;
     }
     if (matchesAny(heading, config.scoring.signals.non_requirement_sections ?? [])) {
       section = null;
+      sectionStart = blockIndex;
       continue;
     }
     // A shared marker governs the remaining comma-separated items in this
@@ -176,6 +193,7 @@ export function requirementKind(config: AppConfig, text: string, term: string): 
         ...markers(clause, mandatoryMarkers, 'mandatory' as const)
           .filter((marker) => !negated.some((negative) => marker.start >= negative.start && marker.end <= negative.end)),
         ...markers(clause, preferredMarkers, 'preferred' as const),
+        ...markers(clause, ['\\b(?:optional|voluntary)\\b'], 'preferred' as const),
         ...negated,
       ];
       // A marker-only heading applies to subsequent list entries. Ordinary
@@ -185,12 +203,14 @@ export function requirementKind(config: AppConfig, text: string, term: string): 
         .replace(/[:*#]/g, '').trim();
       if (foundMarkers.length && /^(?:(?:skills|requirements|qualifications|experience)\s*)?$/.test(remainder)) {
         section = foundMarkers.some((marker) => marker.kind === 'mandatory') ? 'mandatory' : 'preferred';
+        sectionStart = blockIndex;
         listKind = section;
         continue;
       }
       const colon = clause.indexOf(':');
       if (!attendancePart && colon >= 0 && foundMarkers.some((marker) => marker.start < colon)) {
         section = nearestMarker(foundMarkers, 0, colon)?.kind ?? null;
+        sectionStart = blockIndex;
         listKind = section;
       } else if (clause.endsWith(':')) {
         section = null;
@@ -198,15 +218,21 @@ export function requirementKind(config: AppConfig, text: string, term: string): 
       }
       const escapedNeedle = needle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       for (const occurrence of clause.matchAll(new RegExp(`(?<![a-z0-9])${escapedNeedle}(?![a-z0-9])`, 'g'))) {
-        found = true;
-        const kind = nearestMarker(foundMarkers, occurrence.index, occurrence.index + needle.length)?.kind ?? listKind;
-        if (kind === 'mandatory') return 'mandatory';
-        if (kind === 'preferred') preferred = true;
+        const local = nearestMarker(foundMarkers, occurrence.index, occurrence.index + needle.length);
+        const kind = local?.kind ?? listKind ?? 'unclear';
+        mentions.push({ kind, clause, start: occurrence.index, end: occurrence.index + needle.length,
+          quote: !local && section ? blocks.slice(sectionStart, blockIndex + 1).join('\n') : block });
       }
       if (foundMarkers.length && !attendancePart) listKind = [...foundMarkers].sort((a, b) => b.start - a.start)[0]!.kind;
     }
   }
-  return found ? preferred ? 'preferred' : 'unclear' : null;
+  return mentions;
+}
+
+export function requirementKind(config: AppConfig, text: string, term: string): Requirement | null {
+  const mentions = requirementMentions(config, text, term);
+  return mentions.some((mention) => mention.kind === 'mandatory') ? 'mandatory' :
+    mentions.some((mention) => mention.kind === 'preferred') ? 'preferred' : mentions.length ? 'unclear' : null;
 }
 
 const NUMBER = '(?:\\d+(?:\\.\\d+)?|one|two|three|four|five|six|seven|eight|nine|ten)';

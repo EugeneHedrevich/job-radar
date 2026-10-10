@@ -11,10 +11,11 @@ import {
   matchesAny,
   onsiteDaysPerMonth,
   pattern,
-  requirementKind,
   type JobText,
 } from './signals.js';
 import type { AssessmentResult, MatchableJob, Recommendation } from './types.js';
+import { abapUncertainty, unclaimedMentions } from './capabilities.js';
+import { matchingConstraints } from './constraints.js';
 
 export interface PrescreenResult {
   passed: boolean;
@@ -49,8 +50,15 @@ export function findHardRejects(config: AppConfig, text: JobText): HardRejectHit
     hits.push({ id: 'travel_limit', reason: `Required onsite attendance (${requiredDays.toFixed(1)} days/month) exceeds the profile limit (${limit} days/month).` });
   }
   for (const rule of config.scoring.hard_rejects.rules) {
+    // Language checks use actual profile.languages and local obligations.
+    if (rule.id === 'language_barrier') continue;
     if (rule.id === 'onsite_heavy') {
       if (hasMandatoryOnsiteCondition(config, text.all)) hits.push({ id: rule.id, reason: rule.reason });
+      continue;
+    }
+    if (rule.id === 'abap_only') {
+      if (/\babap\s+(?:developer|programmer)\b|\brap\s+(?:developer|expert|specialist)\b/.test(text.title) &&
+        !matchesAny(text.all, rule.none)) hits.push({ id: rule.id, reason: rule.reason });
       continue;
     }
     if (!matchesAny(text.all, rule.any)) continue;
@@ -209,8 +217,7 @@ function collectGaps(config: AppConfig, text: JobText) {
   const preferredGaps: string[] = [];
   const unclear: string[] = [];
   for (const claim of config.profile.not_claimed) {
-    const kinds = [claim, ...(config.profile.not_claimed_aliases[claim] ?? [])]
-      .map((term) => requirementKind(config, text.all, term));
+    const kinds = unclaimedMentions(config, text.all, claim).map((mention) => mention.kind);
     const kind = kinds.includes('mandatory') ? 'mandatory' : kinds.includes('preferred') ? 'preferred' : kinds.includes('unclear') ? 'unclear' : null;
     if (!kind) continue;
     if (kind === 'mandatory') mandatoryGaps.push(`${claim} appears to be mandatory`);
@@ -258,6 +265,9 @@ export function assessWithRules(config: AppConfig, job: MatchableJob): Assessmen
   const commercial = scoreCommercial(config, job, text);
   const location = scoreLocation(config, job, text);
   const gaps = collectGaps(config, text);
+  const constraints = matchingConstraints(config, job);
+  const abap = abapUncertainty(config, text.all);
+  for (const reason of constraints.hardRejectReasons) hardRejects.push({ id: 'profile_constraint', reason });
 
   const weights = config.scoring.weights;
   let fitScore = Math.round(
@@ -266,14 +276,14 @@ export function assessWithRules(config: AppConfig, job: MatchableJob): Assessmen
 
   const undocumentedRequirements = unknownSkillRequirements(config, job);
   const missingInformation = [...commercial.missing, ...location.missing, ...gaps.unclear,
-    ...educationUncertainty(config, job), ...undocumentedRequirements];
+    ...educationUncertainty(config, job), ...undocumentedRequirements, ...constraints.missing, ...abap.missing];
   if (!text.hasDescription) {
     missingInformation.unshift('full description was not retrieved - assessment is based on the title only');
     fitScore = Math.min(fitScore, config.scoring.uncertainty.cap_without_description);
   }
   // A known missing skill with an unresolved obligation needs review before
   // it can qualify for an application or a high-score notification.
-  if (gaps.unclear.length || undocumentedRequirements.length) {
+  if (gaps.unclear.length || undocumentedRequirements.length || constraints.requiresReview || abap.requiresReview) {
     fitScore = Math.min(fitScore, config.scoring.thresholds.apply - 1);
   }
 
@@ -312,8 +322,8 @@ export function assessWithRules(config: AppConfig, job: MatchableJob): Assessmen
     locationFit: location.score,
     strongMatches: technical.matches.slice(0, 12),
     mandatoryGaps,
-    mandatoryGapEvidence: deterministicGapEvidence(config, job),
-    preferredGaps: gaps.preferredGaps,
+    mandatoryGapEvidence: [...deterministicGapEvidence(config, job), ...constraints.evidence],
+    preferredGaps: [...gaps.preferredGaps, ...constraints.preferredGaps],
     missingInformation,
     explanation,
     suggestedCvVariant: suggestCvVariant(config, text),

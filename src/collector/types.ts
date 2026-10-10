@@ -25,8 +25,22 @@ export const collectorJobSchema = z.object({
 });
 export type CollectorJob = z.infer<typeof collectorJobSchema>;
 
+export const listingActivitySchema = z.object({
+  source: z.string().min(1),
+  source_job_id: z.string().nullable().optional(),
+  job_url: z.string().url(),
+  status: z.enum(['active', 'closed']),
+  reason: z.enum(['valid_through', 'http_404', 'http_410', 'closed_message']).optional(),
+  evidence: z.string().min(1).max(2000),
+  checked_at: z.iso.datetime({ offset: true }),
+}).refine((value) => value.status !== 'closed' || Boolean(value.reason), {
+  message: 'Closure requires explicit evidence and a reason',
+});
+export type ListingActivity = z.infer<typeof listingActivitySchema>;
+
 export const collectorLineSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('meta'), jobspy_version: z.string(), tasks: z.number() }),
+  z.object({ type: z.literal('listing_activity'), task_id: z.string(), activity: listingActivitySchema }),
   z.object({
     type: z.literal('job'),
     task_id: z.string(),
@@ -83,6 +97,7 @@ export interface TaskOutcome {
 export interface CollectorOutput {
   jobspyVersion: string | undefined;
   jobs: Array<{ taskId: string; source: string; job: CollectorJob }>;
+  activities: ListingActivity[];
   outcomes: TaskOutcome[];
   malformedLines: number;
 }

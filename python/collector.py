@@ -13,6 +13,7 @@ stdin  : one JSON object -> {"tasks": [...], "task_timeout_seconds": 120}
 stdout : JSON Lines, one object per line:
          {"type": "meta",        "jobspy_version": "..."}
          {"type": "job",         "task_id": "...", "source": "...", "job": {...}}
+         {"type": "listing_activity", "task_id": "...", "activity": {...}}
          {"type": "task_result", "task_id": "...", "status": "succeeded", ...}
          {"type": "task_result", "task_id": "...", "status": "failed",
                                  "error_kind": "blocked|timeout|network|error", ...}
@@ -56,6 +57,7 @@ FORWARDED_COLUMNS = [
     "description",
     "company_industry",
     "company_url",
+    "activity_status", "activity_reason", "activity_evidence", "activity_checked_at",
 ]
 
 # JobSpy kwargs a task is allowed to set. Guards against passing arbitrary
@@ -269,12 +271,25 @@ def run_task(task: dict[str, Any], timeout_seconds: int) -> dict[str, Any]:
     if frame is not None and not frame.empty:
         columns = [c for c in FORWARDED_COLUMNS if c in frame.columns]
         for row in frame[columns].to_dict(orient="records"):
+            row = {key: clean_value(value) for key, value in row.items()}
+            status = row.pop("activity_status", None)
+            reason = row.pop("activity_reason", None)
+            evidence = row.pop("activity_evidence", None)
+            checked_at = row.pop("activity_checked_at", None)
+            if status in {"active", "closed"}:
+                emit({"type": "listing_activity", "task_id": task_id, "activity": {
+                    "source": source, "source_job_id": row.get("id"), "job_url": row.get("job_url"),
+                    "status": status, "evidence": evidence, "checked_at": checked_at,
+                    **({"reason": reason} if reason else {}),
+                }})
+            if status == "closed":
+                continue
             emit(
                 {
                     "type": "job",
                     "task_id": task_id,
                     "source": source,
-                    "job": {key: clean_value(value) for key, value in row.items()},
+                    "job": row,
                 }
             )
             count += 1

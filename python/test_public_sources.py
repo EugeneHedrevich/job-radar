@@ -71,6 +71,16 @@ class PublicSourcesTest(unittest.TestCase):
         self.assertIn("US (NYC)", row["description"])
         self.assertEqual(row["currency"], "PLN")
 
+    def test_preserves_candidate_residence_separately_from_office_location(self):
+        html = '<script type="application/ld+json">' + json.dumps({"@type": "JobPosting",
+            "jobLocation": {"address": {"addressCountry": "DE"}},
+            "applicantLocationRequirements": [{"@type": "Country", "name": "United Kingdom"}],
+            "description": "<p>Remote SAP CAP contract.</p>"}) + '</script>'
+        record = sources.parse_search("michaelpage", CARD, sources.MICHAEL_MARKETS["Poland"])[0][0]
+        hydrated = sources.hydrate("michaelpage", record, html, "markdown")
+        self.assertIn("Germany", hydrated["location"])
+        self.assertIn("Candidate required location: United Kingdom", hydrated["description"])
+
     def test_next_ventures_parses_cards_and_excludes_application_forms_from_details(self):
         html = '''<article class="matador-job-listings"><section class="post-content">
         <a href="/jobs/sap-cap/"><h3>SAP CAP Consultant</h3></a>

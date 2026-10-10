@@ -193,7 +193,8 @@ class AgencyAdaptersTest(unittest.TestCase):
             rows, failure = sap_sources.scrape_agency({"site_name": ["whitehall"], "results_wanted": 5,
                                                        "fetch_description": True})
         self.assertIsNone(failure)
-        self.assertEqual([row["id"] for row in rows], ["5"])
+        self.assertEqual([row["id"] for row in rows if row.get("activity_status") != "closed"], ["5"])
+        self.assertEqual([row["id"] for row in rows if row.get("activity_status") == "closed"], ["3", "4"])
         self.assertEqual(request.call_count, 6)
 
     def test_existing_cap_job_is_enriched_during_ui5_search_with_shared_detail_budget(self):

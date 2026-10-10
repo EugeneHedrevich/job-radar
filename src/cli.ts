@@ -152,9 +152,10 @@ function truncatePad(value: string, width: number): string {
   return (clean.length > width ? `${clean.slice(0, width - 1)}\u2026` : clean).padEnd(width);
 }
 
-async function runRank(flags: Args['flags'], jobIds?: string[]) {
+async function runRank(flags: Args['flags'], jobIds?: string[], includePendingAi = false) {
   const ranked = await rank({
     jobIds,
+    includePendingAi,
     limit: num(flags, 'limit') ?? 20,
     rulesOnly: Boolean(flags.get('rules-only')),
     force: Boolean(flags.get('force')),
@@ -191,14 +192,14 @@ async function runNotify(flags: Args['flags']) {
 
 async function runCycle(flags: Args['flags']) {
   const collected = await runCollect(flags);
-  await runRank(flags, collected.ingest.jobIds);
+  await runRank(flags, collected.ingest.jobIds, !fixtureFile(flags));
   await runNotify(flags);
 }
 
 async function runStatus() {
   const config = loadConfig();
   await recoverInterruptedRuns(config);
-  const { Jobs, SourceListings, CollectionRuns, Assessments, Notifications } = db();
+  const { Jobs, SourceListings, CollectionRuns, Assessments, Notifications, AiAssessmentQueue } = db();
   const count = async (entity: any, where?: Record<string, unknown>) => {
     const statement = where ? SELECT.from(entity).where(where) : SELECT.from(entity);
     return (await query(statement)).length;
@@ -217,6 +218,8 @@ async function runStatus() {
   out(`  source listings     : ${await count(SourceListings)}`);
   out(`  collection runs     : ${await count(CollectionRuns)}`);
   out(`  assessments         : ${await count(Assessments)}`);
+  out(`  AI queue pending    : ${await count(AiAssessmentQueue, { status: 'Pending' })}`);
+  out(`  listings closed     : ${await count(SourceListings, { activityState: 'Closed' })}`);
   out(`  notifications sent  : ${await count(Notifications, { status: 'Sent' })}`);
   out(`  notifications open  : ${await count(Notifications, { status: { in: ['Pending', 'Failed', 'Sending'] } })}`);
 

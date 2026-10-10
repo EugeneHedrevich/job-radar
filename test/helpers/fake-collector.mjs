@@ -16,6 +16,10 @@ process.stdin.on('end', () => {
 
   process.stderr.write('diagnostic line that must never be parsed as a result\n');
   emit({ type: 'meta', jobspy_version: 'test-double', tasks: request.tasks.length });
+  emit({ type: 'listing_activity', task_id: task.task_id, activity: {
+    source: task.source, source_job_id: 'closed-1', job_url: 'https://example.com/jobs/closed-1',
+    status: 'closed', reason: 'http_410', evidence: 'HTTP 410 for listing detail', checked_at: '2026-10-10T12:00:00.000Z',
+  } });
 
   emit({
     type: 'job',

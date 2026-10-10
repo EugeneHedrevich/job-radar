@@ -45,6 +45,10 @@ entity SourceListings : cuid {
   directUrl       : String(1000);
   hasDescription  : Boolean default false;
   descriptionAttemptedAt : Timestamp;
+  activityState   : String(20) default 'Unknown'; // Unknown | Active | Closed
+  activityCheckedAt : Timestamp;
+  closureReason   : String(50);
+  activityEvidence : String(2000);
   // Not named `raw`: cds.ql's UPDATE.set() treats an object with a `raw`
   // property as a tagged template literal.
   rawRecord       : LargeString;             // untouched collector record (JSON)
@@ -107,6 +111,25 @@ entity DescriptionRotation {
   key batchKey : String(200);
   state        : LargeString;
   updatedAt    : Timestamp;
+}
+
+/** Durable AI work, keyed by the same inputs as the paid attempt cache. */
+entity AiAssessmentQueue {
+  key cacheKey : String(128);
+  job          : Association to Jobs;
+  rulesScore   : Integer;
+  queuedAt     : Timestamp;
+  completedAt  : Timestamp;
+  status       : String(20); // Pending | Completed | Superseded
+}
+
+/** Preserve confirmed listing activity observations without changing user status. */
+entity ListingActivityEvents : cuid {
+  listing   : Association to SourceListings;
+  state     : String(20);
+  reason    : String(50);
+  evidence  : String(2000);
+  checkedAt : Timestamp;
 }
 
 /** Result of rule-based or LLM matching. Cached by cacheKey. */

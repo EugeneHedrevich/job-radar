@@ -6,6 +6,8 @@ import { assessWithRules, suggestCvVariant } from './rules.js';
 import { jobText } from './signals.js';
 import { validateGapEvidence } from './evidence.js';
 import type { AssessmentResult, MatchableJob } from './types.js';
+import { matchingConstraints } from './constraints.js';
+import { abapUncertainty } from './capabilities.js';
 
 const llmResponseSchema = z.object({
   fit_score: z.number().min(0).max(100),
@@ -86,6 +88,8 @@ function profileBrief(config: AppConfig): string {
     `SAP experience: ${profile.identity.years_of_sap_experience}+ years`,
     `Education: ${education}`,
     `Base: ${profile.identity.base_location}`,
+    `Timezone: ${profile.identity.timezone ?? 'unknown'}`,
+    `Availability: ${JSON.stringify(profile.availability ?? {})}`,
     `Engagement preferred: ${profile.engagement.preferred_types.join(', ')}; rejected: ${profile.engagement.rejected_types.join(', ')}`,
     `Work mode preferred: ${profile.engagement.preferred_work_mode}; acceptable: ${profile.engagement.acceptable_work_modes.join(', ')}`,
     `Regions: ${profile.engagement.preferred_regions.join(', ')}`,
@@ -117,6 +121,10 @@ Rules you must follow:
 - If a fact (rate, contract type, location eligibility, work authorisation, language requirement) is not stated, put it in missing_information. Do not guess it, and do not treat it as either a pass or a fail.
 - Use the stated education field. Do not infer a qualification level or institution, or equate Chemical Engineering with Computer Science. Distinguish an unspecified degree requirement from a requirement for a specific field or qualification level.
 - Mixed BTP/ABAP or BTP/IS-U roles must be judged on what the description actually requires, not on the title.
+- Basic ABAP understanding, reading or debugging existing ABAP does not prove a requirement for independent ABAP development or RAP ownership. Check the local mandatory/preferred context. Unlisted basic capabilities are unknown; do not add them to the profile.
+- Use profile availability for explicit start and weekly capacity requirements. Unknown start dates, hours or timezone compatibility belong in missing_information.
+- Distinguish job location, remote format and required candidate residence. Remote UK residents only is a residence restriction; a German office location alone is not. EU remote B2B permission establishes contractor work only, never local employment permission.
+- Use the actual languages list. Preferred languages never prove mandatory gaps. Professional proficiency does not establish a CEFR level. Preserve independent mandatory language requirements despite optional languages elsewhere.
 - Evaluate a focused SAPUI5/Fiori frontend role against the candidate's frontend skills. Do not penalize it for lacking CAP, Node.js or BTP requirements that the vacancy does not ask for. Explicit mandatory ABAP requirements still take precedence.
 - suggested_cv_variant must be exactly one of the allowed CV variant ids.
 - Never invent requirements, technologies, rates or CV content that are not in the inputs.`;
@@ -214,6 +222,8 @@ export async function assessWithLlm(config: AppConfig, job: MatchableJob): Promi
 
   // Deterministic mandatory incompatibilities always win over the model.
   const deterministic = assessWithRules(config, job);
+  const constraints = matchingConstraints(config, job);
+  const abap = abapUncertainty(config, text.all);
   let fitScore = Math.round(data.fit_score);
   let recommendation = data.recommendation;
   const mandatoryGaps = [...new Set([...deterministic.mandatoryGaps, ...modelEvidence.map((gap) => gap.requirement)])];
@@ -230,7 +240,7 @@ export async function assessWithLlm(config: AppConfig, job: MatchableJob): Promi
   if (deterministic.hardReject) {
     fitScore = Math.min(fitScore, config.scoring.hard_rejects.score_cap);
     recommendation = 'Skip';
-  } else if (mandatoryGaps.length > 0 || deterministic.missingInformation.some((item) =>
+  } else if (mandatoryGaps.length > 0 || constraints.requiresReview || abap.requiresReview || deterministic.missingInformation.some((item) =>
     item.startsWith('unclear whether "') && item.endsWith('" is mandatory') ||
     item.startsWith('profile evidence for required capability "') && item.endsWith('" is not stated'))) {
     fitScore = Math.min(fitScore, config.scoring.thresholds.apply - 1);

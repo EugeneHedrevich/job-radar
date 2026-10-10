@@ -16,6 +16,8 @@ export interface Entities {
   CollectionErrors: any;
   SourceHealth: any;
   DescriptionRotation: any;
+  AiAssessmentQueue: any;
+  ListingActivityEvents: any;
   Assessments: any;
   Notifications: any;
 }
@@ -82,6 +84,20 @@ async function ensureMatchingState(connection: any): Promise<void> {
   if (!listingColumns.some((column) => column.name === 'descriptionAttemptedAt')) {
     await connection.run('ALTER TABLE sap_jobradar_SourceListings ADD COLUMN descriptionAttemptedAt TIMESTAMP');
   }
+  for (const [name, type] of [
+    ['activityState', "VARCHAR(20) DEFAULT 'Unknown'"], ['activityCheckedAt', 'TIMESTAMP'],
+    ['closureReason', 'VARCHAR(50)'], ['activityEvidence', 'VARCHAR(2000)'],
+  ]) {
+    if (!listingColumns.some((column) => column.name === name)) {
+      await connection.run(`ALTER TABLE sap_jobradar_SourceListings ADD COLUMN ${name} ${type}`);
+    }
+  }
+  await connection.run(`CREATE TABLE IF NOT EXISTS sap_jobradar_AiAssessmentQueue
+    (cacheKey VARCHAR(128) PRIMARY KEY NOT NULL, job_ID VARCHAR(36), rulesScore INTEGER,
+      queuedAt TIMESTAMP, completedAt TIMESTAMP, status VARCHAR(20))`);
+  await connection.run(`CREATE TABLE IF NOT EXISTS sap_jobradar_ListingActivityEvents
+    (ID VARCHAR(36) PRIMARY KEY NOT NULL, listing_ID VARCHAR(36), state VARCHAR(20),
+      reason VARCHAR(50), evidence VARCHAR(2000), checkedAt TIMESTAMP)`);
   await connection.run(`CREATE TABLE IF NOT EXISTS sap_jobradar_DescriptionRotation
     (batchKey VARCHAR(200) PRIMARY KEY NOT NULL, state TEXT, updatedAt TIMESTAMP)`);
   const columns: Array<{ name: string }> = await connection.run('PRAGMA table_info(sap_jobradar_Assessments)');
@@ -148,6 +164,10 @@ async function ensureIndexes(db: any): Promise<void> {
        ON sap_jobradar_Jobs (companyNormalized)`,
     `CREATE INDEX IF NOT EXISTS idx_notification_status
        ON sap_jobradar_Notifications (status)`,
+    `CREATE INDEX IF NOT EXISTS idx_ai_queue_pending
+       ON sap_jobradar_AiAssessmentQueue (status, queuedAt, job_ID)`,
+    `CREATE INDEX IF NOT EXISTS idx_listing_activity
+       ON sap_jobradar_SourceListings (job_ID, activityState)`,
     `CREATE UNIQUE INDEX IF NOT EXISTS idx_notification_job_channel
        ON sap_jobradar_Notifications (job_ID, channel) WHERE status != 'Superseded'`,
   ];

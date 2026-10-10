@@ -4,10 +4,11 @@ import { activeCooldowns, recordOutcomes } from '../collector/health.js';
 import { planBatch, type PlanOptions } from '../collector/plan.js';
 import { reserveBatchPlan } from '../collector/rotation.js';
 import { runCollector } from '../collector/run.js';
-import type { CollectorJob, CollectorTask, TaskOutcome } from '../collector/types.js';
+import type { CollectorJob, CollectorTask, ListingActivity, TaskOutcome } from '../collector/types.js';
 import { cds, db, INSERT, UPDATE } from '../db/index.js';
 import { normalizeJob, type NormalizedJob } from '../normalize/index.js';
 import { ingestJobs, type IngestResult } from '../persist/ingest.js';
+import { applyListingActivity } from '../persist/activity.js';
 import { log } from '../util/log.js';
 import { recoverInterruptedRuns, startRunHeartbeat } from '../collector/lifecycle.js';
 
@@ -59,6 +60,7 @@ export async function collect(options: CollectOptions = {}): Promise<CollectSumm
     }
 
     const collected: Array<{ taskId: string; source: string; job: CollectorJob }> = [];
+    const activities: ListingActivity[] = [];
     // Keyed by task id so a successful retry replaces the earlier failure.
     const outcomeByTask = new Map<string, TaskOutcome>();
     let malformedLines = 0;
@@ -81,11 +83,12 @@ export async function collect(options: CollectOptions = {}): Promise<CollectSumm
           });
           malformedLines += output.malformedLines;
           collected.push(...output.jobs);
+          activities.push(...output.activities);
           for (const outcome of output.outcomes) outcomeByTask.set(outcome.taskId, outcome);
 
           const retryable = output.outcomes.filter((outcome) => outcome.status === 'Failed' && isRetryable(outcome));
           if (retryable.length && config.searches.resilience.max_retries_per_task > 0) {
-            const retried = await retryTasks(config, source, tasks, retryable, collected);
+            const retried = await retryTasks(config, source, tasks, retryable, collected, activities);
             for (const outcome of retried) outcomeByTask.set(outcome.taskId, outcome);
           }
         } catch (error) {
@@ -121,6 +124,7 @@ export async function collect(options: CollectOptions = {}): Promise<CollectSumm
 
     const ingest = await ingestJobs(normalized, { runId, seenAt: new Date(), demo: Boolean(options.fixture) });
     ingest.unusable = unusable;
+    await applyListingActivity(activities);
 
     for (const outcome of outcomes) {
       await cds.run(
@@ -187,6 +191,7 @@ async function retryTasks(
   allTasks: CollectorTask[],
   failed: TaskOutcome[],
   collected: Array<{ taskId: string; source: string; job: CollectorJob }>,
+  activities: ListingActivity[],
 ): Promise<TaskOutcome[]> {
   const sourceConfig = config.searches.sources[source]!;
   const retryTaskIds = new Set(failed.map((outcome) => outcome.taskId));
@@ -204,6 +209,7 @@ async function retryTasks(
     processTimeoutSeconds: config.searches.resilience.process_timeout_seconds,
   });
   collected.push(...output.jobs);
+  activities.push(...output.activities);
   return output.outcomes;
 }
 

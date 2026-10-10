@@ -6,6 +6,8 @@ import { assessWithRules, prescreen } from '../matching/rules.js';
 import type { AssessmentResult, MatchableJob } from '../matching/types.js';
 import { normalizeText, sha256 } from '../util/text.js';
 import { log } from '../util/log.js';
+import { closedJobIds, isJobClosed } from '../persist/activity.js';
+import { aiPriority, completeAiAttempt, synchronizeAiQueue } from './ai-queue.js';
 
 export interface RankedJob {
   job: MatchableJob;
@@ -17,6 +19,8 @@ export interface RankedJob {
 export interface RankOptions {
   /** Restrict to these job ids (e.g. the ones a collection run just touched). */
   jobIds?: string[];
+  /** Include stored AI candidates in the same call and request budget. */
+  includePendingAi?: boolean;
   /** Skip the LLM stage even when a key is configured. */
   rulesOnly?: boolean;
   limit?: number;
@@ -34,7 +38,7 @@ export function assessmentCacheKey(
   engine: 'rules' | 'llm',
 ): string {
   return sha256(JSON.stringify({
-    revision: 12,
+    revision: 13,
     job: {
       ID: job.ID, title: job.title, company: job.company,
       location: job.location, locationCountry: job.locationCountry,
@@ -67,41 +71,46 @@ export async function findCurrentAssessment(config: AppConfig, job: MatchableJob
 }
 
 export async function rank(options: RankOptions = {}): Promise<RankedJob[]> {
-  if (options.jobIds && options.jobIds.length === 0) return [];
+  if (options.jobIds && options.jobIds.length === 0 && !options.includePendingAi) return [];
   const config = loadConfig();
   const { Jobs, Assessments } = db();
 
   let queryBuilder = SELECT.from(Jobs);
-  if (options.jobIds?.length) queryBuilder = queryBuilder.where({ ID: { in: options.jobIds } });
-  const jobs = await query<MatchableJob>(queryBuilder);
+  if (options.jobIds?.length && !options.includePendingAi) queryBuilder = queryBuilder.where({ ID: { in: options.jobIds } });
+  const stored = await query<MatchableJob>(queryBuilder);
+  const closed = await closedJobIds();
+  const prepared = stored.filter((job) => !closed.has(job.ID)).map((job) => {
+    const screen = prescreen(config, job);
+    let assessment = assessWithRules(config, job);
+    if (!screen.passed) assessment = { ...assessment,
+      fitScore: Math.min(assessment.fitScore, config.scoring.hard_rejects.score_cap),
+      recommendation: 'Skip', explanation: `Pre-screen: ${screen.reason}.` };
+    const eligible = !job.isDemo && screen.passed && Boolean(job.description?.trim()) &&
+      assessment.fitScore >= config.scoring.thresholds.llm_screen_gate && !assessment.hardReject;
+    return { job, assessment, eligible, llmKey: assessmentCacheKey(config, job, 'llm') };
+  });
+  const queue = await synchronizeAiQueue(prepared.filter((row) => row.eligible).map((row) => ({
+    jobId: row.job.ID, cacheKey: row.llmKey, rulesScore: row.assessment.fitScore,
+  })), stored.map((job) => job.ID));
+  const at = new Date();
+  prepared.sort((a, b) => {
+    const left = queue.get(a.llmKey), right = queue.get(b.llmKey);
+    const leftPriority = left ? aiPriority(left, at) : -Infinity;
+    const rightPriority = right ? aiPriority(right, at) : -Infinity;
+    return (rightPriority === leftPriority ? 0 : rightPriority > leftPriority ? 1 : -1) ||
+      (left?.queuedAt ?? '').localeCompare(right?.queuedAt ?? '') || a.job.ID.localeCompare(b.job.ID);
+  });
 
   const useLlm = config.llmAvailable && !options.rulesOnly;
-  let llmBudget = useLlm ? config.settings.llm.max_jobs_per_run : 0;
+  let llmBudget = useLlm ? Math.min(5, config.settings.llm.max_jobs_per_run) : 0;
   const ranked: RankedJob[] = [];
 
-  for (const job of jobs) {
-    const screen = prescreen(config, job);
-    if (!screen.passed) {
-      log.debug('Prescreen dropped job', { title: job.title, reason: screen.reason });
-    }
-
+  for (const preparedJob of prepared) {
+    const { job } = preparedJob;
+    if (await isJobClosed(job.ID)) continue;
     let engine: 'rules' | 'llm' = 'rules';
-    let assessment = assessWithRules(config, job);
-    if (!screen.passed) {
-      assessment = {
-        ...assessment,
-        fitScore: Math.min(assessment.fitScore, config.scoring.hard_rejects.score_cap),
-        recommendation: 'Skip',
-        explanation: `Pre-screen: ${screen.reason}.`,
-      };
-    }
-
-    const eligibleForLlm =
-      useLlm && !job.isDemo &&
-      screen.passed &&
-      Boolean(job.description) &&
-      assessment.fitScore >= config.scoring.thresholds.llm_screen_gate &&
-      !assessment.hardReject;
+    let assessment = preparedJob.assessment;
+    const eligibleForLlm = useLlm && preparedJob.eligible;
 
     // Cached evaluations cost no requests, including after the request budget
     // has been spent. The budget governs calls rather than cache reads.
@@ -153,6 +162,7 @@ export async function rank(options: RankOptions = {}): Promise<RankedJob[]> {
     // failure. The fallback still reports its actual rules engine and reason.
     const storedKey = assessmentCacheKey(config, job, shouldUseLlm ? 'llm' : engine);
     const assessmentId = await storeAssessment(job.ID, storedKey, assessment);
+    if (shouldUseLlm) await completeAiAttempt(storedKey);
     ranked.push({ job, assessment, assessmentId, cached: false });
   }
 
@@ -165,7 +175,9 @@ export async function readTop(limit = 20, titleSearch?: string): Promise<RankedJ
   const config = loadConfig();
   const ranked: RankedJob[] = [];
   const needle = normalizeText(titleSearch);
+  const closed = await closedJobIds();
   for (const job of await query<MatchableJob>(SELECT.from(db().Jobs))) {
+    if (closed.has(job.ID)) continue;
     if (needle && !normalizeText(job.title).includes(needle)) continue;
     const current = await findCurrentAssessment(config, job);
     if (current) ranked.push({ job, assessment: rowToAssessment(current), assessmentId: current.ID, cached: true });

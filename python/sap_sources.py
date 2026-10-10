@@ -17,6 +17,7 @@ from urllib.parse import urlencode, urljoin, urlparse
 import requests
 from bs4 import BeautifulSoup
 from markdownify import markdownify
+from activity import http_closure, observe, page_closure
 
 SOURCES = {
     "redglobal": ("https://www.redglobal.com", "RED Global"),
@@ -44,6 +45,17 @@ def published_date(value: Any) -> str | None:
         except ValueError:
             continue
     return None
+
+
+def applicant_location(posting: dict[str, Any]) -> str | None:
+    requirements = posting.get("applicantLocationRequirements")
+    requirements = requirements if isinstance(requirements, list) else [requirements]
+    names = []
+    for requirement in requirements:
+        name = requirement.get("name") if isinstance(requirement, dict) else requirement
+        if isinstance(name, str) and name.strip():
+            names.append(name.strip())
+    return ", ".join(dict.fromkeys(names)) or None
 
 
 def job_type(value: str | None) -> str | None:
@@ -211,6 +223,9 @@ def job_posting(soup: BeautifulSoup) -> dict[str, Any] | None:
 def hydrate(source: str, row: dict[str, Any], html: str, description_format: str) -> dict[str, Any]:
     soup = page_soup(html)
     posting = job_posting(soup) or {}
+    closure = page_closure(row, soup, posting)
+    if closure:
+        return closure
     row = dict(row)
     meta: dict[str, str] = {}
     if source == "eursap":
@@ -258,6 +273,9 @@ def hydrate(source: str, row: dict[str, Any], html: str, description_format: str
     description = markdownify(description).strip() if description_format == "markdown" else description
     prefix = "\n".join(f"{key.title()}: {value}" for key, value in meta.items() if value and key in {"language", "work type", "type", "workplace", "start date", "pay"})
     row["description"] = (prefix + "\n\n" + description).strip()
+    required_location = applicant_location(posting)
+    if required_location:
+        row["description"] = f"Candidate required location: {required_location}\n\n" + row["description"]
     # A number without an explicit interval (e.g. RED's daily rate lacking a
     # unit in JSON-LD) must not be converted into an hourly rate.
     salary = posting.get("baseSalary")
@@ -274,9 +292,17 @@ def hydrate(source: str, row: dict[str, Any], html: str, description_format: str
                     pass
             if "min_amount" in row or "max_amount" in row:
                 row.update(interval=interval, currency=salary.get("currency"))
-    expiry = published_date(posting.get("validThrough"))
-    row["_expired"] = bool(expiry and expiry < datetime.now(timezone.utc).date().isoformat())
-    return row
+    return observe(row, "active", "Public listing detail contains a description")
+
+
+def hydrate_detail(source: str, row: dict[str, Any], description_format: str) -> dict[str, Any]:
+    try:
+        return hydrate(source, row, detail_html(safe_url(source, row["job_url"])), description_format)
+    except requests.HTTPError as exc:
+        closure = http_closure(row, exc)
+        if closure:
+            return closure
+        raise
 
 
 def scrape_agency(kwargs: dict[str, Any]) -> tuple[list[dict[str, Any]], BaseException | None]:
@@ -289,20 +315,24 @@ def scrape_agency(kwargs: dict[str, Any]) -> tuple[list[dict[str, Any]], BaseExc
     fetch_description = bool(kwargs.get("fetch_description"))
     detail_requests = 0
     enriched = []
+    closures = []
     if fetch_description:
         for row in kwargs.get("detail_jobs", [])[:min(wanted, MAX_DETAIL_REQUESTS_PER_TASK)]:
             detail_requests += 1
             try:
                 url = safe_url(source, row["job_url"])
-                updated = hydrate(source, row, detail_html(url), kwargs.get("description_format", "markdown"))
+                updated = hydrate_detail(source, row, kwargs.get("description_format", "markdown"))
             except Exception as exc:
-                return enriched, exc
+                return enriched + closures, exc
             seen.add(url)
-            if updated.pop("_expired", False) or (updated.get("date_posted") and date.fromisoformat(updated["date_posted"]) < cutoff):
+            if updated.get("activity_status") == "closed":
+                closures.append(updated)
+                continue
+            if updated.get("date_posted") and date.fromisoformat(updated["date_posted"]) < cutoff:
                 continue
             enriched.append(updated)
     if kwargs.get("enrich_only"):
-        return enriched, failure
+        return enriched + closures, failure
     for page in range(1, (1 if source == "eursap" else MAX_SEARCH_PAGES) + 1):
         try:
             candidates, more = parse_search(source, search_html(source, kwargs.get("search_term", "SAP"), page))
@@ -317,20 +347,22 @@ def scrape_agency(kwargs: dict[str, Any]) -> tuple[list[dict[str, Any]], BaseExc
                 continue
             if fetch_description:
                 if detail_requests >= MAX_DETAIL_REQUESTS_PER_TASK:
-                    return enriched + rows, failure
+                    return enriched + rows + closures, failure
                 detail_requests += 1
                 try:
-                    row = hydrate(source, row, detail_html(row["job_url"]), kwargs.get("description_format", "markdown"))
+                    row = hydrate_detail(source, row, kwargs.get("description_format", "markdown"))
                 except Exception as exc:
                     # Retain the identity, report the failure and stop requests.
                     rows.append(row)
-                    return enriched + rows, exc
-                if row.pop("_expired", False) or (row.get("date_posted") and
-                        date.fromisoformat(row["date_posted"]) < cutoff):
+                    return enriched + rows + closures, exc
+                if row.get("activity_status") == "closed":
+                    closures.append(row)
+                    continue
+                if row.get("date_posted") and date.fromisoformat(row["date_posted"]) < cutoff:
                     continue
             rows.append(row)
             if len(rows) >= wanted:
                 break
         if len(rows) >= wanted or not more or (fetch_description and detail_requests >= MAX_DETAIL_REQUESTS_PER_TASK):
             break
-    return enriched + rows, failure
+    return enriched + rows + closures, failure

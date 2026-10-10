@@ -24,7 +24,9 @@ class DetailBacklogTest(unittest.TestCase):
         self.assertEqual(hydrated["max_amount"], 75)
         self.assertEqual(hydrated["interval"], "hourly")
         with patch("details.requests.get", return_value=Mock(status_code=404)):
-            self.assertTrue(details.hydrate_board("linkedin", record("54321"), "markdown")["_expired"])
+            closed = details.hydrate_board("linkedin", record("54321"), "markdown")
+            self.assertEqual(closed["activity_status"], "closed")
+            self.assertEqual(closed["activity_reason"], "http_404")
 
     def test_follows_canonical_redirect_only_for_the_same_public_job(self):
         redirect = Mock(status_code=302, is_redirect=True,

@@ -26,7 +26,7 @@ export async function runCycle(options: SchedulerOptions = {}): Promise<void> {
     merged: collected.ingest.mergedAcrossSources,
   });
 
-  const ranked = await rank({ jobIds: collected.ingest.jobIds, rulesOnly: Boolean(options.demo) });
+  const ranked = await rank({ jobIds: collected.ingest.jobIds, includePendingAi: !options.demo, rulesOnly: Boolean(options.demo) });
   log.info('Ranking finished', { assessed: ranked.length });
 
   const sent = await notify({ dryRun: Boolean(options.demo || options.dryRun) });

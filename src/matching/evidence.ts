@@ -2,6 +2,8 @@ import type { AppConfig } from '../config/index.js';
 import { normalizeText } from '../util/text.js';
 import { jobText, onsiteDaysPerMonth, requirementKind, sentences } from './signals.js';
 import type { MandatoryGapEvidence, MatchableJob } from './types.js';
+import { unclaimedMentions } from './capabilities.js';
+import { constraintRequirementMatches, matchingConstraints, nonSkillConstraintClause } from './constraints.js';
 
 function sourceText(value: string): string {
   return normalizeText(value.replace(/<[^>]*>/g, ' ').replace(/&nbsp;/g, ' '));
@@ -30,10 +32,18 @@ export function validateGapEvidence(config: AppConfig, job: MatchableJob, gap: M
     if (!fact || !Object.hasOwn(fact, part)) { fact = undefined; break; }
     fact = fact[part];
   }
-  if (unknown(fact) || !['string', 'number', 'boolean'].includes(typeof fact) || String(fact) !== gap.profileValue) {
+  const value = gap.profilePath === 'languages' ? JSON.stringify(fact) : String(fact);
+  if (unknown(fact) || (!['string', 'number', 'boolean'].includes(typeof fact) && gap.profilePath !== 'languages') || value !== gap.profileValue) {
     return `profile fact for "${gap.requirement}" is unknown or does not match the stated evidence`;
   }
   const text = jobText(job).all;
+  // Accept only contradictions independently reconstructed from the cited
+  // quote and actual profile, including absence from the languages list.
+  const constraint = matchingConstraints(config, job).evidence.find((item) =>
+    item.profilePath === gap.profilePath && item.profileValue === gap.profileValue &&
+    quote.includes(sourceText(item.vacancyQuote)) &&
+    constraintRequirementMatches(item, gap.requirement));
+  if (constraint) return null;
   const mandatory = (terms: string[]) => {
     const term = termsInQuote(quote, terms);
     return term && termsInQuote(sourceText(gap.requirement), terms) &&
@@ -41,7 +51,9 @@ export function validateGapEvidence(config: AppConfig, job: MatchableJob, gap: M
   };
   if (path[0] === 'not_claimed' && path.length === 2) {
     const claim = String(fact);
-    if (mandatory([claim, ...(config.profile.not_claimed_aliases[claim] ?? [])])) return null;
+    if (mandatory([claim, ...(config.profile.not_claimed_aliases[claim] ?? [])]) &&
+      unclaimedMentions(config, text, claim).some((mention) => mention.kind === 'mandatory') &&
+      unclaimedMentions(config, quote, claim).some((mention) => mention.kind !== 'preferred')) return null;
   }
   if (path[0] === 'skills' && path.length === 4 && path[3] === 'proficiency') {
     const skill = config.profile.skills[path[1]!]?.[Number(path[2])];
@@ -113,6 +125,7 @@ export function unknownSkillRequirements(config: AppConfig, job: MatchableJob): 
   const result: string[] = [];
   const markers = [...(config.scoring.signals.mandatory_markers ?? []), ...(config.scoring.signals.preferred_markers ?? [])];
   for (const clause of sentences(text).flatMap((part) => part.split(','))) {
+    if (nonSkillConstraintClause(clause)) continue;
     let capability = clause;
     for (const marker of markers) capability = capability.replace(new RegExp(marker, 'gi'), '');
     capability = capability.replace(/^(?:[-*#]+|\d+[.)])\s*/, '')
@@ -134,7 +147,7 @@ export function deterministicGapEvidence(config: AppConfig, job: MatchableJob): 
   const source = `${job.title}\n${(job.description ?? '').replace(/<\/?(?:li|p|div|h[1-6])\b[^>]*>|<br\s*\/?\s*>/gi, '\n').replace(/<[^>]+>/g, '')}`;
   for (const [index, claim] of config.profile.not_claimed.entries()) {
     const terms = [claim, ...(config.profile.not_claimed_aliases[claim] ?? [])];
-    if (!terms.some((term) => requirementKind(config, text, term) === 'mandatory')) continue;
+    if (!unclaimedMentions(config, text, claim).some((mention) => mention.kind === 'mandatory')) continue;
     const blocks = sentences(source);
     let quote: string | undefined;
     for (let end = 0; end < blocks.length && !quote; end++) {
@@ -145,7 +158,7 @@ export function deterministicGapEvidence(config: AppConfig, job: MatchableJob): 
       // marker. A bare skill from earlier duties is not requirement evidence.
       for (let start = end; start >= 0; start--) {
         const candidate = blocks.slice(start, end + 1).join('\n');
-        if (requirementKind(config, candidate, term) === 'mandatory') {
+        if (unclaimedMentions(config, candidate, claim).some((mention) => mention.kind === 'mandatory')) {
           quote = candidate;
           break;
         }

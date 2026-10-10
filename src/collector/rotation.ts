@@ -76,6 +76,7 @@ async function reserveEnrichment(tx: any, config: AppConfig, plan: PlannedBatch,
         : Math.min(5, Math.max(1, Math.floor(task.results_wanted / 2)));
       task.detail_jobs = [];
       for (const listing of listings) {
+        if (listing.activityState === 'Closed') continue;
         if (chosen.has(listing.ID) || new Date(listing.lastSeenAt).getTime() < cutoff) continue;
         const job = eligible.get(listing.job_ID)!;
         if (job.datePosted && new Date(job.datePosted).getTime() < cutoff) continue;

@@ -51,6 +51,7 @@ describe('malformed collector output', () => {
     expect(output.jobspyVersion).toBe('test-double');
     expect(output.jobs).toHaveLength(1);
     expect(output.jobs[0]!.job.id).toBe('ok-1');
+    expect(output.activities).toEqual([expect.objectContaining({ status: 'closed', reason: 'http_410', source_job_id: 'closed-1' })]);
     // not-JSON, schema violation and unknown discriminator - the blank line is ignored.
     expect(output.malformedLines).toBe(3);
     expect(output.outcomes).toHaveLength(1);

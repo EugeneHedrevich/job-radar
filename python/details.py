@@ -14,8 +14,9 @@ from urllib.parse import urljoin, urlparse
 
 import requests
 from markdownify import markdownify
+from activity import observe, page_closure
 
-from sap_sources import REQUEST_TIMEOUT_SECONDS, job_posting, page_soup, published_date
+from sap_sources import REQUEST_TIMEOUT_SECONDS, applicant_location, job_posting, page_soup, published_date
 
 
 def linkedin_job_id(url: str) -> str:
@@ -38,7 +39,7 @@ def hydrate_board(source: str, row: dict[str, Any], description_format: str) -> 
     for hop in range(4):
         response = requests.get(url, timeout=REQUEST_TIMEOUT_SECONDS, allow_redirects=False)
         if response.status_code in {404, 410}:
-            return {**row, "_expired": True}
+            return observe(row, "closed", f"HTTP {response.status_code} for listing detail", f"http_{response.status_code}")
         response.raise_for_status()
         if not response.is_redirect:
             break
@@ -52,6 +53,9 @@ def hydrate_board(source: str, row: dict[str, Any], description_format: str) -> 
         url = target
     soup = page_soup(response.text)
     posting = job_posting(soup) or {}
+    closure = page_closure(row, soup, posting)
+    if closure:
+        return closure
     description = posting.get("description")
     if not isinstance(description, str) or not description.strip():
         node = soup.select_one(".show-more-less-html__markup")
@@ -60,6 +64,9 @@ def hydrate_board(source: str, row: dict[str, Any], description_format: str) -> 
         raise ValueError(f"{source} public detail page has no description")
     updated = dict(row)
     updated["description"] = markdownify(description).strip() if description_format == "markdown" else description
+    required_location = applicant_location(posting)
+    if required_location:
+        updated["description"] = f"Candidate required location: {required_location}\n\n" + updated["description"]
     # Reuse pinned JobSpy's parsers so a backlog slot keeps the structured
     # employment, seniority and pay fields normally supplied by its details.
     from jobspy.linkedin import LinkedIn
@@ -79,9 +86,7 @@ def hydrate_board(source: str, row: dict[str, Any], description_format: str) -> 
                        interval=compensation.interval.value if compensation.interval else None,
                        currency=compensation.currency, salary_source=SalarySource.DIRECT_DATA.value)
     updated["date_posted"] = published_date(posting.get("datePosted")) or updated.get("date_posted")
-    expiry = published_date(posting.get("validThrough"))
-    updated["_expired"] = bool(expiry and expiry < datetime.now(timezone.utc).date().isoformat())
-    return updated
+    return observe(updated, "active", "Public listing detail contains a description")
 
 
 def enrich_board(source: str, rows: list[dict[str, Any]], kwargs: dict[str, Any]) -> tuple[list[dict[str, Any]], BaseException | None]:
@@ -112,8 +117,8 @@ def enrich_board(source: str, rows: list[dict[str, Any]], kwargs: dict[str, Any]
                 failure = failure or exc
                 continue
             return [item for item in result if item is not None], exc
-        if updated.pop("_expired", False) or (updated.get("date_posted") and date.fromisoformat(str(updated["date_posted"])[:10]) < cutoff):
-            # Remove expired search candidates without losing other results.
+        if updated.get("activity_status") != "closed" and (updated.get("date_posted") and date.fromisoformat(str(updated["date_posted"])[:10]) < cutoff):
+            # Old datePosted only filters freshness; it never closes a listing.
             if url in positions:
                 result[positions[url]] = None
             continue
