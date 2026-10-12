@@ -30,7 +30,7 @@ export async function expireListingDeadlines(at = new Date()): Promise<void> {
     await tx.run('UPDATE sap_jobradar_Jobs SET ID = ID WHERE 0 = 1');
     const listings = await tx.run(`SELECT * FROM sap_jobradar_SourceListings
       WHERE COALESCE(activityState, 'Unknown') != 'Closed' AND julianday(validThrough) <= julianday(?)`, [at.toISOString()]);
-    if (listings.length) await applyObservations(tx, listings.map((listing: any): ListingActivity => ({
+    if (listings && listings.length) await applyObservations(tx, listings.map((listing: any): ListingActivity => ({
       source: listing.source, source_job_id: listing.sourceJobId, job_url: listing.canonicalUrl,
       status: 'closed', reason: 'valid_through', evidence: `validThrough: ${listing.validThrough}`,
       valid_through: new Date(listing.validThrough).toISOString(), checked_at: at.toISOString(),

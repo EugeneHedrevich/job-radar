@@ -36,8 +36,12 @@ def hydrate_board(source: str, row: dict[str, Any], description_format: str) -> 
     if source != "linkedin":
         raise ValueError(f"Unexpected {source} detail URL")
     identity = linkedin_job_id(url)
+    import os
+    proxy = os.environ.get("JOB_RADAR_PROXY")
+    proxies = {"http": proxy, "https": proxy} if proxy else None
+    verify = False if (proxy and "scrapfly" in proxy) else True
     for hop in range(4):
-        response = requests.get(url, timeout=REQUEST_TIMEOUT_SECONDS, allow_redirects=False)
+        response = requests.get(url, timeout=60 if proxy else REQUEST_TIMEOUT_SECONDS, allow_redirects=False, proxies=proxies, verify=verify)
         if response.status_code in {404, 410}:
             return observe(row, "closed", f"HTTP {response.status_code} for listing detail", f"http_{response.status_code}")
         response.raise_for_status()

@@ -63,9 +63,19 @@ export function assessmentCacheKey(
 }
 
 /** The latest assessment still valid for this job and effective configuration. */
-export async function findCurrentAssessment(config: AppConfig, job: MatchableJob): Promise<any | undefined> {
+export function currentAssessmentKeys(config: AppConfig, job: MatchableJob): string[] {
   const keys = [assessmentCacheKey(config, job, 'rules')];
   if (config.llmAvailable) keys.push(assessmentCacheKey(config, job, 'llm'));
+  return keys;
+}
+
+/** Also accepts a stored snapshot for bulk, read-only dashboard queries. */
+export async function findCurrentAssessment(
+  config: AppConfig, job: MatchableJob, stored?: readonly any[],
+): Promise<any | undefined> {
+  const keys = currentAssessmentKeys(config, job);
+  if (stored) return stored.filter((row) => row.job_ID === job.ID && keys.includes(row.cacheKey))
+    .sort((a, b) => (b.createdAt ?? '').localeCompare(a.createdAt ?? '') || a.ID.localeCompare(b.ID))[0];
   return queryOne(SELECT.from(db().Assessments)
     .where({ job_ID: job.ID, cacheKey: { in: keys } }).orderBy('createdAt desc'));
 }

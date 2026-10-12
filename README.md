@@ -16,6 +16,7 @@ Python collectors -> JSON Lines -> Node.js / SAP CAP -> SQLite -> matching -> Te
 * **Orchestration & persistence**: SAP CAP (Node.js + TypeScript) on SQLite.
 * **Matching**: deterministic rules first, optional structured OpenAI evaluation second.
 * **Notification**: Telegram Bot API.
+* **Personal dashboard**: React + TypeScript + Vite, with a local Node API using the same SQLite database.
 * **Configuration**: YAML in `config/`, secrets in `.env`.
 
 ---
@@ -24,7 +25,7 @@ Python collectors -> JSON Lines -> Node.js / SAP CAP -> SQLite -> matching -> Te
 
 | Tool    | Version                | Notes                                        |
 | ------- | ---------------------- | -------------------------------------------- |
-| Node.js | 20 or newer (22 tested) | needed for the CAP runtime and the CLI        |
+| Node.js | 20.19+ or 22.12+ (22 tested) | needed for CAP, the CLI and Vite         |
 | Python  | 3.10 or newer (3.12 tested) | required by `python-jobspy`              |
 | npm     | 10 or newer            |                                               |
 
@@ -161,6 +162,9 @@ machine.
 | `npm run cycle:demo`         | Complete cycle on offline demo fixtures, dry run                  |
 | `npm run status`             | Database counts, source health, configuration state               |
 | `npm run enrich`             | Fetch stored descriptions within the budget, without new searches |
+| `npm run dev`                | Local dashboard API + Vite development server                     |
+| `npm run build`              | Typecheck backend/frontend and build the dashboard                |
+| `npm start`                  | Local API serving the built dashboard                             |
 | `npm test`                   | Test suite                                                        |
 | `npm run test:collector`    | Python collector regressions against pinned JobSpy, mocked HTTP  |
 
@@ -175,6 +179,87 @@ npm run watch   -- --dry-run
 ```
 
 Run `npx tsx src/cli.ts help` for the full flag list.
+
+### Personal dashboard
+
+After `npm ci`, develop with:
+
+```bash
+npm run dev
+# Open http://127.0.0.1:5173
+```
+
+This starts the API on `127.0.0.1:3210` and Vite on `127.0.0.1:5173`.
+Vite proxies `/api` to the backend. For separate terminals, use `npm run dev:api`
+and `npm run dev:ui`. For normal use:
+
+```bash
+npm run build
+npm start
+# Open http://127.0.0.1:3210
+```
+
+The backend serves `dist/dashboard` and binds only to loopback. Set `JOB_RADAR_PORT`
+in `.env` or the environment to change its port; Vite uses the same setting.
+No Python environment, OpenAI key or Telegram credentials are required to view saved data.
+Keep the Node development dependencies installed: startup uses the existing `tsx` runner.
+
+The dashboard opens the **same persistent database** as the CLI, using
+`storage.db_dir` / `storage.db_file` and `JOB_RADAR_DB_DIR`. To view an existing demo
+database instead, set `JOB_RADAR_DB_DIR=./data/demo` (adjust for your storage location)
+when starting it. It never seeds fixtures, collects, enriches, ranks or delivers
+notifications. Refresh only reloads stored records and status; CLI/scheduled workflows
+continue independently with their existing budgets.
+
+All deduplicated vacancies are visible by default, including low-scoring, unassessed,
+older-batch and closed roles. Search covers title, company, location and personal notes.
+The searchable Sources picker accepts multiple sources: jobs from any selected source
+are included once, and clearing the selection includes all sources. Filter by minimum
+current fit score, application status and listing activity; sort and paginate with the
+controls above and below the list. Unknown scores use `—`,
+and a minimum-score filter excludes unknown scores even when the minimum is zero.
+Publication, first fetched and last seen dates stay separate.
+
+Open a vacancy to view saved assessment details and history. Current scores use the
+same content/configuration cache validation as CLI/Telegram. YAML changes are read
+on the next dashboard request; changes to process environment/secrets require a restart.
+AI, deterministic rules and AI-request fallbacks have separate labels. A fallback
+retains its actual rules score. Outdated assessments appear only in history, with no
+current score. AI pending reflects the saved queue for current inputs; stale queue
+entries and closed jobs do not appear as pending.
+
+Personal tracking includes `New`, `Interested`, `Applied`, `Ignored`, `Interview` and
+`Rejected`, notes, application date, a separate CV-sent checkbox and an optional actual
+CV filename/version. **Suggested CV variant** comes from the read-only assessment;
+**CV actually sent** is your saved label. Setting `Applied` never checks CV sent
+automatically. Save confirmation follows the SQLite update; collection, enrichment
+and ranking only update their own fields. The additive migration adds tracking columns
+without replacing stored vacancies, statuses, assessments or application notes.
+`Active` / `Unknown` / `Closed` is derived separately from stored listing observations
+and explicit expiry using the existing activity logic. Closed vacancies retain all
+personal tracking and saved assessments.
+
+The collection card reports the last stored run's start/finish/heartbeat, batch, counts,
+task failures, recorded errors and source cooldowns. It does not recover stale runs
+or explain low counts. Expand it for source details.
+
+The thin JSON API is local and intentionally limited:
+
+| Endpoint | Purpose |
+| --- | --- |
+| `GET /api/jobs` | All stored jobs with `q`, `source`, `minScore`, `status`, `activity`, `sort`, `direction`, `page`, `pageSize` |
+| `GET /api/jobs/:id` | Vacancy facts, listings, current assessment and saved history |
+| `PATCH /api/jobs/:id/tracking` | Only `status`, `personalNotes`, `applicationDate`, `cvSent`, `sentCvLabel` |
+| `GET /api/status` | Last stored collection and source health |
+
+Tracking updates accept JSON, reject unknown/read-only fields, validate statuses and
+dates (`YYYY-MM-DD` or `null`) and return the saved tracking values. Page size is capped
+at 100. Supply several sources with repeated parameters (`source=indeed&source=linkedin`)
+or a comma-separated value; the original single-source parameter still works.
+Allowed sort fields are `firstSeenAt`, `lastSeenAt`, `datePosted`, `fitScore`,
+`title` and `company`; direction is `asc` or `desc`. Unknown scores/dates sort last in
+either direction. For this small single-user dataset, the API reads stored rows in bulk
+and filters/paginates valid scores in memory, without a second database or service layer.
 
 ### SAP specialist sources
 
@@ -535,7 +620,8 @@ that run, with rules used for the remaining jobs.
 
 `db/schema.cds` (CAP CDS, deployed to SQLite on first run):
 
-* `Jobs` — deduplicated vacancies with `status` of `New` / `Interested` / `Applied` / `Ignored`.
+* `Jobs` — deduplicated vacancies with `status` of `New` / `Interested` / `Applied` / `Ignored` /
+  `Interview` / `Rejected`, personal notes, application date, CV-sent state and actual CV label.
 * `SourceListings` — one row per (source, listing), linked to a job.
 * `CollectionRuns`, `CollectionTasks`, `CollectionErrors` — what ran, what failed, why.
 * `SourceHealth` — per-source circuit breaker that survives restarts.
@@ -631,6 +717,9 @@ notifications and migrations. Shared offline fixtures and parameterized cases re
 regressions without repeating provider, retry or matching setup.
 Additional regressions cover blank path overrides, comma-separated requirement markers,
 optional and unclear attendance, and concurrent migration of a database missing claim columns.
+Compact dashboard regressions reuse the review fixture and temporary SQLite helper to cover
+all-job visibility, score validity/labels, stored queue/activity/status reads, strict personal
+updates, tracking persistence through ingestion/ranking/restart, and additive tracking migrations.
 
 `fixtures/demo-jobs.jsonl` is **demo data** — hand-written, fictional companies, in the exact
 format the Python collector emits.
@@ -657,8 +746,6 @@ Deliberately out of scope for this MVP, with the hooks that would be used:
   Arbeitnow and three public remote-job APIs are already integrated.
 * **CV tailoring** — `config/cv-variants.yaml` already carries variant metadata; a generator
   would consume `Assessments.suggestedCvVariant` plus the gap lists.
-* **Dashboard** — the CAP model is already there; add a `srv/` service and expose
-  `Jobs`/`Assessments` over OData, then a UI5 or React front end.
 * **Richer Telegram actions** (Interested / Applied / Ignore buttons) — `Jobs.status` and
   `Notifications.telegramMessageId` are already persisted for callback handling.
 * **PostgreSQL / HANA** — swap `cds.requires.db` in `src/db/index.ts`; the CDS model is

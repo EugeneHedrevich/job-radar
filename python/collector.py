@@ -208,6 +208,23 @@ def scrape_with_failures(kwargs: dict[str, Any]) -> tuple[Any, tuple[str, str] |
         search_kwargs = {key: value for key, value in kwargs.items() if key not in {"detail_jobs", "enrich_only"}}
         if backlog:
             search_kwargs["fetch_description"] = False
+        import os
+        proxy = os.environ.get("JOB_RADAR_PROXY")
+        if proxy:
+            search_kwargs["proxies"] = [proxy]
+            if "scrapfly" in proxy:
+                import ssl, urllib3, requests
+                urllib3.disable_warnings()
+                ssl._create_default_https_context = ssl._create_unverified_context
+                orig_init = requests.Session.__init__
+                if not getattr(orig_init, "_scrapfly_patched", False):
+                    def _insecure_init(self, *args, **kwargs):
+                        orig_init(self, *args, **kwargs)
+                        self.verify = False
+                    _insecure_init._scrapfly_patched = True
+                    requests.Session.__init__ = _insecure_init
+                import jobspy.util
+                jobspy.util.RotatingProxySession.request_timeout = 60
         frame = scrape_jobs(**search_kwargs)
         failure = capture.worst()
         if backlog and not failure:

@@ -67,12 +67,26 @@ export async function connectDb(dbPathOverride?: string): Promise<any> {
       await ensureDemoProvenance(tx);
       await ensureNotificationClaims(tx);
       await ensureMatchingState(tx);
+      await ensurePersonalTracking(tx);
       await ensureIndexes(tx);
     });
     entities = cds.entities(NAMESPACE) as unknown as Entities;
     return db;
   })();
   return dbPromise;
+}
+
+/** Add user-owned fields in place; retain all vacancy and application history. */
+async function ensurePersonalTracking(connection: any): Promise<void> {
+  const columns: Array<{ name: string }> = await connection.run('PRAGMA table_info(sap_jobradar_Jobs)');
+  for (const [name, type] of [
+    ['personalNotes', 'TEXT'], ['applicationDate', 'DATE'],
+    ['cvSent', 'BOOLEAN DEFAULT 0'], ['sentCvLabel', 'VARCHAR(500)'],
+  ]) {
+    if (!columns.some((column) => column.name === name)) {
+      await connection.run(`ALTER TABLE sap_jobradar_Jobs ADD COLUMN ${name} ${type}`);
+    }
+  }
 }
 
 async function ensureMatchingState(connection: any): Promise<void> {
@@ -188,6 +202,7 @@ export async function disconnectDb(): Promise<void> {
   if (!dbPromise) return;
   const connection = await dbPromise;
   await connection.disconnect?.();
+  delete (cds.services as any)?.db;
   dbPromise = undefined;
   entities = undefined;
 }

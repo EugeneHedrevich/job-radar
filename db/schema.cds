@@ -27,7 +27,11 @@ entity Jobs : cuid {
   datePosted        : Date;                  // publication date; null = unknown
   firstSeenAt       : Timestamp not null;    // never used as a publication date
   lastSeenAt        : Timestamp not null;
-  status            : String(20) default 'New';  // New | Interested | Applied | Ignored
+  status            : String(20) default 'New';  // New | Interested | Applied | Ignored | Interview | Rejected
+  personalNotes     : LargeString;           // user-owned; never changed by ingestion/ranking
+  applicationDate   : Date;
+  cvSent            : Boolean default false; // independent of application status
+  sentCvLabel       : String(500);           // actual filename/version, not the AI suggestion
   isDemo            : Boolean default false;   // fixture data is never delivered live
 
   listings          : Composition of many SourceListings on listings.job = $self;

@@ -4,6 +4,11 @@
   "description": "SAP Job Radar - find SAP vacancies and push matches to Telegram",
   "main": "index.js",
   "scripts": {
+    "dev": "node scripts/dev-dashboard.mjs",
+    "dev:api": "tsx watch src/dashboard/start.ts",
+    "dev:ui": "vite --config frontend/vite.config.ts",
+    "build": "npm run typecheck && vite build --config frontend/vite.config.ts",
+    "start": "tsx src/dashboard/start.ts",
     "collect": "tsx src/cli.ts collect",
     "enrich": "tsx src/cli.ts enrich",
     "rank": "tsx src/cli.ts rank",
@@ -14,7 +19,7 @@
     "status": "tsx src/cli.ts status",
     "dry-run": "tsx src/cli.ts cycle --dry-run",
     "cycle:demo": "tsx src/cli.ts cycle --demo --dry-run",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc -p frontend/tsconfig.json --noEmit",
     "test:watch": "vitest",
     "test:collector": "./.venv/bin/python -m unittest discover -s python -p 'test_*.py'",
     "test": "vitest run"
@@ -28,14 +33,20 @@
     "@sap/cds": "10.1.1",
     "dotenv": "17.2.3",
     "node-cron": "4.2.1",
+    "react": "19.3.0",
+    "react-dom": "19.3.0",
     "yaml": "2.9.1",
     "zod": "4.1.12"
   },
   "devDependencies": {
     "@cap-js/cds-types": "0.20.0",
     "@types/node": "22.18.9",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "@vitejs/plugin-react": "6.1.2",
     "tsx": "4.20.6",
     "typescript": "5.9.3",
+    "vite": "8.3.4",
     "vitest": "5.0.3"
   },
   "type": "module"

@@ -41,6 +41,10 @@ async function createLegacyTemplate(): Promise<string> {
       ALTER TABLE sap_jobradar_Notifications DROP COLUMN claimToken;
       ALTER TABLE sap_jobradar_Notifications DROP COLUMN claimUntil;
       ALTER TABLE sap_jobradar_Jobs DROP COLUMN isDemo;
+      ALTER TABLE sap_jobradar_Jobs DROP COLUMN personalNotes;
+      ALTER TABLE sap_jobradar_Jobs DROP COLUMN applicationDate;
+      ALTER TABLE sap_jobradar_Jobs DROP COLUMN cvSent;
+      ALTER TABLE sap_jobradar_Jobs DROP COLUMN sentCvLabel;
       ALTER TABLE sap_jobradar_SourceListings DROP COLUMN descriptionAttemptedAt;
       DROP INDEX idx_listing_activity;
       ALTER TABLE sap_jobradar_SourceListings DROP COLUMN activityState;
@@ -136,6 +140,8 @@ describe('serialized legacy database migrations', () => {
             expect(migrated.prepare('SELECT ID, title, description, primaryUrl FROM sap_jobradar_Jobs').all()).toEqual([{
                     ID: 'legacy-job', title: 'Original vacancy', description: 'Original description', primaryUrl: 'https://example.com/legacy',
                 }]);
+            expect(migrated.prepare('SELECT status, personalNotes, applicationDate, cvSent, sentCvLabel FROM sap_jobradar_Jobs').get())
+                .toEqual({ status: 'New', personalNotes: null, applicationDate: null, cvSent: 0, sentCvLabel: null });
             expect(migrated.prepare('SELECT ID, status, payload, telegramMessageId FROM sap_jobradar_Notifications ORDER BY ID').all()).toEqual([
                 { ID: 'older-history', status: 'Superseded', payload: 'original history payload', telegramMessageId: 7 },
                 { ID: 'pending-copy', status: 'Superseded', payload: 'original pending payload', telegramMessageId: null },
@@ -170,6 +176,8 @@ describe('serialized legacy database migrations', () => {
             expect(columns).not.toContain('claimToken');
             expect(columns).not.toContain('claimUntil');
             expect(rolledBack.prepare('PRAGMA table_info(sap_jobradar_Jobs)').all().map((column) => column.name)).not.toContain('isDemo');
+            expect(rolledBack.prepare('PRAGMA table_info(sap_jobradar_Jobs)').all().map((column) => column.name))
+                .not.toEqual(expect.arrayContaining(['personalNotes', 'applicationDate', 'cvSent', 'sentCvLabel']));
             expect(rolledBack.prepare('PRAGMA table_info(sap_jobradar_Assessments)').all().map((column) => column.name)).not.toContain('mandatoryGapEvidence');
             expect(rolledBack.prepare('PRAGMA table_info(sap_jobradar_SourceListings)').all().map((column) => column.name)).not.toContain('descriptionAttemptedAt');
             expect(rolledBack.prepare('PRAGMA table_info(sap_jobradar_SourceListings)').all().map((column) => column.name)).not.toContain('activityState');
