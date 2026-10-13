@@ -2,9 +2,9 @@ import path from 'node:path';
 import cron from 'node-cron';
 import { loadConfig, PROJECT_ROOT } from './config/index.js';
 import { loadFixture } from './fixtures/load.js';
-import { collect } from './pipeline/collect.js';
+import { collectAndAssess } from './pipeline/collection-operation.js';
+import { claimCollection } from './collector/lease.js';
 import { notify } from './pipeline/notify.js';
-import { rank } from './pipeline/rank.js';
 import { log, out } from './util/log.js';
 
 export interface SchedulerOptions {
@@ -15,7 +15,12 @@ export interface SchedulerOptions {
 /** One complete monitoring cycle: collect -> rank -> notify. */
 export async function runCycle(options: SchedulerOptions = {}): Promise<void> {
   const fixture = options.demo ? loadFixture(path.join(PROJECT_ROOT, 'fixtures', 'demo-jobs.jsonl')) : undefined;
-  const collected = await collect({
+  const reservation = await claimCollection('scheduled');
+  if (!reservation.acquired) {
+    log.info('Collection already running; skipping scheduled cycle', { operationId: reservation.operationId });
+    return;
+  }
+  const collected = await collectAndAssess(reservation.claim, {
     trigger: 'scheduled',
     ...(fixture ? { fixture } : {}),
   });
@@ -25,9 +30,6 @@ export async function runCycle(options: SchedulerOptions = {}): Promise<void> {
     created: collected.ingest.created,
     merged: collected.ingest.mergedAcrossSources,
   });
-
-  const ranked = await rank({ jobIds: collected.ingest.jobIds, includePendingAi: !options.demo, rulesOnly: Boolean(options.demo) });
-  log.info('Ranking finished', { assessed: ranked.length });
 
   const sent = await notify({ dryRun: Boolean(options.demo || options.dryRun) });
   log.info('Notification finished', sent);

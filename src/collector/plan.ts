@@ -15,6 +15,7 @@ export interface DescriptionRotation {
   lastSource: string | null;
   lastTaskBySource: Record<string, string>;
   lastSearchByScope?: Record<string, string>;
+  linkedinPending?: CollectorTask[];
 }
 
 /**
@@ -121,9 +122,11 @@ export function planBatch(config: AppConfig, options: PlanOptions = {}): Planned
   }
 
   const searchCursors = { ...options.descriptionRotation?.lastSearchByScope };
-  if (!options.enrichOnly) applySearchBudget(config, batch.key, tasksBySource, searchCursors, skipped);
+  const linkedinPending = [...(options.descriptionRotation?.linkedinPending ?? [])];
+  if (!options.enrichOnly) applySearchBudget(config, batch.key, tasksBySource, searchCursors, skipped, linkedinPending, options);
   const descriptionRotation = applyDescriptionBudget(config, tasksBySource, options.descriptionRotation);
   descriptionRotation.lastSearchByScope = searchCursors;
+  descriptionRotation.linkedinPending = linkedinPending;
   const details = (tasksBySource.get('linkedin') ?? []).filter((task) => task.fetch_description);
   let remainingDetails = searches.linkedin_limits.max_detail_requests_per_run;
   details.forEach((task, index) => {
@@ -142,24 +145,25 @@ export function planBatch(config: AppConfig, options: PlanOptions = {}): Planned
 
 /** Rotate capped combinations, including a batch's tail, across persisted runs. */
 function applySearchBudget(config: AppConfig, batchKey: string, tasksBySource: Map<string, CollectorTask[]>,
-  cursors: Record<string, string>, skipped: PlannedBatch['skipped']): void {
+  cursors: Record<string, string>, skipped: PlannedBatch['skipped'], pending: CollectorTask[], options: PlanOptions): void {
   const rotate = (tasks: CollectorTask[], key: string) => {
     const start = tasks.findIndex((task) => task.task_id === cursors[key]);
     return [...tasks.slice(start + 1), ...tasks.slice(0, start + 1)];
   };
   const linkedin = tasksBySource.get('linkedin');
-  if (linkedin) {
-    const key = `${batchKey}:linkedin`;
-    const limit = config.searches.linkedin_limits.max_search_tasks_per_run;
-    const selected = rotate(linkedin, key).slice(0, limit);
-    if (selected.length) tasksBySource.set('linkedin', selected);
-    else tasksBySource.delete('linkedin');
-    if (selected.length < linkedin.length) skipped.push({ source: 'linkedin',
-      reason: `${linkedin.length - selected.length} search combinations postponed by LinkedIn task limit` });
+  for (const task of rotate(linkedin ?? [], `${batchKey}:linkedin`)) {
+    if (!pending.some((row) => row.task_id === task.task_id)) pending.push(task);
   }
+  const linkedinAvailable = config.searches.sources.linkedin?.enabled && !options.skipSources?.has('linkedin') &&
+    (!options.onlySources?.length || options.onlySources.includes('linkedin'));
+  tasksBySource.delete('linkedin');
   const all = [...tasksBySource.values()].flat();
+  const capacity = Math.min(18, config.searches.resilience.max_tasks_per_run);
+  const selectedLinkedin = linkedinAvailable ? pending.slice(0, Math.min(2,
+    config.searches.linkedin_limits.max_search_tasks_per_run, Math.max(0, capacity - all.length))) : [];
   const key = `${batchKey}:__all__`;
-  const selected = rotate(all, key).slice(0, Math.min(18, config.searches.resilience.max_tasks_per_run));
+  const selected = rotate(all, key).slice(0, Math.max(0,
+    Math.min(18, config.searches.resilience.max_tasks_per_run) - selectedLinkedin.length));
   const ids = new Set(selected.map((task) => task.task_id));
   for (const [source, tasks] of tasksBySource) {
     const ready = tasks.filter((task) => ids.has(task.task_id));
@@ -168,8 +172,16 @@ function applySearchBudget(config: AppConfig, batchKey: string, tasksBySource: M
     if (ready.length < tasks.length) skipped.push({ source, reason: `${tasks.length - ready.length} search combinations postponed by global task limit` });
   }
   if (selected.length) cursors[key] = selected.at(-1)!.task_id;
-  const selectedLinkedin = selected.filter((task) => task.source === 'linkedin');
-  if (selectedLinkedin.length) cursors[`${batchKey}:linkedin`] = selectedLinkedin.at(-1)!.task_id;
+  if (selectedLinkedin.length) {
+    const source = config.searches.sources.linkedin!;
+    tasksBySource.set('linkedin', selectedLinkedin.map((task) => ({ ...task, fetch_description: false,
+      hours_old: options.hoursOld ?? source.hours_old ?? config.searches.defaults.hours_old,
+      results_wanted: options.resultsWanted ?? source.results_wanted ?? config.searches.defaults.results_wanted })));
+    pending.splice(0, selectedLinkedin.length);
+    for (const task of selectedLinkedin) cursors[`${task.task_id.split(':')[0]}:linkedin`] = task.task_id;
+  }
+  if (pending.length) skipped.push({ source: 'linkedin', reason:
+    `${pending.length} combinations queued for subsequent available cycles (two per cycle)` });
 }
 
 /**
@@ -216,7 +228,7 @@ function applyDescriptionBudget(
       const task = tasks[(last + offset) % tasks.length]!;
       if (task.fetch_description) continue;
       task.fetch_description = true;
-      state.lastTaskBySource[cursorKey] = task.task_id;
+      state.lastTaskBySource[`${task.task_id.split(':')[0]}:${source}`] = task.task_id;
       state.lastSource = source;
       allocated += 1;
       misses = 0;

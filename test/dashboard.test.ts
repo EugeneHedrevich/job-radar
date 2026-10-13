@@ -91,7 +91,7 @@ describe('personal dashboard stored data', () => {
     await rank({ rulesOnly: true });
     await cds.run(INSERT.into(db().Notifications).entries({ ID: randomUUID(), job_ID: job.ID,
       channel: 'telegram', status: 'Pending', attempts: 0 }));
-    await updateTracking(job.ID, { status: 'Ignored', personalNotes: 'Keep this history', cvSent: true });
+    await updateTracking(job.ID, { status: 'Ignored', personalNotes: 'Keep this history', cvSent: true, cvSentAt: '2026-10-12T09:00:00Z' });
     expect(await queryOne(SELECT.from(db().AiAssessmentQueue).where({ job_ID: job.ID }))).toMatchObject({ status: 'Superseded' });
     expect(await queryOne(SELECT.from(db().Notifications).where({ job_ID: job.ID }))).toMatchObject({ status: 'Skipped' });
     expect(await readJob(job.ID)).toMatchObject({ status: 'Ignored', personalNotes: 'Keep this history', cvSent: true,
@@ -114,7 +114,7 @@ describe('personal dashboard stored data', () => {
   it('preserves personal edits through collection enrichment, reassessment and database restart', async () => {
     const job = await storedJob();
     const personal = { status: 'Applied', personalNotes: 'Contact Alex; follow up Friday.',
-      applicationDate: '2026-10-12', cvSent: false, sentCvLabel: 'BTP-v3.pdf' };
+      applicationDate: '2026-10-12', cvSent: false, cvSentAt: null, sentCvLabel: 'BTP-v3.pdf' };
     expect(await updateTracking(job.ID, personal)).toEqual(personal);
     await ingestReview({ description: `${reviewRecord.description}\nNew project information.` });
     await rank({ rulesOnly: true });
@@ -122,7 +122,8 @@ describe('personal dashboard stored data', () => {
     expect(await readJob(job.ID)).toMatchObject(personal);
     expect((await listJobs(new URLSearchParams({ q: 'follow up' }))).total).toBe(1);
     for (const status of ['Interview', 'Rejected']) {
-      expect(await updateTracking(job.ID, { status, cvSent: true })).toMatchObject({ ...personal, status, cvSent: true });
+      expect(await updateTracking(job.ID, { status, cvSent: true, cvSentAt: '2026-10-12T09:00:00Z' }))
+        .toMatchObject({ ...personal, status, cvSent: true, cvSentAt: '2026-10-12T09:00:00.000Z' });
     }
     expect(await readJob(job.ID)).toMatchObject({ sentCvLabel: 'BTP-v3.pdf', currentAssessment: { suggestedCvVariant: expect.any(String) } });
     expect(fetch).not.toHaveBeenCalled();
@@ -141,7 +142,7 @@ describe('personal dashboard stored data', () => {
   it('reads explicit expiry and mixed-source activity independently from application status without mutating observations', async () => {
     const job = await storedJob();
     await ingestReview({ id: 'secondary', job_url: 'https://indeed.com/viewjob?jk=secondary' }, 'indeed');
-    await updateTracking(job.ID, { status: 'Interview', personalNotes: 'Interview booked', cvSent: true });
+    await updateTracking(job.ID, { status: 'Interview', personalNotes: 'Interview booked', cvSent: true, cvSentAt: '2026-10-12T09:00:00Z' });
     await cds.run(UPDATE(db().SourceListings).set({ activityState: 'Closed' }).where({ source: 'linkedin' }));
     expect((await readJob(job.ID)).activity).toBe('Unknown');
     await cds.run(UPDATE(db().SourceListings).set({ activityState: 'Active' }).where({ source: 'indeed' }));

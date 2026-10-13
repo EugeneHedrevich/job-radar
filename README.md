@@ -66,7 +66,7 @@ trimmed. Relative paths resolve from the project root:
 | `JOB_RADAR_COLLECTOR_SCRIPT` | `collector.script` (`./python/collector.py`) |
 
 `JOB_RADAR_PROXY` optionally supplies one proxy for searches and enrichment. Use
-`http://host:port`, `https://host:port` or `socks5://host:port`; a missing scheme
+`http://host:port` or `https://host:port`; a missing scheme
 defaults to `http`. Authentication uses `user:password@host:port` with URL-encoded
 credentials. Invalid URLs fail validation, and credentials are redacted from diagnostics.
 Keep real values in `.env`, never in committed configuration.
@@ -218,18 +218,27 @@ Keep the Node development dependencies installed: startup uses the existing `tsx
 The dashboard opens the **same persistent database** as the CLI, using
 `storage.db_dir` / `storage.db_file` and `JOB_RADAR_DB_DIR`. To view an existing demo
 database instead, set `JOB_RADAR_DB_DIR=./data/demo` (adjust for your storage location)
-when starting it. It never seeds fixtures, collects, enriches, ranks or delivers
-notifications. Refresh only reloads stored records and status; CLI/scheduled workflows
-continue independently with their existing budgets.
+when starting it. Opening or refreshing the dashboard only reads stored vacancies.
+**Collect vacancies** starts a local asynchronous collection and bounded assessment,
+with a persisted operation ID. It never invokes Telegram. Progress reports the real
+Preparing → Collecting → Saving → Assessing → Finished stages, task/result counts,
+partial failures and the remaining AI backlog after the five-call ceiling. Reloading
+the page restores progress from SQLite. A shared, renewable SQLite lease prevents
+overlap with other dashboard clicks, CLI collection and scheduled cycles; expired
+operations become errors after five minutes without a heartbeat.
 
-The list opens with a minimum fit score of 60, sorted by current fit score descending.
-Clear the score filter to include lower scores and unassessed roles. Search covers title,
-company, location and personal notes.
+The compact list opens with newest saved vacancies and no score cutoff. Search covers
+title, company, location and personal notes. **My applications** includes personal
+tracking regardless of score, assessment age or listing closure. **Added manually**
+keeps imports easy to find while assessment is pending. More filters and collection
+diagnostics are collapsed, along with detailed dates, source evidence and assessment history.
 The searchable Sources picker accepts multiple sources: jobs from any selected source
 are included once, and clearing the selection includes all sources. Filter by minimum
 current fit score, application status and listing activity; sort and paginate with the
 controls above and below the list. Unknown scores use `—`,
-and a minimum-score filter excludes unknown scores even when the minimum is zero.
+and a minimum-score filter excludes unknown scores even when the minimum is zero,
+except manually imported vacancies still awaiting current assessment. Applications
+and manual-import views do not apply score cutoffs.
 Publication, first fetched and last seen dates stay separate.
 PLN salaries show an approximate EUR equivalent in parentheses, using the latest available
 [NBP average EUR rate](https://api.nbp.pl/en.html), shared across the list and vacancy details
@@ -257,6 +266,26 @@ without replacing stored vacancies, statuses, assessments or application notes.
 `Active` / `Unknown` / `Closed` is derived separately from stored listing observations
 and explicit expiry using the existing activity logic. Closed vacancies retain all
 personal tracking and saved assessments.
+
+**Add vacancy** accepts a public HTTPS URL, checks canonical URLs across all stored
+source listings, and reuses supported public detail adapters. The lookup is bounded
+to three requests/redirects, 2 MB per response and 35 seconds overall. Source cooldowns
+and disabled sources are respected. Unsupported or failed lookups ask for a title and
+description; blocks, timeouts and parse failures report **Could not verify**. Only
+explicit closure evidence reports **Closed**. Duplicate URLs return **Already tracked**
+with existing personal notes intact. Import reuses normalization, deduplication and
+rules caching; eligible AI work joins the durable queue for a subsequent collection,
+without granting extra paid calls. Imports do not send Telegram messages.
+
+When first marking a CV as sent, confirm the actual date and time (default: today in
+Europe/Sofia). This is saved separately from the application date, with a follow-up
+seven Sofia calendar days later, including across daylight-saving changes. Legacy
+CV-sent records retain an unknown send date until you supply it. Unchanged CV-sent
+saves and note edits do not reset reminders. The compact panel shows due/overdue
+follow-ups and lets you complete, postpone by seven days or change the due date.
+Clearing CV-sent or marking a job Ignored/Rejected cancels pending follow-ups while
+preserving completed history. SQLite retains overdue reminders across restart.
+These are in-app reminders; the stopped local application sends no reminder notifications.
 `Ignored` excludes a job from new paid AI requests and Telegram candidates. Saving it
 supersedes pending AI work and skips queued delivery, while keeping assessment, notification
 and personal history. Delivery rechecks the status before sending; an already in-flight
@@ -270,13 +299,18 @@ The thin JSON API is local and intentionally limited:
 
 | Endpoint | Purpose |
 | --- | --- |
-| `GET /api/jobs` | All stored jobs with `q`, `source`, `minScore`, `status`, `activity`, `sort`, `direction`, `page`, `pageSize` |
+| `GET /api/jobs` | Stored jobs with `view=vacancies\|applications\|imports`, search, filters, sort and pagination |
 | `GET /api/jobs/:id` | Vacancy facts, listings, current assessment and saved history |
-| `PATCH /api/jobs/:id/tracking` | Only `status`, `personalNotes`, `applicationDate`, `cvSent`, `sentCvLabel` |
+| `PATCH /api/jobs/:id/tracking` | Only `status`, `personalNotes`, `applicationDate`, `cvSent`, `cvSentAt`, `sentCvLabel` |
 | `GET /api/status` | Last stored collection and source health |
+| `POST /api/collection` | Start collection; return operation ID or the already active operation |
+| `GET /api/collection` / `GET /api/collection/:id` | Latest or selected durable operation progress |
+| `POST /api/import` | Import URL; return Added, Already tracked or Needs details and separate availability |
+| `GET /api/reminders` | Pending follow-ups, ordered by Sofia due date |
+| `PATCH /api/reminders/:id` | Complete, postpone or reschedule a pending follow-up |
 
 Tracking updates accept JSON, reject unknown/read-only fields, validate statuses and
-dates (`YYYY-MM-DD` or `null`) and return the saved tracking values. Page size is capped
+dates (`YYYY-MM-DD` or `null`; `cvSentAt` is an ISO timestamp with an offset) and return saved tracking values. Page size is capped
 at 100. Supply several sources with repeated parameters (`source=indeed&source=linkedin`)
 or a comma-separated value; the original single-source parameter still works.
 Allowed sort fields are `firstSeenAt`, `lastSeenAt`, `datePosted`, `fitScore`,
@@ -316,7 +350,10 @@ Demo collection does not advance the live cursors. A reservation is committed be
 so a crash can advance a cursor but cannot leave an open transaction during HTTP requests.
 RED Global and Whitehall read at most three search pages per task; Eursap uses one filtered
 response from its public browser search. Page and within-page cursors resume capped results
-on subsequent runs instead of repeating the first results. HTTP failures and access challenges
+on subsequent runs instead of repeating the first results. Cursor expiry measures inactivity
+and allows at least two complete rotation periods; revisits at 108 hours retain pagination.
+A failed search with no collected records preserves its previous cursor, while a successful
+empty search can finish the sweep. HTTP failures and access challenges
 are reported to the existing cooldown mechanism; they are not successful empty searches.
 Agency searches check the next candidates after details reveal an expired or old listing,
 until the requested count is reached, pages end, or **10 detail requests per task** are spent.
@@ -344,7 +381,11 @@ Each configured batch fits the global 18-search-task ceiling. `cap-markets`, `jo
 and `btp-markets` separately search supported non-LinkedIn markets outside the Netherlands,
 including Germany, Switzerland, the UK, Poland, Austria and Ireland. LinkedIn allows
 **two search tasks per cycle** by default; postponed keyword/location combinations rotate
-fairly using persisted cursors. Larger custom batches also rotate their postponed tail.
+through a durable queue on subsequent available cycles, using spare task capacity instead
+of waiting for their original batch to return. The LinkedIn freshness window is 168 hours
+to accommodate its slower sweep; other source windows are unchanged. Larger custom batches
+also rotate their postponed tail. Collection outcomes distinguish successful empty searches,
+partial results, all executed tasks failing (even with skipped tasks), and no available sources.
 The explicit **36-cycle / 108-hour** sequence repeats the broad priority and public catalogue
 batches every **36 hours**, inside the 120-hour freshness window. Rate limits and small caps
 can delay individual combinations and pages; complete vacancy coverage is not guaranteed.
@@ -662,6 +703,9 @@ that run, with rules used for the remaining jobs.
 * `CollectionRuns`, `CollectionTasks`, `CollectionErrors` — what ran, what failed, why.
 * `SourceHealth` — per-source circuit breaker that survives restarts.
 * `DescriptionRotation` — per-batch description cursors that survive restarts.
+* `SearchProgress` — durable bounded pagination state.
+* `CollectionOperations`, `CollectionLease` — progress and shared collection ownership.
+* `FollowUpReminders` — pending, completed and cancelled CV follow-ups, with Sofia due dates.
 * `Assessments` — cached match results.
 * `Notifications` — pending / sending / sent / failed state, attempt counter, delivery claim
   and Telegram message id.

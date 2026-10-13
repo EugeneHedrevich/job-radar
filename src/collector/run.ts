@@ -10,6 +10,7 @@ export interface RunCollectorOptions {
   taskTimeoutSeconds: number;
   delayBetweenTasksSeconds: number;
   processTimeoutSeconds: number;
+  onProgress?: (progress: { jobsFound: number; outcomes: TaskOutcome[] }) => Promise<void>;
 }
 
 /**
@@ -37,6 +38,15 @@ export async function runCollector(config: AppConfig, options: RunCollectorOptio
   let activeTaskId = options.tasks[0]?.task_id;
   let timedOut = false;
   let taskTimer: ReturnType<typeof setTimeout> | undefined;
+  let updates = Promise.resolve();
+  let lastUpdate = 0;
+  const report = (force = false) => {
+    if (!options.onProgress || !force && Date.now() - lastUpdate < 250) return;
+    lastUpdate = Date.now();
+    const snapshot = { jobsFound: output.jobs.length, outcomes: [...output.outcomes] };
+    updates = updates.then(() => options.onProgress!(snapshot));
+    void updates.catch(() => child.kill('SIGKILL'));
+  };
 
   const child = spawn(config.pythonPath, [config.collectorScript], {
     stdio: ['pipe', 'pipe', 'pipe'],
@@ -114,6 +124,7 @@ export async function runCollector(config: AppConfig, options: RunCollectorOptio
       const position = positions.get(key);
       if (position === undefined) { positions.set(key, output.jobs.length); output.jobs.push(value); }
       else output.jobs[position] = value;
+      report();
     } else if (record.type === 'listing_activity') {
       const task = pending.get(record.task_id);
       if (task?.source === record.activity.source) output.activities.push(record.activity);
@@ -142,6 +153,7 @@ export async function runCollector(config: AppConfig, options: RunCollectorOptio
         ...(record.retry_after_seconds !== undefined ? { retryAfterSeconds: record.retry_after_seconds } : {}),
         ...(progress.has(record.task_id) ? { nextCursor: progress.get(record.task_id) } : {}),
       });
+      report(true);
     }
   });
 
@@ -197,6 +209,8 @@ export async function runCollector(config: AppConfig, options: RunCollectorOptio
     });
   }
 
+  report(true);
+  await updates;
   return output;
 }
 

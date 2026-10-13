@@ -27,6 +27,7 @@ export interface RankOptions {
   limit?: number;
   /** Re-evaluate even when a cached assessment exists. */
   force?: boolean;
+  onProgress?: (progress: { assessed: number; aiCalls: number; aiFailures: number }) => Promise<void>;
 }
 
 /**
@@ -119,6 +120,8 @@ export async function rank(options: RankOptions = {}): Promise<RankedJob[]> {
   const useLlm = config.llmAvailable && !options.rulesOnly;
   let llmBudget = useLlm ? Math.min(5, config.settings.llm.max_jobs_per_run) : 0;
   const ranked: RankedJob[] = [];
+  let aiCalls = 0, aiFailures = 0;
+  const report = async () => options.onProgress?.({ assessed: ranked.length, aiCalls, aiFailures });
 
   for (const preparedJob of prepared) {
     const { job } = preparedJob;
@@ -134,6 +137,7 @@ export async function rank(options: RankOptions = {}): Promise<RankedJob[]> {
         .where({ cacheKey: assessmentCacheKey(config, job, 'llm') }));
       if (cached) {
         ranked.push({ job, assessment: rowToAssessment(cached), assessmentId: cached.ID, cached: true });
+        await report();
         continue;
       }
     }
@@ -145,6 +149,7 @@ export async function rank(options: RankOptions = {}): Promise<RankedJob[]> {
       const cached = await queryOne<any>(SELECT.from(Assessments).where({ cacheKey }));
       if (cached) {
         ranked.push({ job, assessment: rowToAssessment(cached), assessmentId: cached.ID, cached: true });
+        await report();
         continue;
       }
     }
@@ -157,10 +162,14 @@ export async function rank(options: RankOptions = {}): Promise<RankedJob[]> {
         continue;
       }
       llmBudget -= 1;
+      aiCalls += 1;
+      await report();
       try {
         assessment = await assessWithLlm(config, job);
         engine = assessment.engine;
+        if (engine !== 'llm') aiFailures += 1;
       } catch (error) {
+        aiFailures += 1;
         // Stop further calls for this run when the provider is failing.
         llmBudget = 0;
         if (error instanceof LlmUnavailableError) {
@@ -185,6 +194,7 @@ export async function rank(options: RankOptions = {}): Promise<RankedJob[]> {
     const assessmentId = await storeAssessment(job.ID, storedKey, assessment);
     if (shouldUseLlm) await completeAiAttempt(storedKey);
     ranked.push({ job, assessment, assessmentId, cached: false });
+    await report();
   }
 
   ranked.sort((a, b) => b.assessment.fitScore - a.assessment.fitScore);
@@ -208,8 +218,6 @@ export async function readTop(limit = 20, titleSearch?: string): Promise<RankedJ
 
 async function storeAssessment(jobId: string, cacheKey: string, assessment: AssessmentResult): Promise<string> {
   const { Assessments } = db();
-  const existing = await queryOne<{ ID: string }>(SELECT.from(Assessments).columns('ID').where({ cacheKey }));
-  const id = existing?.ID ?? randomUUID();
   const values = {
     job_ID: jobId,
     cacheKey,
@@ -232,10 +240,14 @@ async function storeAssessment(jobId: string, cacheKey: string, assessment: Asse
     hardRejectReason: assessment.hardRejectReason,
     createdAt: new Date().toISOString(),
   };
-  await cds.run(existing
-    ? UPDATE(Assessments).set(values).where({ ID: id })
-    : INSERT.into(Assessments).entries({ ID: id, ...values }));
-  return id;
+  return cds.tx(async (tx: any) => {
+    await tx.run('UPDATE sap_jobradar_Jobs SET ID = ID WHERE 0 = 1');
+    const existing = await tx.run(SELECT.one.from(Assessments).columns('ID').where({ cacheKey }));
+    const id = existing?.ID ?? randomUUID();
+    await tx.run(existing ? UPDATE(Assessments).set(values).where({ ID: id })
+      : INSERT.into(Assessments).entries({ ID: id, ...values }));
+    return id;
+  });
 }
 
 function parseList(value: string | null): string[] {

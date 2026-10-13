@@ -316,7 +316,8 @@ def scrape_with_failures(kwargs: dict[str, Any]) -> tuple[Any, tuple[str, str, f
         transport = kwargs.get("transport") or LinkedInTransport()
         with jobspy_search(source, transport, kwargs):
             frame = scrape_jobs(**search_kwargs)
-            if source in {"linkedin", "indeed"}:
+            failure = failure_info(transport.failure) or capture.worst()
+            if source in {"linkedin", "indeed"} and (len(frame) or not failure):
                 # Overlap a rounded page boundary rather than skipping cards.
                 offset = int(kwargs.get("offset", 0))
                 count = len(frame)
@@ -325,7 +326,6 @@ def scrape_with_failures(kwargs: dict[str, Any]) -> tuple[Any, tuple[str, str, f
                 kwargs["next_cursor"] = {"offset": next_offset if count and next_offset < cap else 0}
                 if kwargs.get("on_progress"):
                     kwargs["on_progress"](kwargs["next_cursor"])
-            failure = failure_info(transport.failure) or capture.worst()
             if failure and len(failure) == 2:
                 failure = (*failure, None)
             if source in {"linkedin", "glassdoor"} and kwargs.get("fetch_description") and not failure:

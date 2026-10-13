@@ -1,9 +1,13 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { APPLICATION_STATUSES, type AssessmentState, type CollectionStatus, type JobDetail,
-  type JobList, type JobSummary, type SavedAssessment, type Tracking } from '../../src/dashboard/types';
+  type FollowUpReminder, type ImportResult, type JobList, type JobSummary, type SavedAssessment, type Tracking } from '../../src/dashboard/types';
 import { request, useResource } from './api';
 import SourceFilter, { sourceLabel } from './SourceFilter';
 import { useEuroRate, type EuroConversion } from './currency';
+import { sofiaDate, sofiaDateTime, sofiaInstant } from '../../src/util/calendar';
+import { CollectionProgress, useCollection } from './CollectionControls';
+import AddVacancy from './AddVacancy';
+import Reminders from './Reminders';
 
 const assessmentLabels: Record<AssessmentState, string> = {
   ai: 'AI assessment', rules: 'Deterministic rules', 'ai-fallback': 'AI-request fallback (rules)',
@@ -20,7 +24,7 @@ function date(value: string | null | undefined, time = false): string {
   if (Number.isNaN(parsed.getTime())) return 'Unknown';
   // Date-only publication/application values must not shift with local timezone.
   return parsed.toLocaleString(undefined, { year: 'numeric', month: 'short', day: 'numeric',
-    ...(time ? { hour: '2-digit', minute: '2-digit' } : { timeZone: 'UTC' }) });
+    ...(time ? { hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Sofia' } : { timeZone: 'UTC' }) });
 }
 
 function Salary({ job, conversion }: { job: JobSummary; conversion: EuroConversion }) {
@@ -111,11 +115,12 @@ function AssessmentView({ assessment }: { assessment: SavedAssessment }) {
   return <div className="assessment-view">
     <div className="assessment-heading"><strong>{assessment.fitScore ?? '—'}{assessment.fitScore !== null ? '/100 fit score' : ' Score missing'}</strong>
       {assessment.recommendation && <Badge value={assessment.recommendation} />}</div>
-    <p className="muted small">{assessmentLabels[assessment.kind]} · {date(assessment.createdAt, true)}
-      {assessment.model ? ` · ${assessment.model}` : ''} · Profile {assessment.profileVersion ?? 'Unknown'}</p>
     <p className="explanation">{assessment.explanation || 'No explanation saved.'}</p>
     {assessment.hardReject && <p className="warning">Hard rejection: {assessment.hardRejectReason ?? 'See mandatory gaps.'}</p>}
     <dl className="facts"><div><dt>Suggested CV variant</dt><dd>{assessment.suggestedCvVariant ?? 'Not suggested'}</dd></div></dl>
+    <details><summary>Assessment details & evidence</summary>
+    <p className="muted small">{assessmentLabels[assessment.kind]} · {date(assessment.createdAt, true)}
+      {assessment.model ? ` · ${assessment.model}` : ''} · Profile {assessment.profileVersion ?? 'Unknown'}</p>
     {([
       ['Strong matches', assessment.strongMatches], ['Mandatory gaps', assessment.mandatoryGaps],
       ['Preferred gaps', assessment.preferredGaps], ['Missing information', assessment.missingInformation],
@@ -126,12 +131,13 @@ function AssessmentView({ assessment }: { assessment: SavedAssessment }) {
       {assessment.mandatoryGapEvidence.map((item, index) => <blockquote key={index}><strong>{item.requirement}</strong>
         <p>{item.vacancyQuote}</p><span className="muted small">{item.profilePath}: {item.profileValue}</span></blockquote>)}
     </details>}
+    </details>
   </div>;
 }
 
 function extractTracking(job: Tracking): Tracking {
   return { status: job.status, personalNotes: job.personalNotes, applicationDate: job.applicationDate,
-    cvSent: job.cvSent, sentCvLabel: job.sentCvLabel };
+    cvSent: job.cvSent, cvSentAt: job.cvSentAt, sentCvLabel: job.sentCvLabel };
 }
 
 function TrackingForm({ job, onSaved, onDirty, onBusy }: {
@@ -148,6 +154,8 @@ function TrackingForm({ job, onSaved, onDirty, onBusy }: {
     setForm((previous) => {
       const next = { ...previous, ...patch };
       if (patch.cvSent === true && ['New', 'Interested'].includes(next.status)) next.status = 'Applied';
+      if (patch.cvSent === true && !previous.cvSent) next.cvSentAt = sofiaInstant(sofiaDateTime());
+      if (patch.cvSent === false) next.cvSentAt = null;
       return next;
     });
     setSaved(false);
@@ -169,6 +177,13 @@ function TrackingForm({ job, onSaved, onDirty, onBusy }: {
       </select></label><label>Application date<input type="date" value={form.applicationDate ?? ''}
         onChange={(event) => change({ applicationDate: event.target.value || null })} /></label></div>
       <label className="checkbox"><input type="checkbox" checked={form.cvSent} onChange={(event) => change({ cvSent: event.target.checked })} />I actually sent a CV</label>
+      {form.cvSent && <><label>Actual CV send date and time · Europe/Sofia<input type="datetime-local" required
+        value={form.cvSentAt ? sofiaDateTime(new Date(form.cvSentAt)) : ''} onChange={(event) => {
+          try { change({ cvSentAt: event.target.value ? sofiaInstant(event.target.value) : null }); setError(null); }
+          catch (failure) { setError(String(failure)); }
+        }} /></label>
+        {!job.cvSentAt && job.cvSent && <p className="warning small">The send date is unknown. Enter the actual date to create a follow-up.</p>}
+        <p className="muted small">A follow-up is due seven calendar days after sending. The application date is separate.</p></>}
       <label>CV actually sent <span className="muted">(optional filename or version)</span><input maxLength={500}
         placeholder="e.g. BTP-CV-v3.pdf" value={form.sentCvLabel ?? ''} onChange={(event) => change({ sentCvLabel: event.target.value || null })} /></label>
       <label>Personal notes<textarea rows={5} maxLength={20_000} placeholder="Contacts, next steps, interview notes…"
@@ -193,6 +208,9 @@ function VacancyDetail({ job, conversion, onSaved, onDirty, onBusy }: {
     <section className="detail-section"><h3>Personal tracking</h3>
       <TrackingForm key={job.ID} job={job} onSaved={onSaved} onDirty={onDirty} onBusy={onBusy} />
     </section>
+    {job.reminders.length > 0 && <details className="detail-section"><summary>Follow-up history ({job.reminders.length})</summary>
+      {job.reminders.map((reminder) => <p className="small" key={reminder.ID}>{reminder.status} · Due {reminder.dueDate} · CV sent {date(reminder.sentAt, true)}</p>)}
+    </details>}
     <section className="detail-section"><h3>Current assessment</h3>
       {job.aiPending && <p className="pending small">AI work pending · Queued {date(job.aiQueuedAt, true)}</p>}
       {job.currentAssessment ? <AssessmentView assessment={job.currentAssessment} /> : <p className="muted">
@@ -205,13 +223,13 @@ function VacancyDetail({ job, conversion, onSaved, onDirty, onBusy }: {
         </div>)}
       </details>}
     </section>
-    <section className="detail-section"><h3>Vacancy facts</h3><dl className="facts">
+    <details className="detail-section"><summary>Vacancy facts & dates</summary><dl className="facts">
       <div><dt>Contract type</dt><dd>{job.jobType ?? 'Not stated'}</dd></div><div><dt>Salary</dt><dd><Salary job={job} conversion={conversion} /></dd></div>
       <div><dt>Work format</dt><dd>{job.isRemote === null ? 'Not stated' : job.isRemote ? 'Remote' : 'Not remote'}</dd></div>
       <div><dt>Published</dt><dd>{date(job.datePosted)}</dd></div><div><dt>First fetched</dt><dd>{date(job.firstSeenAt, true)}</dd></div>
       <div><dt>Last seen</dt><dd>{date(job.lastSeenAt, true)}</dd></div>
-    </dl></section>
-    <section className="detail-section"><h3>Sources & listing activity</h3>
+    </dl></details>
+    <details className="detail-section"><summary>Sources & listing diagnostics</summary>
       {job.listings.map((listing) => <div className="listing" key={listing.ID}><div className="listing-heading"><strong>{sourceLabel(listing.source)}</strong><Badge value={listing.activity} /></div>
         {safeUrl(listing.url) && <a href={safeUrl(listing.url)} target="_blank" rel="noreferrer">Open source listing ↗</a>}
         <p className="muted small">First fetched {date(listing.firstSeenAt, true)} · Last seen {date(listing.lastSeenAt, true)}<br />
@@ -220,34 +238,50 @@ function VacancyDetail({ job, conversion, onSaved, onDirty, onBusy }: {
         {listing.activityEvidence && <p className="muted small">{listing.activityEvidence}</p>}
       </div>)}
       {!job.listings.length && <p className="muted">No source listings saved.</p>}
-    </section>
-    <section className="detail-section"><h3>Description</h3><div className="description">{job.description ?? 'Description not retrieved.'}</div></section>
+    </details>
+    <details className="detail-section"><summary>Description</summary><div className="description">{job.description ?? 'Description not retrieved.'}</div></details>
   </>;
 }
 
-const defaultFilters = { q: '', sources: [] as string[], minScore: '60', status: '', activity: '', sort: 'fitScore', direction: 'desc', pageSize: '20' };
+const defaultFilters = { q: '', sources: [] as string[], minScore: '', status: '', activity: '', sort: 'firstSeenAt', direction: 'desc', pageSize: '20' };
+
+function nextAction(job: JobSummary): string {
+  if (job.nextFollowUp) return `${job.nextFollowUp.dueDate <= sofiaDate() ? 'Follow up' : 'Follow-up'} · ${job.nextFollowUp.dueDate}`;
+  if (job.cvSent && !job.cvSentAt) return 'Set CV send date';
+  if (job.status === 'Interview') return 'Prepare for interview';
+  if (['Ignored', 'Rejected'].includes(job.status)) return 'View history';
+  if (job.cvSent || job.status === 'Applied') return 'Check application';
+  if (job.aiPending) return 'Await AI assessment';
+  if (['unassessed', 'outdated'].includes(job.assessmentState)) return 'Await assessment';
+  if (job.activity === 'Closed') return 'View closed listing';
+  return job.recommendation === 'Apply' ? 'Review and apply' : 'Review vacancy';
+}
 
 export default function App() {
+  const [view, setView] = useState('vacancies');
   const [filters, setFilters] = useState(defaultFilters);
   const [search, setSearch] = useState('');
-  const [scoreInput, setScoreInput] = useState(defaultFilters.minScore);
+  const [scoreInput, setScoreInput] = useState('');
   const [page, setPage] = useState(1);
   const [revision, setRevision] = useState(0);
   const [listRevision, setListRevision] = useState(0);
   const [detailRevision, setDetailRevision] = useState(0);
   const [selected, setSelected] = useState<string | null>(null);
+  const [addOpen, setAddOpen] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
   const dialog = useRef<HTMLDialogElement>(null);
-  const params = new URLSearchParams({ page: String(page) });
-  for (const [key, value] of Object.entries(filters)) if (key !== 'sources' && typeof value === 'string' && value !== '') params.set(key, value);
+  const params = new URLSearchParams({ page: String(page), view });
+  for (const [key, value] of Object.entries(filters)) if (key !== 'sources' && value !== '' && typeof value === 'string') params.set(key, value);
   for (const source of filters.sources) params.append('source', source);
   const list = useResource<JobList>(`/api/jobs?${params}`, revision + listRevision, true);
-  const collection = useResource<CollectionStatus>('/api/status', revision, true);
-  const detail = useResource<JobDetail>(selected ? `/api/jobs/${encodeURIComponent(selected)}` : null, revision + detailRevision);
-  const needsEuroRate = Boolean(list.data?.items.some((job) => job.salaryCurrency?.toUpperCase() === 'PLN') ||
-    detail.data?.salaryCurrency?.toUpperCase() === 'PLN');
-  const conversion = useEuroRate(needsEuroRate, revision);
+  const diagnostics = useResource<CollectionStatus>('/api/status', revision, true);
+  const reminders = useResource<FollowUpReminder[]>('/api/reminders', revision, true);
+  const detail = useResource<JobDetail>(selected ? `/api/jobs/${encodeURIComponent(selected)}` : null, detailRevision);
+  const collection = useCollection(() => { setRevision((value) => value + 1); if (!dirty) setDetailRevision((value) => value + 1); });
+  const conversion = useEuroRate(Boolean(list.data?.items.some((job) => job.salaryCurrency?.toUpperCase() === 'PLN') ||
+    detail.data?.salaryCurrency?.toUpperCase() === 'PLN'), revision);
   const validScore = scoreInput === '' || /^\d+$/.test(scoreInput) && Number(scoreInput) <= 100;
 
   useEffect(() => {
@@ -270,87 +304,80 @@ export default function App() {
   }, [dirty, saving]);
 
   function guard() { return !saving && (!dirty || window.confirm('Discard unsaved tracking changes?')); }
-  function refresh() { if (guard()) { setDirty(false); setRevision((value) => value + 1); } }
+  function refresh() { setRevision((value) => value + 1); if (!dirty) setDetailRevision((value) => value + 1); }
   function select(id: string | null) { if (guard()) { setDirty(false); setSelected(id); } }
   function filter(key: Exclude<keyof typeof defaultFilters, 'sources'>, value: string) { setFilters((previous) => ({ ...previous, [key]: value })); setPage(1); }
   function setSources(sources: string[]) { setFilters((previous) => ({ ...previous, sources })); setPage(1); }
-  function resetFilters() {
-    setSearch(''); setScoreInput('');
-    setFilters((previous) => ({ ...previous, q: '', sources: [], minScore: '', status: '', activity: '' })); setPage(1);
-  }
+  function resetFilters() { setSearch(''); setScoreInput(''); setFilters(defaultFilters); setPage(1); }
+  function switchView(next: string) { setView(next); resetFilters(); }
   function saved(tracking: Tracking) {
     detail.setData((previous) => previous ? { ...previous, ...tracking } : previous);
-    list.setData((previous) => previous ? { ...previous,
-      items: previous.items.map((job) => job.ID === selected ? { ...job, ...tracking } : job) } : previous);
-    setListRevision((value) => value + 1);
+    setListRevision((value) => value + 1); setRevision((value) => value + 1);
+    setDetailRevision((value) => value + 1);
+  }
+  function imported(result: ImportResult) {
+    setAddOpen(false); setNotice(`${result.result} · Availability: ${result.availability}`);
+    switchView(result.result === 'Added' ? 'imports' : 'vacancies'); refresh();
+    if (result.job) select(result.job.ID);
   }
   const data = list.data;
   const updating = list.loading || search !== filters.q || validScore && scoreInput !== filters.minScore;
   const hasFilters = Boolean(search || scoreInput || filters.sources.length || filters.status || filters.activity);
   return <div className="app">
-    <header className="app-header"><div className="brand"><div className="radar-mark"><RadarMark /></div>
-      <strong>Job Radar</strong></div><span className="workspace-label">Personal workspace</span></header>
+    <header className="app-header"><div className="brand"><div className="radar-mark"><RadarMark /></div><strong>Job Radar</strong></div>
+      <span className="workspace-label">Personal · Local</span></header>
     <main>
-      <div className="page-heading"><div><h1 id="vacancies-heading">Vacancies <span className="count">{data?.storedTotal ?? '—'}</span></h1>
-        <p className="muted">All saved roles. Your notes and next steps.</p></div>
-        <button className="refresh-button" onClick={refresh} disabled={saving || list.loading} title="Reload stored data">↻ Refresh</button>
+      <div className="page-heading"><div><h1 id="vacancies-heading">Job Radar <span className="count">{data?.storedTotal ?? '—'}</span></h1>
+        <p className="muted">Vacancies, applications and your next steps.</p></div>
+        <div className="primary-actions"><button className="primary" onClick={collection.start} disabled={collection.starting}>
+          {collection.starting ? 'Starting…' : 'Collect vacancies'}</button>
+          <button onClick={() => { if (guard()) setAddOpen(true); }} disabled={saving}>Add vacancy</button></div>
       </div>
-      <CollectionArea data={collection.data} loading={collection.loading} error={collection.error} retry={refresh} />
+      {notice && <div className="notice" role="status">{notice}<button className="text-button" onClick={() => setNotice(null)} aria-label="Dismiss import result">×</button></div>}
+      <CollectionProgress operation={collection.operation} error={collection.error} />
+      {reminders.error ? <p className="error" role="alert">Follow-ups: {reminders.error} <button onClick={refresh}>Retry</button></p>
+        : reminders.data && <Reminders items={reminders.data} select={select} changed={refresh} />}
+      <nav className="view-tabs" aria-label="Vacancy views">{[['vacancies', 'Vacancies'], ['applications', 'My applications'], ['imports', 'Added manually']].map(([key, label]) =>
+        <button key={key} className={view === key ? 'selected' : ''} aria-pressed={view === key} onClick={() => switchView(key!)}>{label}</button>)}</nav>
+      {view === 'applications' && <p className="muted small view-note">All tracked applications, including closed listings and outdated or low assessments.</p>}
+      {view === 'imports' && <p className="muted small view-note">Manually added vacancies stay here while assessment is pending.</p>}
       <section className="vacancies" aria-labelledby="vacancies-heading">
         <div className="filters" role="search" aria-label="Filter vacancies">
-          <label className="search-label"><span className="sr-only">Search title, company, location or notes</span>
-            <svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><circle cx="8.5" cy="8.5" r="5.5" stroke="currentColor" strokeWidth="1.5" /><path d="m13 13 4 4" stroke="currentColor" strokeWidth="1.5" /></svg>
-            <input type="search" placeholder="Search vacancies…" value={search} onChange={(event) => setSearch(event.target.value)} /></label>
-          <SourceFilter options={data?.sources ?? []} value={filters.sources} onChange={setSources} />
-          <label><span className="sr-only">Application status</span><select aria-label="Application status" className={filters.status ? 'has-selection' : ''} value={filters.status} onChange={(event) => filter('status', event.target.value)}><option value="">All statuses</option>{APPLICATION_STATUSES.map((status) => <option key={status}>{status}</option>)}</select></label>
-          <label><span className="sr-only">Listing activity</span><select aria-label="Listing activity" className={filters.activity ? 'has-selection' : ''} value={filters.activity} onChange={(event) => filter('activity', event.target.value)}><option value="">All activity</option>{['Active', 'Unknown', 'Closed'].map((state) => <option key={state}>{state}</option>)}</select></label>
-          <label className="score-filter"><span className="sr-only">Minimum fit score</span><input type="number" aria-label="Minimum fit score" min="0" max="100" step="1" placeholder="Min. fit" value={scoreInput}
-            aria-invalid={!validScore} aria-describedby={!validScore ? 'score-error' : undefined} onChange={(event) => setScoreInput(event.target.value)} />
-            {!validScore && <span id="score-error" className="filter-error" role="alert">Use a whole number from 0 to 100.</span>}</label>
+          <label className="search-label"><span className="sr-only">Search title, company, location or notes</span><input type="search" placeholder="Search vacancies…" value={search} onChange={(event) => setSearch(event.target.value)} /></label>
+          <select aria-label="Application status" value={filters.status} onChange={(event) => filter('status', event.target.value)}><option value="">All statuses</option>{APPLICATION_STATUSES.map((status) => <option key={status}>{status}</option>)}</select>
+          <details className="more-filters"><summary>More filters</summary><div className="extra-filters">
+            <SourceFilter options={data?.sources ?? []} value={filters.sources} onChange={setSources} />
+            {view !== 'applications' && <select aria-label="Listing availability" value={filters.activity} onChange={(event) => filter('activity', event.target.value)}><option value="">All availability</option>{['Active', 'Unknown', 'Closed'].map((state) => <option key={state} value={state}>{state === 'Unknown' ? 'Could not verify' : state}</option>)}</select>}
+            {view === 'vacancies' && <label>Minimum fit<input type="number" min="0" max="100" value={scoreInput} onChange={(event) => setScoreInput(event.target.value)} aria-invalid={!validScore} />{!validScore && <span className="error small">Use a whole number from 0 to 100.</span>}</label>}
+            <label>Sort<select value={filters.sort} onChange={(event) => filter('sort', event.target.value)}><option value="firstSeenAt">Newest saved</option><option value="fitScore">Fit score</option><option value="title">Title</option><option value="company">Company</option></select></label>
+            <select aria-label="Sort direction" value={filters.direction} onChange={(event) => filter('direction', event.target.value)}><option value="desc">Descending</option><option value="asc">Ascending</option></select>
+          </div></details>
         </div>
-        <div className="list-toolbar"><div className="results-info"><span className="muted small" role="status">{updating ? <><span className="spinner" /> Updating…</> : data ? `${data.total} ${data.total === 1 ? 'result' : 'results'}` : 'Vacancies'}</span>
+        <div className="list-toolbar"><span className="muted small" role="status">{updating ? 'Updating…' : `${data?.total ?? 0} vacancies`}</span>
           {hasFilters && <button className="text-button" onClick={resetFilters}>Clear filters</button>}</div>
-          <div className="sort-controls"><label className="inline-label"><span className="sr-only">Sort by</span><select aria-label="Sort by" value={filters.sort} onChange={(event) => filter('sort', event.target.value)}>
-            <option value="firstSeenAt">First fetched</option><option value="lastSeenAt">Last seen</option><option value="datePosted">Publication date</option>
-            <option value="fitScore">Fit score</option><option value="title">Title</option><option value="company">Company</option></select></label>
-            <button className="sort-direction" onClick={() => filter('direction', filters.direction === 'desc' ? 'asc' : 'desc')}
-              aria-label={`Sort ${filters.direction === 'desc' ? 'descending' : 'ascending'}; switch to ${filters.direction === 'desc' ? 'ascending' : 'descending'}`}
-              title={filters.direction === 'desc' ? 'Descending — click for ascending' : 'Ascending — click for descending'}>{filters.direction === 'desc' ? '↓' : '↑'}</button></div>
-        </div>
-        {(filters.sources.length > 0 || filters.minScore || filters.status || filters.activity) && <div className="filter-chips" aria-label="Active filters">
-          {filters.sources.map((source) => <button key={source} onClick={() => setSources(filters.sources.filter((item) => item !== source))} aria-label={`Remove ${sourceLabel(source)} source filter`}>{sourceLabel(source)} <span aria-hidden="true">×</span></button>)}
-          {filters.minScore && <button onClick={() => { setScoreInput(''); filter('minScore', ''); }} aria-label="Remove minimum fit score filter">Fit ≥ {filters.minScore} <span aria-hidden="true">×</span></button>}
-          {filters.status && <button onClick={() => filter('status', '')} aria-label="Remove application status filter">{filters.status} <span aria-hidden="true">×</span></button>}
-          {filters.activity && <button onClick={() => filter('activity', '')} aria-label="Remove listing activity filter">Listing: {filters.activity} <span aria-hidden="true">×</span></button>}
-        </div>}
         {list.loading && !data && <div className="load-state" role="status"><span className="spinner" />Loading vacancies…</div>}
-        {list.error && <div className={data ? 'error-banner' : 'empty-state error'} role="alert"><div>{!data && <h3>Couldn’t load vacancies</h3>}<p>{list.error}</p>{data && <p className="small">Showing the previous results.</p>}</div><button onClick={refresh}>Try again</button></div>}
-        {data && !data.total && <div className="empty-state"><div className="empty-radar"><RadarMark /></div><h3>{data.storedTotal ? 'No vacancies match these filters' : 'Your radar is ready'}</h3>
-          <p className="muted">{data.storedTotal ? 'Try another search or include more statuses and scores.' : 'Stored vacancies will appear here after a CLI collection. Refreshing only reads saved data.'}</p>
-          {data.storedTotal > 0 && <button onClick={resetFilters}>Clear filters</button>}</div>}
+        {list.error && <div className="error-banner" role="alert"><p>{list.error}</p><button onClick={refresh}>Try again</button></div>}
+        {data && !data.total && <div className="empty-state"><h3>{data.storedTotal ? 'No vacancies in this view' : 'Your radar is ready'}</h3><p className="muted">{data.storedTotal ? 'Try clearing filters or choose another view.' : 'Collect vacancies or add one by URL to get started.'}</p></div>}
         {data && data.total > 0 && <>
-          <div className={`table-scroll ${updating ? 'is-updating' : ''}`} aria-busy={updating}><table><caption className="sr-only">Saved deduplicated vacancies</caption>
-            <thead><tr><th>Vacancy</th><th>Sources</th><th title="Current saved fit score">Fit</th><th>Activity</th><th>Application</th><th>Published</th><th>First fetched</th><th>Last seen</th></tr></thead>
-            <tbody>{data.items.map((job) => <tr key={job.ID} className={[
-              job.activity === 'Closed' ? 'closed-row' : '', job.cvSent ? 'cv-sent-row' : '',
-            ].filter(Boolean).join(' ')}>
+          <div className={`table-scroll ${updating ? 'is-updating' : ''}`} aria-busy={updating}><table className="compact-jobs"><caption className="sr-only">Saved deduplicated vacancies</caption>
+            <thead><tr><th>Vacancy / company</th><th>Current assessment</th><th>Application</th><th>Next action</th></tr></thead>
+            <tbody>{data.items.map((job) => <tr key={job.ID} className={job.activity === 'Closed' ? 'closed-row' : job.cvSent ? 'cv-sent-row' : ''}>
               <td className="vacancy-cell"><button className="job-title" onClick={() => select(job.ID)}>{job.title}</button>
-                <div className="company">{job.company ?? 'Company not stated'}{job.isDemo && <span className="demo">Demo</span>}<span className="muted"> · {job.location ?? 'Location not stated'}</span></div>
-                <div className="vacancy-meta">{job.jobType ?? 'Contract type unknown'}{(job.salaryMin !== null || job.salaryMax !== null) && <> · <Salary job={job} conversion={conversion} /></>}</div></td>
-              <td><div className="source-tags">{job.sources.length ? job.sources.map((source) => <span key={source}>{sourceLabel(source)}</span>) : <span>Unknown</span>}</div></td>
-              <td><Fit job={job} /></td><td><Badge value={job.activity} /></td>
-              <td><Badge value={job.status} /><div className="muted small tracking-indicator">{job.cvSent ? '✓ CV sent' : 'CV not sent'}</div></td>
-              <td className="date-cell" title={date(job.datePosted)}>{job.datePosted ? date(job.datePosted) : '—'}</td><td className="date-cell" title={date(job.firstSeenAt, true)}>{date(job.firstSeenAt)}</td>
-              <td className="date-cell" title={date(job.lastSeenAt, true)}>{date(job.lastSeenAt)}</td>
+                <div className="company">{job.company ?? 'Company not stated'}{job.isDemo && <span className="demo">Demo</span>}</div>
+                <div className="vacancy-meta">{job.isRemote ? 'Remote · ' : ''}{job.location ?? 'Location not stated'}
+                  {(job.salaryMin !== null || job.salaryMax !== null) && <> · <Salary job={job} conversion={conversion} /></>}
+                  {job.activity === 'Closed' && ' · Closed'}{job.manuallyImportedAt && ' · Added manually'}</div></td>
+              <td><Fit job={job} /></td><td><Badge value={job.status} />{job.cvSent && <div className="muted small tracking-indicator">✓ CV sent</div>}</td>
+              <td><button className="next-action" onClick={() => select(job.ID)}>{nextAction(job)}</button></td>
             </tr>)}</tbody></table></div>
           <div className="pagination"><span className="muted small">{(data.page - 1) * data.pageSize + 1}–{Math.min(data.page * data.pageSize, data.total)} of {data.total}</span>
-            <div><label className="inline-label">Rows <select value={filters.pageSize} onChange={(event) => filter('pageSize', event.target.value)}>{[10, 20, 50, 100].map((size) => <option key={size}>{size}</option>)}</select></label>
-              <button disabled={updating || data.page <= 1} onClick={() => setPage(data.page - 1)}>← Previous</button><span className="small">Page {data.page} of {Math.ceil(data.total / data.pageSize)}</span>
-              <button disabled={updating || data.page * data.pageSize >= data.total} onClick={() => setPage(data.page + 1)}>Next →</button></div></div>
+            <div><button disabled={updating || data.page <= 1} onClick={() => setPage(data.page - 1)}>← Previous</button><span className="small">Page {data.page} of {Math.ceil(data.total / data.pageSize)}</span><button disabled={updating || data.page * data.pageSize >= data.total} onClick={() => setPage(data.page + 1)}>Next →</button></div></div>
         </>}
       </section>
+      <details className="diagnostics"><summary>Collection diagnostics</summary><CollectionArea data={diagnostics.data} loading={diagnostics.loading} error={diagnostics.error} retry={refresh} /><button className="text-button" onClick={refresh}>Refresh saved data</button></details>
       <footer>Fit scores measure profile match, not hiring probability.</footer>
     </main>
+    {addOpen && <AddVacancy onClose={() => setAddOpen(false)} onAdded={imported} />}
     <dialog className="detail-panel" ref={dialog} aria-labelledby={detail.data ? 'detail-title' : 'loading-detail-title'} onCancel={(event) => { event.preventDefault(); select(null); }}>
       <div className="panel-toolbar"><span className="muted small">Vacancy details</span><button onClick={() => select(null)} disabled={saving} aria-label="Close vacancy details">✕</button></div>
       {detail.loading && <div className="load-state" role="status"><h2 id="loading-detail-title" className="sr-only">Vacancy details</h2><span className="spinner" />Loading vacancy…</div>}

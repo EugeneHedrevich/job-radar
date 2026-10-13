@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { cds, db, SELECT, INSERT, UPDATE, query, queryOne } from '../db/index.js';
+import { cds, db, SELECT, INSERT, UPDATE } from '../db/index.js';
 import type { NormalizedJob } from '../normalize/index.js';
 import { normalizeText, tokenSimilarity } from '../util/text.js';
 import { log } from '../util/log.js';
@@ -47,8 +47,17 @@ export const DEDUPE = {
 
 export async function ingestJobs(
   normalized: NormalizedJob[],
-  context: { runId: string | null; seenAt?: Date; demo?: boolean },
+  context: { runId: string | null; seenAt?: Date; demo?: boolean; connection?: any },
 ): Promise<IngestResult> {
+  if (context.connection) return ingestWithin(normalized, context, context.connection);
+  return cds.tx(async (tx: any) => {
+    await tx.run('UPDATE sap_jobradar_Jobs SET ID = ID WHERE 0 = 1');
+    return ingestWithin(normalized, context, tx);
+  });
+}
+
+async function ingestWithin(normalized: NormalizedJob[],
+  context: { runId: string | null; seenAt?: Date; demo?: boolean }, connection: any): Promise<IngestResult> {
   const seenAt = (context.seenAt ?? new Date()).toISOString();
   const result: IngestResult = {
     created: 0,
@@ -85,26 +94,26 @@ export async function ingestJobs(
 
   for (const job of combined.values()) {
 
-    const existingListing = await findListing(job);
+    const existingListing = await findListing(job, connection);
     if (existingListing) {
-      await touchListing(existingListing.ID, job, seenAt, context.runId);
-      const enriched = await enrichJob(existingListing.job_ID, job, seenAt, true, context.demo);
+      await touchListing(existingListing.ID, job, seenAt, context.runId, connection);
+      const enriched = await enrichJob(existingListing.job_ID, job, seenAt, true, context.demo, connection);
       if (enriched) result.updated += 1;
       if (existingListing.job_ID) result.jobIds.push(existingListing.job_ID);
       continue;
     }
 
-    const duplicate = await findCrossSourceDuplicate(job, Boolean(context.demo));
+    const duplicate = await findCrossSourceDuplicate(job, Boolean(context.demo), connection);
     if (duplicate) {
-      await insertListing(duplicate.ID, job, seenAt, context.runId);
-      await enrichJob(duplicate.ID, job, seenAt, false, context.demo);
+      await insertListing(duplicate.ID, job, seenAt, context.runId, connection);
+      await enrichJob(duplicate.ID, job, seenAt, false, context.demo, connection);
       result.mergedAcrossSources += 1;
       result.jobIds.push(duplicate.ID);
       continue;
     }
 
     const jobId = randomUUID();
-    await cds.run(
+    await connection.run(
       INSERT.into(db().Jobs).entries({
         ID: jobId,
         fingerprint: job.fingerprint,
@@ -129,7 +138,7 @@ export async function ingestJobs(
         isDemo: Boolean(context.demo),
       }),
     );
-    await insertListing(jobId, job, seenAt, context.runId);
+    await insertListing(jobId, job, seenAt, context.runId, connection);
     result.created += 1;
     result.jobIds.push(jobId);
     result.newJobIds.push(jobId);
@@ -138,18 +147,18 @@ export async function ingestJobs(
   return result;
 }
 
-async function findListing(job: NormalizedJob): Promise<{ ID: string; job_ID: string } | undefined> {
+async function findListing(job: NormalizedJob, connection: any): Promise<{ ID: string; job_ID: string } | undefined> {
   const { SourceListings } = db();
   if (job.listing.sourceJobId) {
-    const bySourceId = await queryOne<{ ID: string; job_ID: string }>(
-      SELECT.from(SourceListings)
+    const bySourceId = await connection.run(
+      SELECT.one.from(SourceListings)
         .columns('ID', 'job_ID')
         .where({ source: job.listing.source, sourceJobId: job.listing.sourceJobId }),
     );
     if (bySourceId) return bySourceId;
   }
-  return queryOne<{ ID: string; job_ID: string }>(
-    SELECT.from(SourceListings)
+  return connection.run(
+    SELECT.one.from(SourceListings)
       .columns('ID', 'job_ID')
       .where({ source: job.listing.source, canonicalUrl: job.listing.canonicalUrl }),
   );
@@ -163,16 +172,16 @@ async function findListing(job: NormalizedJob): Promise<{ ID: string; job_ID: st
  * same specific location must be known. Different same-board identities never
  * participate in this heuristic.
  */
-export async function findCrossSourceDuplicate(job: NormalizedJob, demo = false): Promise<JobRow | undefined> {
+export async function findCrossSourceDuplicate(job: NormalizedJob, demo = false, connection: any = cds): Promise<JobRow | undefined> {
   if (!job.companyNormalized) return undefined;
-  const candidates = await query<JobRow>(
+  const candidates: JobRow[] = await connection.run(
     SELECT.from(db().Jobs).where({ companyNormalized: job.companyNormalized, isDemo: demo }),
   );
   for (const candidate of candidates) {
     // A different identity on the same board is a separate vacancy, even when
     // a recruiter reuses titles or descriptions across clients.
-    const sameSource = await queryOne(
-      SELECT.from(db().SourceListings).columns('ID')
+    const sameSource = await connection.run(
+      SELECT.one.from(db().SourceListings).columns('ID')
         .where({ job_ID: candidate.ID, source: job.listing.source }),
     );
     if (sameSource) continue;
@@ -240,8 +249,9 @@ async function insertListing(
   job: NormalizedJob,
   seenAt: string,
   runId: string | null,
+  connection: any,
 ): Promise<void> {
-  await cds.run(
+  await connection.run(
     INSERT.into(db().SourceListings).entries({
       ID: randomUUID(),
       job_ID: jobId,
@@ -264,14 +274,15 @@ async function touchListing(
   job: NormalizedJob,
   seenAt: string,
   runId: string | null,
+  connection: any,
 ): Promise<void> {
-  const previous = await queryOne<{ rawRecord: string; hasDescription: boolean }>(SELECT.from(db().SourceListings)
+  const previous = await connection.run(SELECT.one.from(db().SourceListings)
     .columns('rawRecord', 'hasDescription').where({ ID: listingId }));
   const raw = previous ? JSON.parse(previous.rawRecord) : {};
   for (const [key, value] of Object.entries(JSON.parse(job.listing.raw))) {
     if (value !== null && value !== undefined && value !== '') raw[key] = value;
   }
-  await cds.run(
+  await connection.run(
     UPDATE(db().SourceListings)
       .set({
         lastSeenAt: seenAt,
@@ -291,10 +302,10 @@ async function touchListing(
  */
 async function enrichJob(
   jobId: string | null, job: NormalizedJob, seenAt: string,
-  authoritative: boolean, demo = false,
+  authoritative: boolean, demo = false, connection: any = cds,
 ): Promise<boolean> {
   if (!jobId) return false;
-  const current = await queryOne<JobRow>(SELECT.from(db().Jobs).where({ ID: jobId }));
+  const current: JobRow | undefined = await connection.run(SELECT.one.from(db().Jobs).where({ ID: jobId }));
   if (!current) {
     log.warn('Listing points at a missing job', { jobId });
     return false;
@@ -333,6 +344,6 @@ async function enrichJob(
   if (demo && !current.isDemo) patch.isDemo = true;
   if (authoritative && current.primaryUrl !== job.primaryUrl) patch.primaryUrl = job.primaryUrl;
 
-  await cds.run(UPDATE(db().Jobs).set(patch).where({ ID: jobId }));
+  await connection.run(UPDATE(db().Jobs).set(patch).where({ ID: jobId }));
   return Object.keys(patch).length > 1;
 }

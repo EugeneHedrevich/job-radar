@@ -11,11 +11,16 @@ import { ingestJobs, type IngestResult } from '../persist/ingest.js';
 import { applyListingActivity } from '../persist/activity.js';
 import { log } from '../util/log.js';
 import { recoverInterruptedRuns, startRunHeartbeat } from '../collector/lifecycle.js';
+import { claimCollection, CollectionBusyError, finishOperation, startLeaseHeartbeat, updateOperation,
+  type CollectionClaim } from '../collector/lease.js';
+import type { CollectionOperation } from '../dashboard/types.js';
 
 export interface CollectOptions extends PlanOptions {
   trigger?: 'manual' | 'scheduled';
   /** Use a fixture file instead of calling the live sources. */
   fixture?: Array<{ taskId: string; source: string; job: CollectorJob }>;
+  /** Internal ownership when collection and assessment share one operation. */
+  claim?: CollectionClaim;
 }
 
 export interface CollectSummary {
@@ -26,9 +31,45 @@ export interface CollectSummary {
   outcomes: TaskOutcome[];
   skipped: Array<{ source: string; reason: string }>;
   malformedLines: number;
+  outcome: CollectionOperation['outcome'];
 }
 
 export async function collect(options: CollectOptions = {}): Promise<CollectSummary> {
+  let claim = options.claim;
+  if (!claim) {
+    const reservation = await claimCollection(options.trigger ?? 'manual');
+    if (!reservation.acquired) throw new CollectionBusyError(reservation.operationId);
+    claim = reservation.claim;
+  }
+  const stop = options.claim ? async () => {} : startLeaseHeartbeat(claim);
+  try {
+    const summary = await collectOwned(options, claim);
+    if (!options.claim) await finishOperation(claim, { stage: summary.outcome === 'Failed' ? 'Error' : 'Finished',
+      outcome: summary.outcome, message: outcomeMessage(summary.outcome) });
+    return summary;
+  } catch (error) {
+    if (!options.claim) await finishOperation(claim, { stage: 'Error', outcome: 'Failed',
+      message: String(error).slice(0, 1900) }).catch(() => undefined);
+    throw error;
+  } finally { await stop(); }
+}
+
+export function collectionOutcome(outcomes: TaskOutcome[], jobsFound: number, fixture = false): CollectionOperation['outcome'] {
+  if (fixture) return jobsFound ? 'Completed' : 'Empty';
+  const succeeded = outcomes.filter((row) => row.status === 'Succeeded').length;
+  const failed = outcomes.filter((row) => row.status === 'Failed').length;
+  if (!succeeded && !failed) return 'NoSources';
+  if (failed) return succeeded || jobsFound > 0 ? 'Partial' : 'Failed';
+  return jobsFound > 0 ? 'Completed' : 'Empty';
+}
+
+export function outcomeMessage(outcome: CollectionOperation['outcome']): string {
+  return { Running: 'Collection is running.', Completed: 'Collection finished.',
+    Empty: 'Searches succeeded and returned no vacancies.', Partial: 'Some source tasks failed; available results were saved.',
+    Failed: 'Every executed source task failed.', NoSources: 'No sources available: disabled, on cooldown or skipped.' }[outcome];
+}
+
+async function collectOwned(options: CollectOptions, claim: CollectionClaim): Promise<CollectSummary> {
   const config = loadConfig();
   const startedAt = new Date();
   const runId = randomUUID();
@@ -53,6 +94,8 @@ export async function collect(options: CollectOptions = {}): Promise<CollectSumm
       jobsUpdated: 0,
     }),
   );
+  await updateOperation(claim, { stage: 'Collecting', run_ID: runId,
+    tasksTotal: [...plan.tasksBySource.values()].flat().length });
   const stopHeartbeat = startRunHeartbeat(runId);
   try {
     for (const skipped of plan.skipped) {
@@ -68,6 +111,15 @@ export async function collect(options: CollectOptions = {}): Promise<CollectSumm
       [...plan.tasksBySource.values()].flat().filter((task) => !task.enrich_only).length);
     let retryDescriptionSlots = Math.max(0, Math.min(2, config.searches.description_budget.max_tasks_per_run) -
       [...plan.tasksBySource.values()].flat().filter((task) => task.fetch_description).length);
+    const progress = async (current: { jobsFound: number; outcomes: TaskOutcome[] }) => {
+      const merged = new Map(outcomeByTask);
+      for (const row of current.outcomes) merged.set(row.taskId, row);
+      const rows = [...merged.values()];
+      await updateOperation(claim, { jobsFound: collected.length + current.jobsFound,
+        tasksDone: rows.length, tasksSucceeded: rows.filter((row) => row.status === 'Succeeded').length,
+        tasksFailed: rows.filter((row) => row.status === 'Failed').length,
+        tasksSkipped: rows.filter((row) => row.status === 'Skipped').length });
+    };
 
     if (options.fixture) {
       collected.push(...options.fixture);
@@ -84,6 +136,7 @@ export async function collect(options: CollectOptions = {}): Promise<CollectSumm
             taskTimeoutSeconds: sourceConfig.task_timeout_seconds,
             delayBetweenTasksSeconds: sourceConfig.delay_between_tasks_seconds,
             processTimeoutSeconds: config.searches.resilience.process_timeout_seconds,
+            onProgress: progress,
           });
           malformedLines += output.malformedLines;
           collected.push(...output.jobs);
@@ -106,7 +159,7 @@ export async function collect(options: CollectOptions = {}): Promise<CollectSumm
                 detail_jobs: fetchDescription ? task.detail_jobs : undefined,
                 ...(last?.offset !== undefined ? { offset: last.offset } : last ? { search_cursor: last } : {}) });
             }
-            const retried = await retryTasks(config, source, retryTasksPlan, retryable, collected, activities);
+            const retried = await retryTasks(config, source, retryTasksPlan, retryable, collected, activities, progress);
             await recordSearchProgress(retried);
             for (const outcome of retried) outcomeByTask.set(outcome.taskId, outcome);
           }
@@ -132,6 +185,10 @@ export async function collect(options: CollectOptions = {}): Promise<CollectSumm
     }
 
     const outcomes = [...outcomeByTask.values()];
+    await updateOperation(claim, { stage: 'Saving', jobsFound: collected.length, tasksDone: outcomes.length,
+      tasksSucceeded: outcomes.filter((row) => row.status === 'Succeeded').length,
+      tasksFailed: outcomes.filter((row) => row.status === 'Failed').length,
+      tasksSkipped: outcomes.filter((row) => row.status === 'Skipped').length });
 
     const normalized: NormalizedJob[] = [];
     let unusable = 0;
@@ -169,18 +226,19 @@ export async function collect(options: CollectOptions = {}): Promise<CollectSumm
     }
     await recordOutcomes(config, outcomes);
 
-    const failedAll = outcomes.length > 0 && outcomes.every((outcome) => outcome.status === 'Failed');
+    const outcome = collectionOutcome(outcomes, collected.length, Boolean(options.fixture));
     await cds.run(
       UPDATE(db().CollectionRuns)
         .set({
           finishedAt: new Date().toISOString(),
-          status: failedAll ? 'Failed' : 'Completed',
+          status: outcome,
           jobsFound: collected.length,
           jobsNew: ingest.created,
           jobsUpdated: ingest.updated + ingest.mergedAcrossSources,
         })
         .where({ ID: runId }),
     );
+    await updateOperation(claim, { jobsNew: ingest.created, jobsUpdated: ingest.updated + ingest.mergedAcrossSources });
 
     return {
       runId,
@@ -190,6 +248,7 @@ export async function collect(options: CollectOptions = {}): Promise<CollectSumm
       outcomes,
       skipped: plan.skipped,
       malformedLines,
+      outcome,
     };
   } catch (error) {
     await cds.run(UPDATE(db().CollectionRuns).set({ status: 'Failed', finishedAt: new Date().toISOString() }).where({ ID: runId }));
@@ -213,6 +272,7 @@ async function retryTasks(
   failed: TaskOutcome[],
   collected: Array<{ taskId: string; source: string; job: CollectorJob }>,
   activities: ListingActivity[],
+  onProgress: (progress: { jobsFound: number; outcomes: TaskOutcome[] }) => Promise<void>,
 ): Promise<TaskOutcome[]> {
   const sourceConfig = config.searches.sources[source]!;
   const retryTaskIds = new Set(failed.map((outcome) => outcome.taskId));
@@ -228,6 +288,7 @@ async function retryTasks(
     taskTimeoutSeconds: sourceConfig.task_timeout_seconds,
     delayBetweenTasksSeconds: sourceConfig.delay_between_tasks_seconds,
     processTimeoutSeconds: config.searches.resilience.process_timeout_seconds,
+    onProgress,
   });
   collected.push(...output.jobs);
   activities.push(...output.activities);

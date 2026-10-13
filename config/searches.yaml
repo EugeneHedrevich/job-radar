@@ -73,6 +73,9 @@ keywords:
 sources:
   linkedin:
     enabled: true
+    # Two searches per available 3h cycle cover the queued combinations within
+    # a week. Keep a wider freshness window for this deliberately slower source.
+    hours_old: 168
     # LinkedIn ignores country_indeed. Only free-text `location` works.
     geos:
       eu: { id: eu, location: "European Union" }

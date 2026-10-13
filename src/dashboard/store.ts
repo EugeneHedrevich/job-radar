@@ -6,20 +6,22 @@ import { assessmentCacheKey, currentAssessmentKeys, findCurrentAssessment, rowTo
 import { suppressIgnoredWork } from '../pipeline/ignored.js';
 import { APPLICATION_STATUSES, type Activity, type AssessmentKind, type CollectionStatus,
   type JobDetail, type JobList, type JobSummary, type SavedAssessment, type Tracking } from './types.js';
+import { ApiError } from './errors.js';
+import { listReminders, syncCvFollowUp } from './reminders.js';
 
-export class ApiError extends Error {
-  constructor(public readonly status: number, message: string) { super(message); }
-}
+export { ApiError } from './errors.js';
 
 export const trackingPatchSchema = z.object({
   status: z.enum(APPLICATION_STATUSES).optional(),
   personalNotes: z.string().max(20_000).optional(),
   applicationDate: z.iso.date().nullable().optional(),
   cvSent: z.boolean().optional(),
+  cvSentAt: z.iso.datetime({ offset: true }).nullable().optional(),
   sentCvLabel: z.string().max(500).nullable().optional(),
 }).strict().refine((patch) => Object.keys(patch).length > 0, 'No tracking fields supplied');
 
 const listSchema = z.object({
+  view: z.enum(['vacancies', 'applications', 'imports']).default('vacancies'),
   q: z.string().max(500).default(''),
   source: z.array(z.string().min(1).max(50)).max(50).default([]),
   minScore: z.coerce.number().int().min(0).max(100).optional(),
@@ -40,7 +42,8 @@ function parseInput<T>(schema: z.ZodType<T>, input: unknown): T {
 
 function tracking(row: any): Tracking {
   return { status: row.status ?? 'New', personalNotes: row.personalNotes ?? '',
-    applicationDate: row.applicationDate ?? null, cvSent: Boolean(row.cvSent), sentCvLabel: row.sentCvLabel ?? null };
+    applicationDate: row.applicationDate ?? null, cvSent: Boolean(row.cvSent), cvSentAt: row.cvSentAt ?? null,
+    sentCvLabel: row.sentCvLabel ?? null };
 }
 
 function listingActivity(row: any, at: Date): Activity {
@@ -80,6 +83,7 @@ async function summarize(config: AppConfig, job: any, listings: any[], assessmen
   const pending = job.status !== 'Ignored' && activity !== 'Closed' && !assessments.some((row) => row.cacheKey === aiKey) &&
     queue.find((row) => row.status === 'Pending' && row.cacheKey === aiKey);
   return { ID: job.ID, title: job.title, company: job.company, location: job.location,
+    isRemote: job.isRemote ?? null, manuallyImportedAt: job.manuallyImportedAt ?? null, nextFollowUp: null,
     jobType: job.jobType, salaryMin: score(job.salaryMin), salaryMax: score(job.salaryMax),
     salaryCurrency: job.salaryCurrency, salaryInterval: job.salaryInterval,
     sources: [...new Set<string>(listings.map((row) => row.source))].sort(), activity,
@@ -113,23 +117,31 @@ export async function listJobs(params = new URLSearchParams()): Promise<JobList>
     source: [...new Set(params.getAll('source').flatMap((value) => value.split(','))
       .map((value) => value.trim()).filter(Boolean))] });
   const config = dashboardConfig();
-  const [jobs, listings, assessments, queue] = await Promise.all([
+  const [jobs, listings, assessments, queue, reminders] = await Promise.all([
     query(SELECT.from(db().Jobs)),
     query(SELECT.from(db().SourceListings).columns('job_ID', 'source', 'activityState', 'validThrough')),
     query(SELECT.from(db().Assessments).columns('ID', 'job_ID', 'cacheKey', 'engine', 'fitScore', 'recommendation',
       'createdAt', 'explanation', 'missingInformation')),
     query(SELECT.from(db().AiAssessmentQueue).where({ status: 'Pending' })),
+    listReminders(),
   ]);
   const byListing = groupByJob(listings), byAssessment = groupByJob(assessments), byQueue = groupByJob(queue);
   const at = new Date();
   const summaries = await Promise.all(jobs.map((job) => summarize(config, job,
     byListing.get(job.ID) ?? [], byAssessment.get(job.ID) ?? [], byQueue.get(job.ID) ?? [], at)));
+  for (const job of summaries) {
+    const next = reminders.find((reminder) => reminder.jobId === job.ID);
+    job.nextFollowUp = next ? { ID: next.ID, dueDate: next.dueDate } : null;
+  }
   const needle = input.q.trim().toLocaleLowerCase();
   const filtered = summaries.filter((job) =>
+    (input.view !== 'applications' || job.cvSent || job.applicationDate || Boolean(job.personalNotes.trim()) || job.status !== 'New') &&
+    (input.view !== 'imports' || Boolean(job.manuallyImportedAt)) &&
     (!needle || [job.title, job.company, job.location, job.personalNotes].some((value) => value?.toLocaleLowerCase().includes(needle))) &&
     (!input.source.length || job.sources.some((source) => input.source.includes(source))) &&
-    (input.minScore === undefined || job.fitScore !== null && job.fitScore >= input.minScore) &&
-    (!input.status || job.status === input.status) && (!input.activity || job.activity === input.activity));
+    (input.view !== 'vacancies' || input.minScore === undefined || job.fitScore !== null && job.fitScore >= input.minScore ||
+      Boolean(job.manuallyImportedAt) && (job.assessmentState === 'unassessed' || job.assessmentState === 'outdated' || job.aiPending)) &&
+    (!input.status || job.status === input.status) && (input.view === 'applications' || !input.activity || job.activity === input.activity));
   filtered.sort((a, b) => {
     const left = a[input.sort], right = b[input.sort];
     // Unknown scores/dates remain last in both directions; a real zero is valid.
@@ -157,8 +169,11 @@ export async function readJob(id: string): Promise<JobDetail> {
   const at = new Date();
   const current = await findCurrentAssessment(config, job, assessments);
   const validKeys = currentAssessmentKeys(config, job);
+  const reminders = await listReminders(id);
+  const next = reminders.find((reminder) => reminder.status === 'Pending');
   return { ...await summarize(config, job, listings, assessments, queue, at),
     description: job.description, primaryUrl: job.primaryUrl, isRemote: job.isRemote, locationCountry: job.locationCountry,
+    reminders, nextFollowUp: next ? { ID: next.ID, dueDate: next.dueDate } : null,
     listings: listings.map((row) => ({ ID: row.ID, source: row.source,
       url: row.directUrl ?? row.rawUrl ?? row.canonicalUrl, activity: listingActivity(row, at),
       activityCheckedAt: row.activityCheckedAt ?? null, validThrough: row.validThrough ?? null,
@@ -169,17 +184,26 @@ export async function readJob(id: string): Promise<JobDetail> {
       .map((row) => savedAssessment(config, job, row, validKeys.includes(row.cacheKey))) };
 }
 
-/** This is the sole dashboard write path; strict validation rejects other fields. */
+/** Sole personal-tracking write path; ingestion never owns these fields. */
 export async function updateTracking(id: string, input: unknown): Promise<Tracking> {
   const patch = parseInput(trackingPatchSchema, input);
   return cds.tx(async (tx: any) => {
-    const affected = await tx.run(UPDATE(db().Jobs).set(patch).where({ ID: id }));
-    if (!affected) throw new ApiError(404, 'Vacancy not found');
+    await tx.run('UPDATE sap_jobradar_Jobs SET ID = ID WHERE 0 = 1');
+    const previous = await tx.run(SELECT.one.from(db().Jobs).where({ ID: id }));
+    if (!previous) throw new ApiError(404, 'Vacancy not found');
+    const nextSent = patch.cvSent ?? Boolean(previous.cvSent);
+    if (nextSent && !previous.cvSent && !patch.cvSentAt) throw new ApiError(400, 'Choose the actual CV send date and time');
+    if (!nextSent && patch.cvSentAt) throw new ApiError(400, 'A send date requires CV sent');
+    if (nextSent && previous.cvSentAt && patch.cvSentAt === null) throw new ApiError(400, 'Clear CV sent to remove its send date');
+    if (patch.cvSentAt) patch.cvSentAt = new Date(patch.cvSentAt).toISOString();
+    const values = { ...patch, ...(!nextSent ? { cvSentAt: null } : {}) };
+    await tx.run(UPDATE(db().Jobs).set(values).where({ ID: id }));
     if (patch.cvSent === true) {
       await tx.run(UPDATE(db().Jobs).set({ status: 'Applied' }).where({ ID: id, status: { in: ['New', 'Interested'] } }));
     }
     if (patch.status === 'Ignored') await suppressIgnoredWork(tx, id);
     const row = await tx.run(SELECT.one.from(db().Jobs).where({ ID: id }));
+    await syncCvFollowUp(tx, previous, row);
     return tracking(row);
   });
 }

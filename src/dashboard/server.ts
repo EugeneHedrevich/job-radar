@@ -3,6 +3,10 @@ import { readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { PROJECT_ROOT } from '../config/index.js';
 import { ApiError, listJobs, readCollectionStatus, readJob, updateTracking } from './store.js';
+import { startDashboardCollection } from '../pipeline/collection-operation.js';
+import { readOperation } from '../collector/lease.js';
+import { importVacancy } from './import.js';
+import { listReminders, updateReminder } from './reminders.js';
 
 function json(response: ServerResponse, status: number, data: unknown): void {
   response.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
@@ -11,13 +15,13 @@ function json(response: ServerResponse, status: number, data: unknown): void {
 
 async function body(request: IncomingMessage): Promise<unknown> {
   if (request.headers['content-type']?.split(';')[0]?.trim() !== 'application/json') {
-    throw new ApiError(415, 'Use application/json for tracking updates');
+    throw new ApiError(415, 'Use application/json');
   }
   const chunks: Buffer[] = [];
   let size = 0;
   for await (const chunk of request) {
     size += chunk.length;
-    if (size > 128_000) throw new ApiError(413, 'Tracking update is too large');
+    if (size > 128_000) throw new ApiError(413, 'Request is too large');
     chunks.push(chunk);
   }
   try { return JSON.parse(Buffer.concat(chunks).toString('utf8')); }
@@ -56,7 +60,7 @@ async function staticFile(response: ServerResponse, pathname: string, directory:
   response.end(head ? undefined : data);
 }
 
-/** A local HTTP wrapper around stored reads and the sole tracking write path. */
+/** Local reads, personal tracking, bounded imports and asynchronous collection. */
 export function createDashboardServer(frontendDirectory = path.join(PROJECT_ROOT, 'dist/dashboard')) {
   return createServer(async (request, response) => {
     response.setHeader('X-Content-Type-Options', 'nosniff');
@@ -73,6 +77,28 @@ export function createDashboardServer(frontendDirectory = path.join(PROJECT_ROOT
       }
       if (url.pathname === '/api/status' && request.method === 'GET') {
         json(response, 200, await readCollectionStatus()); return;
+      }
+      if (url.pathname === '/api/collection' && request.method === 'POST') {
+        json(response, 202, await startDashboardCollection()); return;
+      }
+      if (url.pathname === '/api/collection' && request.method === 'GET') {
+        json(response, 200, { operation: await readOperation() }); return;
+      }
+      const operation = /^\/api\/collection\/([^/]+)$/.exec(url.pathname);
+      if (operation && request.method === 'GET') {
+        const value = await readOperation(decodeURIComponent(operation[1]!));
+        if (!value) throw new ApiError(404, 'Collection operation not found');
+        json(response, 200, value); return;
+      }
+      if (url.pathname === '/api/import' && request.method === 'POST') {
+        json(response, 200, await importVacancy(await body(request))); return;
+      }
+      if (url.pathname === '/api/reminders' && request.method === 'GET') {
+        json(response, 200, await listReminders()); return;
+      }
+      const reminder = /^\/api\/reminders\/([^/]+)$/.exec(url.pathname);
+      if (reminder && request.method === 'PATCH') {
+        json(response, 200, await updateReminder(decodeURIComponent(reminder[1]!), await body(request))); return;
       }
       const match = /^\/api\/jobs\/([^/]+)(\/tracking)?$/.exec(url.pathname);
       if (match) {

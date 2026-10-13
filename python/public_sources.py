@@ -191,6 +191,10 @@ def hydrate(source: str, row: dict[str, Any], html: str, description_format: str
     if closure:
         return closure
     updated = dict(row)
+    updated["title"] = updated.get("title") or posting.get("title") or text(soup.select_one("h1"))
+    employer = posting.get("hiringOrganization")
+    if isinstance(employer, dict):
+        updated["company"] = updated.get("company") or employer.get("name")
     apply_posting(updated, posting)
     description = posting.get("description")
     if not isinstance(description, str) or not description.strip():

@@ -41,6 +41,10 @@ export function canonicalizeUrl(rawUrl: string | null | undefined): string {
   }
   url.hash = '';
   url.hostname = url.hostname.toLowerCase().replace(/^www\./, '');
+  if (/^(?:[a-z]{2}\.)?linkedin\.com$/.test(url.hostname)) {
+    const identity = /\/jobs\/view\/(?:[^/]*-)?(\d+)\/?$/.exec(url.pathname);
+    if (identity) { url.hostname = 'linkedin.com'; url.pathname = `/jobs/view/${identity[1]}`; url.search = ''; }
+  }
   url.protocol = 'https:';
   url.port = '';
   const keep = new URLSearchParams();

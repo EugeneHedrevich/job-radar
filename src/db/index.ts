@@ -21,6 +21,9 @@ export interface Entities {
   ListingActivityEvents: any;
   Assessments: any;
   Notifications: any;
+  CollectionLease: any;
+  CollectionOperations: any;
+  FollowUpReminders: any;
 }
 
 let dbPromise: Promise<any> | undefined;
@@ -69,6 +72,7 @@ export async function connectDb(dbPathOverride?: string): Promise<any> {
       await ensureNotificationClaims(tx);
       await ensureMatchingState(tx);
       await ensurePersonalTracking(tx);
+      await ensureLocalControls(tx);
       await ensureIndexes(tx);
     });
     entities = cds.entities(NAMESPACE) as unknown as Entities;
@@ -83,11 +87,27 @@ async function ensurePersonalTracking(connection: any): Promise<void> {
   for (const [name, type] of [
     ['personalNotes', 'TEXT'], ['applicationDate', 'DATE'],
     ['cvSent', 'BOOLEAN DEFAULT 0'], ['sentCvLabel', 'VARCHAR(500)'],
+    ['cvSentAt', 'TIMESTAMP'], ['manuallyImportedAt', 'TIMESTAMP'],
   ]) {
     if (!columns.some((column) => column.name === name)) {
       await connection.run(`ALTER TABLE sap_jobradar_Jobs ADD COLUMN ${name} ${type}`);
     }
   }
+}
+
+async function ensureLocalControls(connection: any): Promise<void> {
+  await connection.run(`CREATE TABLE IF NOT EXISTS sap_jobradar_CollectionLease
+    (name VARCHAR(50) PRIMARY KEY NOT NULL, operation_ID VARCHAR(36), token VARCHAR(36), expiresAt TIMESTAMP)`);
+  await connection.run(`CREATE TABLE IF NOT EXISTS sap_jobradar_CollectionOperations
+    (ID VARCHAR(36) PRIMARY KEY NOT NULL, run_ID VARCHAR(36), trigger VARCHAR(50), stage VARCHAR(20),
+    outcome VARCHAR(30), startedAt TIMESTAMP, updatedAt TIMESTAMP, finishedAt TIMESTAMP,
+    tasksTotal INTEGER DEFAULT 0, tasksDone INTEGER DEFAULT 0, tasksSucceeded INTEGER DEFAULT 0,
+    tasksFailed INTEGER DEFAULT 0, tasksSkipped INTEGER DEFAULT 0, jobsFound INTEGER DEFAULT 0,
+    jobsNew INTEGER DEFAULT 0, jobsUpdated INTEGER DEFAULT 0, jobsAssessed INTEGER DEFAULT 0,
+    aiCalls INTEGER DEFAULT 0, aiBacklog INTEGER DEFAULT 0, aiBudgetExhausted BOOLEAN DEFAULT 0, message VARCHAR(2000))`);
+  await connection.run(`CREATE TABLE IF NOT EXISTS sap_jobradar_FollowUpReminders
+    (ID VARCHAR(36) PRIMARY KEY NOT NULL, job_ID VARCHAR(36), kind VARCHAR(30), sentAt TIMESTAMP NOT NULL,
+    dueDate DATE NOT NULL, status VARCHAR(20), createdAt TIMESTAMP, updatedAt TIMESTAMP, completedAt TIMESTAMP)`);
 }
 
 async function ensureMatchingState(connection: any): Promise<void> {
@@ -181,6 +201,9 @@ async function ensureDemoProvenance(connection: any): Promise<void> {
  */
 async function ensureIndexes(db: any): Promise<void> {
   const statements = [
+    `CREATE UNIQUE INDEX IF NOT EXISTS idx_pending_cv_followup
+       ON sap_jobradar_FollowUpReminders (job_ID, kind) WHERE status = 'Pending'`,
+    `CREATE INDEX IF NOT EXISTS idx_followup_due ON sap_jobradar_FollowUpReminders (status, dueDate)`,
     `CREATE UNIQUE INDEX IF NOT EXISTS idx_listing_source_jobid
        ON sap_jobradar_SourceListings (source, sourceJobId)
        WHERE sourceJobId IS NOT NULL`,

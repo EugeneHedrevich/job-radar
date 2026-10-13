@@ -359,7 +359,7 @@ describe("description-rotation", () => {
             expect(resumed.tasksBySource.get('linkedin')!.some((task) => !tasks.some((old) => old.task_id === task.task_id))).toBe(true);
             expect(resumed.tasksBySource.get('linkedin')!.find((task) => task.task_id === tasks[0]!.task_id)?.offset).toBe(20);
             const expired = await reserveBatchPlan(config, { batchKey: 'cap-broad', onlySources: ['linkedin'],
-                at: new Date(at.getTime() + 121 * 3600000) });
+                at: new Date(at.getTime() + 217 * 3600000) });
             expect(expired.tasksBySource.get('linkedin')!.every((task) => task.offset === undefined)).toBe(true);
         });
         it('reserves stored descriptions without searches and keeps the two-task budget', async () => {

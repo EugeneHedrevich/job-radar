@@ -32,7 +32,7 @@ def linkedin_job_id(url: str) -> str:
     return match.group(1)
 
 
-def hydrate_board(source: str, row: dict[str, Any], description_format: str) -> dict[str, Any]:
+def hydrate_board(source: str, row: dict[str, Any], description_format: str, fetch_response=None) -> dict[str, Any]:
     url = str(row.get("job_url") or "")
     if source != "linkedin":
         raise ValueError(f"Unexpected {source} detail URL")
@@ -40,7 +40,7 @@ def hydrate_board(source: str, row: dict[str, Any], description_format: str) -> 
     transport = active_transport.get() or LinkedInTransport()
     for hop in range(4):
         transport.before("detail")
-        response = requests.get(url, timeout=REQUEST_TIMEOUT_SECONDS, allow_redirects=False, **request_kwargs())
+        response = (fetch_response or requests.get)(url, timeout=REQUEST_TIMEOUT_SECONDS, allow_redirects=False, **request_kwargs())
         transport.check(response)
         if response.status_code in {404, 410}:
             return observe(row, "closed", f"HTTP {response.status_code} for listing detail", f"http_{response.status_code}")
@@ -67,6 +67,14 @@ def hydrate_board(source: str, row: dict[str, Any], description_format: str) -> 
     if not description:
         raise ValueError(f"{source} public detail page has no description")
     updated = dict(row)
+    heading = soup.select_one("h1")
+    updated["title"] = updated.get("title") or posting.get("title") or (heading.get_text(" ", strip=True) if heading else None)
+    employer = posting.get("hiringOrganization")
+    if isinstance(employer, dict):
+        updated["company"] = updated.get("company") or employer.get("name")
+    company = soup.select_one(".topcard__org-name-link")
+    if company:
+        updated["company"] = updated.get("company") or company.get_text(" ", strip=True)
     updated["description"] = markdownify(description).strip() if description_format == "markdown" else description
     required_location = applicant_location(posting)
     if required_location:

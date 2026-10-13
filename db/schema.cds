@@ -31,6 +31,8 @@ entity Jobs : cuid {
   personalNotes     : LargeString;           // user-owned; never changed by ingestion/ranking
   applicationDate   : Date;
   cvSent            : Boolean default false; // independent of application status
+  cvSentAt          : Timestamp;             // actual send instant; legacy unknown stays null
+  manuallyImportedAt : Timestamp;
   sentCvLabel       : String(500);           // actual filename/version, not the AI suggestion
   isDemo            : Boolean default false;   // fixture data is never delivered live
 
@@ -70,7 +72,7 @@ entity CollectionRuns : cuid {
   finishedAt   : Timestamp;
   trigger      : String(50);                 // manual | scheduled
   batchKey     : String(200);                // which rotating batch was used
-  status       : String(20);                 // Running | Completed | Failed
+  status       : String(20);                 // Running | Completed | Empty | Partial | Failed | NoSources
   jobsFound    : Integer default 0;
   jobsNew      : Integer default 0;
   jobsUpdated  : Integer default 0;
@@ -128,6 +130,48 @@ entity SearchProgress {
   state : LargeString;
   sweepStartedAt : Timestamp;
   updatedAt : Timestamp;
+}
+
+/** One shared lease for UI, CLI and scheduler, including bounded assessment. */
+entity CollectionLease {
+  key name : String(50);
+  operation : Association to CollectionOperations;
+  token : String(36);
+  expiresAt : Timestamp;
+}
+
+entity CollectionOperations : cuid {
+  run : Association to CollectionRuns;
+  trigger : String(50);
+  stage : String(20); // Preparing | Collecting | Saving | Assessing | Finished | Error
+  outcome : String(30); // Running | Completed | Empty | Partial | Failed | NoSources
+  startedAt : Timestamp;
+  updatedAt : Timestamp;
+  finishedAt : Timestamp;
+  tasksTotal : Integer default 0;
+  tasksDone : Integer default 0;
+  tasksSucceeded : Integer default 0;
+  tasksFailed : Integer default 0;
+  tasksSkipped : Integer default 0;
+  jobsFound : Integer default 0;
+  jobsNew : Integer default 0;
+  jobsUpdated : Integer default 0;
+  jobsAssessed : Integer default 0;
+  aiCalls : Integer default 0;
+  aiBacklog : Integer default 0;
+  aiBudgetExhausted : Boolean default false;
+  message : String(2000);
+}
+
+entity FollowUpReminders : cuid {
+  job : Association to Jobs;
+  kind : String(30) default 'CvFollowUp';
+  sentAt : Timestamp not null;
+  dueDate : Date not null; // calendar day in Europe/Sofia
+  status : String(20); // Pending | Completed | Cancelled
+  createdAt : Timestamp;
+  updatedAt : Timestamp;
+  completedAt : Timestamp;
 }
 
 /** Durable AI work, keyed by the same inputs as the paid attempt cache. */

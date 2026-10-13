@@ -12,6 +12,7 @@ export interface Tracking {
   personalNotes: string;
   applicationDate: string | null;
   cvSent: boolean;
+  cvSentAt: string | null;
   sentCvLabel: string | null;
 }
 
@@ -20,6 +21,9 @@ export interface JobSummary extends Tracking {
   title: string;
   company: string | null;
   location: string | null;
+  isRemote: boolean | null;
+  manuallyImportedAt: string | null;
+  nextFollowUp: { ID: string; dueDate: string } | null;
   jobType: string | null;
   salaryMin: number | null;
   salaryMax: number | null;
@@ -68,6 +72,49 @@ export interface JobDetail extends JobSummary {
   listings: Listing[];
   currentAssessment: SavedAssessment | null;
   assessmentHistory: SavedAssessment[];
+  reminders: FollowUpReminder[];
+}
+
+export interface FollowUpReminder {
+  ID: string;
+  jobId: string;
+  title: string;
+  company: string | null;
+  sentAt: string;
+  dueDate: string;
+  status: 'Pending' | 'Completed' | 'Cancelled';
+  completedAt: string | null;
+}
+
+export interface CollectionOperation {
+  ID: string;
+  run_ID: string | null;
+  stage: 'Preparing' | 'Collecting' | 'Saving' | 'Assessing' | 'Finished' | 'Error';
+  outcome: 'Running' | 'Completed' | 'Empty' | 'Partial' | 'Failed' | 'NoSources';
+  startedAt: string;
+  updatedAt: string;
+  finishedAt: string | null;
+  tasksTotal: number;
+  tasksDone: number;
+  tasksSucceeded: number;
+  tasksFailed: number;
+  tasksSkipped: number;
+  jobsFound: number;
+  jobsNew: number;
+  jobsUpdated: number;
+  jobsAssessed: number;
+  aiCalls: number;
+  aiBacklog: number;
+  aiBudgetExhausted: boolean;
+  message: string | null;
+}
+
+export interface ImportResult {
+  result: 'Added' | 'Already tracked' | 'Needs details';
+  availability: 'Active' | 'Closed' | 'Could not verify';
+  job: JobDetail | null;
+  message: string;
+  detailsToken?: string;
 }
 
 export interface JobList {

@@ -17,7 +17,7 @@ export async function closeTempDb(): Promise<void> {
 
 /** Isolate scenarios, including durable queues and observation history. */
 export async function resetTestDb(): Promise<void> {
-  for (const name of ['ListingActivityEvents', 'AiAssessmentQueue', 'Notifications', 'Assessments',
+  for (const name of ['CollectionLease', 'CollectionOperations', 'FollowUpReminders', 'ListingActivityEvents', 'AiAssessmentQueue', 'Notifications', 'Assessments',
     'SourceListings', 'Jobs', 'CollectionErrors', 'CollectionTasks', 'CollectionRuns', 'SourceHealth', 'DescriptionRotation', 'SearchProgress'] as const) {
     await cds.run(DELETE.from(db()[name]));
   }

@@ -20,13 +20,13 @@ def network_config() -> tuple[str | None, str | bool]:
     if raw:
         try:
             parsed = urlsplit(raw if "://" in raw else "http://" + raw)
-            if (parsed.scheme not in {"http", "https", "socks5"} or not parsed.hostname or
+            if (parsed.scheme not in {"http", "https"} or not parsed.hostname or
                     not parsed.port or parsed.path not in {"", "/"} or parsed.query or parsed.fragment or
                     re.search(r"\s", raw) or bool(parsed.username) != (parsed.password is not None)):
                 raise ValueError()
             proxy = urlunsplit((parsed.scheme, parsed.netloc, "", "", ""))
         except ValueError:
-            raise ValueError("Invalid JOB_RADAR_PROXY; use [http|https|socks5]://[user:password@]host:port") from None
+            raise ValueError("Invalid JOB_RADAR_PROXY; use [http|https]://[user:password@]host:port (SOCKS is not supported)") from None
     ca = os.environ.get("JOB_RADAR_CA_BUNDLE", "").strip()
     if ca and (not Path(ca).is_file() or not os.access(ca, os.R_OK)):
         raise ValueError("JOB_RADAR_CA_BUNDLE must name a readable trusted PEM certificate bundle")

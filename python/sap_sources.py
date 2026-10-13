@@ -104,7 +104,8 @@ def safe_url(source: str, href: str, base: str | None = None) -> str:
     root = SOURCES[source][0]
     url = urljoin(base or root, href).split("#", 1)[0]
     parsed = urlparse(url)
-    if parsed.scheme != "https" or parsed.hostname != urlparse(root).hostname:
+    if (parsed.scheme != "https" or parsed.hostname != urlparse(root).hostname or
+            parsed.username or parsed.password or parsed.port not in {None, 443}):
         raise ValueError(f"Unexpected {source} job URL")
     return url
 
@@ -229,6 +230,10 @@ def hydrate(source: str, row: dict[str, Any], html: str, description_format: str
     if closure:
         return closure
     row = dict(row)
+    row["title"] = row.get("title") or posting.get("title") or text(soup.select_one("h1"))
+    employer = posting.get("hiringOrganization")
+    if isinstance(employer, dict):
+        row["company"] = row.get("company") or employer.get("name")
     meta: dict[str, str] = {}
     if source == "eursap":
         meta = labels(soup, ".hero__list-name")

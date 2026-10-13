@@ -4,7 +4,9 @@ import { readHealth } from './collector/health.js';
 import { recoverInterruptedRuns } from './collector/lifecycle.js';
 import { connectDb, db, disconnectDb, SELECT, query } from './db/index.js';
 import { loadFixture } from './fixtures/load.js';
-import { collect } from './pipeline/collect.js';
+import { collect, outcomeMessage } from './pipeline/collect.js';
+import { claimCollection, CollectionBusyError, finishOperation, readOperation, startLeaseHeartbeat, updateOperation,
+  type CollectionClaim } from './collector/lease.js';
 import { notify } from './pipeline/notify.js';
 import { rank, readTop } from './pipeline/rank.js';
 import { directionCounters } from './pipeline/coverage.js';
@@ -88,9 +90,10 @@ function fixtureFile(flags: Args['flags']): string | undefined {
   return file ? path.resolve(PROJECT_ROOT, file) : undefined;
 }
 
-async function runCollect(flags: Args['flags']) {
+async function runCollect(flags: Args['flags'], claim?: CollectionClaim) {
   const file = fixtureFile(flags);
   const summary = await collect({
+    claim,
     enrichOnly: Boolean(flags.get('enrich-only')),
     ...(str(flags, 'batch') ? { batchKey: str(flags, 'batch')! } : {}),
     ...(list(flags, 'source') ? { onlySources: list(flags, 'source')! } : {}),
@@ -102,6 +105,7 @@ async function runCollect(flags: Args['flags']) {
 
   out('');
   out(`Collection run ${summary.runId}`);
+  out(`  outcome            : ${summary.outcome}`);
   out(`  batch              : ${summary.batchKey}${file ? ' (offline demo fixture)' : ''}`);
   out(`  listings collected : ${summary.jobsFound}`);
   out(`  new jobs           : ${summary.ingest.created}`);
@@ -153,13 +157,16 @@ function truncatePad(value: string, width: number): string {
   return (clean.length > width ? `${clean.slice(0, width - 1)}\u2026` : clean).padEnd(width);
 }
 
-async function runRank(flags: Args['flags'], jobIds?: string[], includePendingAi = false) {
+async function runRank(flags: Args['flags'], jobIds?: string[], includePendingAi = false, claim?: CollectionClaim) {
   const ranked = await rank({
     jobIds,
     includePendingAi,
     limit: num(flags, 'limit') ?? 20,
     rulesOnly: Boolean(flags.get('rules-only')),
     force: Boolean(flags.get('force')),
+    ...(claim ? { onProgress: async (progress: { assessed: number; aiCalls: number; aiFailures: number }) =>
+      updateOperation(claim, { jobsAssessed: progress.assessed, aiCalls: progress.aiCalls,
+        ...(progress.aiFailures ? { message: 'AI failed; rules fallback saved.' } : {}) }) } : {}),
   });
   printTable(ranked);
   for (const row of ranked.slice(0, 5)) {
@@ -192,8 +199,24 @@ async function runNotify(flags: Args['flags']) {
 }
 
 async function runCycle(flags: Args['flags']) {
-  const collected = await runCollect(flags);
-  await runRank(flags, collected.ingest.jobIds, !fixtureFile(flags));
+  const reservation = await claimCollection('cli-cycle');
+  if (!reservation.acquired) throw new CollectionBusyError(reservation.operationId);
+  const claim = reservation.claim;
+  const stop = startLeaseHeartbeat(claim);
+  try {
+    const collected = await runCollect(flags, claim);
+    await updateOperation(claim, { stage: 'Assessing' });
+    await runRank(flags, collected.ingest.jobIds, !fixtureFile(flags), claim);
+    const operation = await readOperation(claim.operationId);
+    const aiBacklog = (await query(SELECT.from(db().AiAssessmentQueue).where({ status: 'Pending' }))).length;
+    await finishOperation(claim, { stage: collected.outcome === 'Failed' ? 'Error' : 'Finished', outcome: collected.outcome,
+      aiBacklog, aiBudgetExhausted: !flags.get('rules-only') && loadConfig().llmAvailable && aiBacklog > 0 &&
+        (operation?.aiCalls ?? 0) >= Math.min(5, loadConfig().settings.llm.max_jobs_per_run),
+      message: outcomeMessage(collected.outcome) });
+  } catch (error) {
+    await finishOperation(claim, { stage: 'Error', outcome: 'Failed', message: String(error).slice(0, 1900) }).catch(() => undefined);
+    throw error;
+  } finally { await stop(); }
   await runNotify(flags);
 }
 

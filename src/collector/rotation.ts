@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import type { AppConfig } from '../config/index.js';
-import { collectorJobSchema, type TaskOutcome } from './types.js';
+import { collectorJobSchema, type CollectorTask, type TaskOutcome } from './types.js';
 import { assessWithRules, prescreen } from '../matching/rules.js';
 import { cds, db, INSERT, SELECT, UPDATE } from '../db/index.js';
 import { planBatch, type PlanOptions, type PlannedBatch } from './plan.js';
@@ -12,6 +12,7 @@ const stateSchema = z.object({
   lastSource: z.string().nullable(),
   lastTaskBySource: z.record(z.string(), z.string()),
   lastSearchByScope: z.record(z.string(), z.string()).default({}),
+  linkedinPending: z.array(z.custom<CollectorTask>()).default([]),
 });
 
 /** Reserve description slots atomically, before any network calls. */
@@ -26,7 +27,7 @@ export async function reserveBatchPlan(config: AppConfig, options: PlanOptions =
     let previous = existing ? stateSchema.parse(JSON.parse(existing.state)) : undefined;
     if (!previous) {
       // Retain keyword progress from the earlier per-batch state format.
-      previous = { lastSource: null, lastTaskBySource: {}, lastSearchByScope: {} };
+      previous = { lastSource: null, lastTaskBySource: {}, lastSearchByScope: {}, linkedinPending: [] };
       for (const row of await tx.run(SELECT.from(db().DescriptionRotation))) {
         const old = stateSchema.parse(JSON.parse(row.state));
         for (const [source, cursor] of Object.entries(old.lastTaskBySource)) {
@@ -39,9 +40,12 @@ export async function reserveBatchPlan(config: AppConfig, options: PlanOptions =
       if (task.enrich_only) continue;
       const saved = await tx.run(SELECT.one.from(db().SearchProgress).where({ taskKey: task.task_id }));
       const at = options.at ?? new Date();
-      // Leave room for the next scheduled visit: a sweep must not postpone
-      // first-page discovery for an entire freshness window plus one cycle.
-      if (!saved || at.getTime() - new Date(saved.sweepStartedAt).getTime() >= task.hours_old * 3_600_000 / 2) {
+      // Expire abandoned cursors, not ongoing sweeps. A normal visit can be
+      // 108 hours apart; allow two full rotations without observed progress.
+      const rotationHours = config.searches.rotation.interval_hours *
+        (config.searches.rotation.sequence ?? config.searches.rotation.batches).length;
+      const idleHours = Math.max(task.hours_old, rotationHours * 2);
+      if (!saved || at.getTime() - new Date(saved.updatedAt).getTime() >= idleHours * 3_600_000) {
         const values = { state: '{}', sweepStartedAt: at.toISOString(), updatedAt: at.toISOString() };
         await tx.run(saved ? UPDATE(db().SearchProgress).set(values).where({ taskKey: task.task_id })
           : INSERT.into(db().SearchProgress).entries({ taskKey: task.task_id, ...values }));
@@ -126,7 +130,8 @@ async function reserveEnrichment(tx: any, config: AppConfig, plan: PlannedBatch,
 /** Persist completed/streamed search progress, including before a timeout. */
 export async function recordSearchProgress(outcomes: TaskOutcome[], at = new Date()): Promise<void> {
   for (const outcome of outcomes) {
-    if (!outcome.nextCursor) continue;
+    if (!outcome.nextCursor || outcome.status === 'Skipped' ||
+      outcome.status === 'Failed' && outcome.resultCount === 0) continue;
     const previous: any = await cds.run(SELECT.one.from(db().SearchProgress).where({ taskKey: outcome.taskId }));
     const reset = outcome.nextCursor.offset === 0 || (outcome.nextCursor.page === 1 && !outcome.nextCursor.index);
     const values = { state: JSON.stringify(outcome.nextCursor), updatedAt: at.toISOString(),
