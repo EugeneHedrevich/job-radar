@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { loadConfig, PROJECT_ROOT } from '../config/index.js';
 import { collectorJobSchema, listingActivitySchema, type CollectorJob, type ListingActivity } from '../collector/types.js';
-import { claimImportSource, recordOutcomes, releaseImportSource } from '../collector/health.js';
+import { claimImportSource, recordOutcomes, settleSourceRequests } from '../collector/health.js';
 import { cds, db, SELECT, UPDATE } from '../db/index.js';
 import { canonicalizeUrl } from '../util/text.js';
 import { normalizeJob } from '../normalize/index.js';
@@ -14,6 +14,7 @@ import { rank } from '../pipeline/rank.js';
 import { readJob } from './store.js';
 import { ApiError } from './errors.js';
 import type { ImportResult } from './types.js';
+import { vacancyRelevance } from '../matching/relevance.js';
 
 const inputSchema = z.object({ url: z.string().url().max(1000), title: z.string().trim().max(500).optional(),
   description: z.string().trim().max(60_000).optional(), company: z.string().trim().max(500).optional(),
@@ -49,7 +50,7 @@ function importUrl(value: string): { url: string; source: string } {
   return { url: url.href, source };
 }
 
-async function fetchMetadata(source: string, url: string): Promise<ImportMetadata> {
+async function fetchMetadata(source: string, url: string, requestLimit = 3): Promise<ImportMetadata> {
   const unverified = (message: string): ImportMetadata => ({ job: null, activity: null, message });
   if (['manual', 'indeed', 'glassdoor'].includes(source)) return unverified('This URL has no supported public detail adapter. Enter the title and description.');
   const config = loadConfig();
@@ -62,7 +63,7 @@ async function fetchMetadata(source: string, url: string): Promise<ImportMetadat
     let timedOut = false;
     const timer = setTimeout(() => { timedOut = true; child.kill('SIGKILL'); }, 35_000);
     child.stdin.on('error', () => {});
-    child.stdin.end(JSON.stringify({ source, url }));
+    child.stdin.end(JSON.stringify({ source, url, request_limit: requestLimit }));
     child.stdout.on('data', (chunk) => { output += String(chunk); if (output.length > 256_000) child.kill('SIGKILL'); });
     child.stderr.resume();
     child.on('error', () => done(unverified('The local metadata adapter could not start. Enter the title and description.')));
@@ -76,27 +77,30 @@ async function fetchMetadata(source: string, url: string): Promise<ImportMetadat
   });
 }
 
-async function lookupWithHealth(source: string, url: string, lookup: (source: string, url: string) => Promise<ImportMetadata>): Promise<ImportMetadata> {
+async function lookupWithHealth(source: string, url: string, lookup: (source: string, url: string, requestLimit: number) => Promise<ImportMetadata>): Promise<ImportMetadata> {
   const config = loadConfig();
   if (['manual', 'indeed', 'glassdoor'].includes(source) || !config.searches.sources[source]?.enabled)
     return { job: null, activity: null, message: 'No enabled public detail adapter. Enter the title and description.' };
   const claim = await claimImportSource(source);
   if (!claim.token) return { job: null, activity: null, message: claim.reason!, requests: 0 };
   const startedAt = new Date();
+  let used: number | undefined;
   try {
     let metadata: ImportMetadata;
-    try { metadata = metadataSchema.parse(await lookup(source, url)); }
+    try { metadata = metadataSchema.parse(await lookup(source, url, claim.detailLimit)); }
     catch (error) { metadata = { job: null, activity: null, message: String(error).slice(0, 1000),
       failure: { kind: 'error', message: String(error).slice(0, 1000) } }; }
+    used = metadata.requests ?? undefined;
     if (metadata.failure || metadata.activity) {
       await recordOutcomes(config, [{ taskId: `import:${claim.token}`, source, searchTerm: '', location: undefined,
         countryIndeed: undefined, status: metadata.failure ? 'Failed' : 'Succeeded', resultCount: metadata.job ? 1 : 0,
         durationMs: Date.now() - startedAt.getTime(), errorKind: metadata.failure?.kind,
         message: metadata.failure?.message, retryAfterSeconds: metadata.failure?.retryAfterSeconds,
+        httpStatus: metadata.failure?.httpStatus,
         detailRequests: metadata.requests ?? undefined }], new Date(), startedAt);
     }
     return metadata;
-  } finally { await releaseImportSource(source, claim.token); }
+  } finally { await settleSourceRequests(source, claim.token, 0, used); }
 }
 
 async function canonicalMatch(urls: string[], connection: any = cds): Promise<string | undefined> {
@@ -108,7 +112,7 @@ async function canonicalMatch(urls: string[], connection: any = cds): Promise<st
 
 /** Network lookup precedes a short atomic duplicate check and ingestion. */
 export async function importVacancy(input: unknown,
-  lookup: (source: string, url: string) => Promise<ImportMetadata> = fetchMetadata): Promise<ImportResult> {
+  lookup: (source: string, url: string, requestLimit: number) => Promise<ImportMetadata> = fetchMetadata): Promise<ImportResult> {
   const parsed = inputSchema.safeParse(input);
   if (!parsed.success) throw new ApiError(400, 'Provide a valid URL and bounded vacancy details');
   const fields = parsed.data;
@@ -135,6 +139,7 @@ export async function importVacancy(input: unknown,
   }
   const normalized = normalizeJob(record, target.source);
   if (!normalized) throw new ApiError(400, 'A title and vacancy URL are required');
+  const relevance = vacancyRelevance(loadConfig(), normalized);
   const saved = await cds.tx(async (tx: any) => {
     await tx.run('UPDATE sap_jobradar_Jobs SET ID = ID WHERE 0 = 1');
     const existing = await canonicalMatch([fields.url, target.url, normalized.listing.canonicalUrl], tx);
@@ -151,11 +156,17 @@ export async function importVacancy(input: unknown,
   // collection's shared five-call allowance, never a per-import extra allowance.
   await rank({ jobIds: [saved.id], rulesOnly: true });
   return { result: saved.added ? 'Added' : 'Already tracked', availability, failure: metadata.failure,
-    job: await readJob(saved.id), message: saved.added ? metadata.message : 'This vacancy is already in your radar.' };
+    job: await readJob(saved.id), message: `${saved.added ? metadata.message : 'This vacancy is already in your radar.'}${
+      !relevance.accepted ? ` Relevance warning: ${relevance.reason}. Saved because you added it manually.` : ''}` };
 }
 
 async function alreadyTracked(id: string): Promise<ImportResult> {
-  const job = await readJob(id);
+  let job = await readJob(id);
+  if (!job.manuallyImportedAt) {
+    await cds.run(UPDATE(db().Jobs).set({ manuallyImportedAt: new Date().toISOString() }).where({ ID: id, manuallyImportedAt: null }));
+    job = await readJob(id);
+  }
+  const relevance = vacancyRelevance(loadConfig(), job);
   return { result: 'Already tracked', job, availability: job.activity === 'Unknown' ? 'Could not verify' : job.activity,
-    message: 'This vacancy is already in your radar.' };
+    message: `This vacancy is already in your radar.${!relevance.accepted ? ` Relevance warning: ${relevance.reason}. Kept accessible because you selected it manually.` : ''}` };
 }

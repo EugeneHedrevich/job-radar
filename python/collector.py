@@ -489,7 +489,8 @@ def main() -> int:
             failure = paused_sources[task["source"]]
             emit({"type": "task_result", "task_id": task["task_id"], "source": task["source"],
                   "status": "skipped", "count": 0,
-                  "duration_ms": 0, "message": f"source paused after {failure['message']}"[:1900]})
+                  "duration_ms": 0, "search_requests": 0, "detail_requests": 0,
+                  "message": f"source paused after {failure['message']}"[:1900]})
             continue
         if index > 0 and delay_seconds > 0:
             time.sleep(delay_seconds)

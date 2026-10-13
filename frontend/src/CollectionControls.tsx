@@ -57,6 +57,9 @@ export function CollectionProgress({ operation, error, children }: {
     Failed: 'Collection failed', NoSources: 'No sources available', Running: 'Collecting',
   }[operation.outcome] : 'Collection unavailable';
   const counts = operation && <>
+    {operation.jobsAccepted != null && <p className="small">{operation.jobsFound} received · {operation.jobsAccepted} accepted · {operation.jobsFiltered ?? 0} filtered
+      {operation.jobsFound - operation.jobsAccepted - (operation.jobsFiltered ?? 0) > 0 ? ` · ${operation.jobsFound - operation.jobsAccepted - (operation.jobsFiltered ?? 0)} unusable` : ''}</p>}
+    {Object.entries(operation.exclusionReasons ?? {}).map(([reason, count]) => <p className="muted small" key={reason}>{count} filtered: {reason}</p>)}
     <p className="small progress-counts">{operation.tasksDone}/{operation.tasksTotal} tasks reported · {operation.jobsFound} records found · {operation.jobsNew} new jobs · {operation.jobsUpdated} updated jobs</p>
     {operation.cachedAssessments !== null && operation.cachedAssessments !== undefined ? <p className="small">
       {operation.cachedAssessments} cached assessments · {operation.rulesAssessments ?? 0} new rules assessments ·
@@ -73,6 +76,7 @@ export function CollectionProgress({ operation, error, children }: {
   if (!running) return <section aria-label="Collection result" aria-live="polite">
     <details className="progress-panel terminal-result" key={operation?.ID}>
       <summary><strong>{title}</strong>{operation && <span className="muted small"> · {operation.jobsNew} new / {operation.jobsUpdated} updated
+        {operation.jobsFiltered ? ` · ${operation.jobsFiltered} filtered` : ''}
         {operation.aiFailures ? ` · ${operation.aiFailures} AI failures` : ''}
         {operation.aiBacklog ? ` · ${operation.aiBacklog} AI queued` : ''}</span>}</summary>
       <div className="terminal-diagnostics">{counts}{children}</div>

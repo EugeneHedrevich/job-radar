@@ -6,7 +6,7 @@
 # The output is a FIT SCORE (0-100): how well the vacancy matches the profile.
 # It is NOT a probability of being hired.
 
-version: "2026-10-10.4"
+version: "2026-10-13.2"
 
 # Final score = sum(dimension score x weight). Weights must sum to 1.0.
 weights:
@@ -183,6 +183,30 @@ prescreen:
     - "cloud"
     - "joule"
 
+# Applies before NEW automatic records are saved, and to the default saved view.
+# These are role families, not generic words such as CAP, AI or cloud.
+relevance:
+  target_role_families:
+    cap: ['\bsap\s+(?:capm?|cloud application programming model)\b', '\bcloud application programming model\b']
+    ui5: ['\b(?:sap\s*ui5|ui5|openui5|fiori(?: elements)?)\b']
+    btp: ['\b(?:sap\s+btp|business technology platform)\b']
+    ai: ['\b(?:sap\s+(?:joule|business ai|ai core|ai (?:developer|architect|engineer)|generative ai hub)|joule(?: studio)?)\b']
+    integration: ['\b(?:sap\s+(?:cpi|hci|integration (?:suite|expert|developer|architect|engineer|specialist))|cloud platform integration|integration suite)\b']
+  hard_title_exclusions:
+    Internship, student or apprenticeship:
+      - '\b(?:intern(?:ship)?|working[- ]student|student assistant|werkstudent\w*|praktik\w*|auszubild\w*|apprentice\w*)\b'
+    Unrelated finance, sales or administration:
+      - '\b(?:recruiter|account executive|sales (?:manager|executive)|financial (?:controller|analyst)|accountant|buchhalter\w*|finance manager|administrative assistant|office administrator)\b'
+      - '\b(?:finance|financial|administrative)\s+(?:administrator|assistant|officer|specialist)\b'
+      - '\b(?:finance|financial|fi/co|fi[- ]co)\s+(?:functional\s+)?consultant\b'
+
+# These technologies are not claimed absent: requirements need profile confirmation.
+# Keep aliases here so a known CPI skill in the same sentence cannot hide them.
+requirement_capabilities:
+  Commerce Cloud: ['SAP Commerce Cloud', 'Commerce Cloud', 'Hybris']
+  Salesforce: ['Salesforce', 'Salesforce CRM']
+  EDI: ['EDI', 'Electronic Data Interchange', 'EDIFACT']
+
 # Phrases used to detect contract vs permanent and remote vs onsite when the
 # structured fields from the source are missing.
 signals:
@@ -190,7 +214,9 @@ signals:
     - "freelance"
     - "freelancer"
     - "contract(or|ing)?\\b"
-    - "b2b"
+    - '\bb2b\s+(?:contract|engagement|employment|cooperation|basis|agreement)\b'
+    - '\b(?:on|via|under)\s+(?:a\s+)?b2b\b'
+    - '\b(?:contract type|employment|engagement|umowa|cooperation)\s*:?\s*b2b\b'
     - "interim"
     - "self[- ]employed"
     - "day rate"
@@ -200,9 +226,9 @@ signals:
     - "werkvertrag"
     - "outside ir35"
   permanent:
-    - "permanent"
+    - '\bpermanent\s+(?:position|role|contract|employment|job|employee)\b'
     - "festanstellung"
-    - "unbefristet"
+    - '\bunbefristet\w*\b'
     - "full[- ]time employee"
     - "cdi\\b"
     - "payroll"
@@ -219,6 +245,18 @@ signals:
     - "hybrid"
     - "\\d\\s*days? (a|per) week (in (the )?office|on[- ]?site)"
     - "partially remote"
+    - '\b(?:hybrides? arbeiten|teilweise (?:remote|homeoffice))\b'
+  homeoffice:
+    - '\b(?:homeoffice|home[- ]office|mobil\w* arbeiten|mobile[- ]working|remote[- ]working)\b'
+  remote_weekly_limits:
+    - '(?:max\.?|maximal|bis zu|hochstens)\s*(\d+(?:\.\d+)?)\s*tage?\s*(?:pro|je|/)\s*woche\b'
+    - '(?:maximum|max\.?|at most|up to)\s*(\d+(?:\.\d+)?)\s*days?\s*(?:per|a|/)\s*week\b'
+  technical_contract_context:
+    - '\b(?:integrat\w*|edi|a2a|b2g|interface\w*|schnittstell\w*|kunden|lieferanten|customer|supplier|smart contract\w*)\b'
+  employment_context:
+    - '\b(?:employment|engagement|freelanc\w*|contractor|day rate|hourly rate|tagessatz|vergutung|anstellung|arbeitsvertrag|cooperation|basis)\b'
+  employment_alternatives:
+    - '\b(?:permanent\s*(?:employment|roles?|positions?)?\s*(?:or|oder|/)\s*(?:contract|freelance)|(?:contract|freelance)\s*(?:or|oder|/)\s*permanent)\b'
   onsite:
     - "on[- ]?site"
     - "vor ort"
@@ -250,6 +288,7 @@ signals:
     - "^(?:key )?responsibilities (?:&|and) requirements$"
     - "^(?:profil kandydata|(?:nasze )?wymagania|oczekiwania)$"
     - "^(?:profil|(?:dein|ihr) profil|anforderungen|qualifikationen)$"
+    - '^(?:das bringst du mit|was du mitbringst|das zeichnet dich aus|deine qualifikationen)$'
     - "^(?:profil recherche|votre profil|jouw profiel|functie-eisen)$"
   preferred_sections:
     - "^(?:nice to have|preferred (?:skills|qualifications)|desirable skills)$"
@@ -258,6 +297,7 @@ signals:
     - "^(?:responsibilities|(?:your |the )?role|job description|about (?:us|the (?:company|client))|(?:what )?we offer|benefits)$"
     - "^(?:opis stanowiska|zakres obowiazkow|o naszym kliencie|oferujemy)$"
     - "^(?:aufgaben|(?:deine|ihre) aufgaben|wir bieten|vorteile)$"
+    - '^(?:was dich erwartet|das bieten wir dir|deine aufgaben bei uns im team|dein ansprechpartner)$'
     - "^(?:missions|vos missions|nous offrons|avantages|aanbod|wij bieden)$"
 
 # Countries considered inside the preferred working region.

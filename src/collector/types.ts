@@ -101,6 +101,7 @@ export interface CollectorTask {
 }
 
 export interface TaskOutcome {
+  httpStatus?: number;
   taskId: string;
   source: string;
   searchTerm: string;

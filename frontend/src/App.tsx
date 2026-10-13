@@ -66,6 +66,7 @@ function Fit({ job }: { job: JobSummary }) {
       {job.fitScore !== null && <small>/100</small>}</strong>
     {job.recommendation && <Badge value={job.recommendation} />}
     <span className="muted small" title={assessmentLabels[job.assessmentState]}>{job.aiPending ? 'Rules · AI queued' : compactAssessmentLabels[job.assessmentState]}</span>
+    {job.mainBlockers?.slice(0, 2).map((reason) => <span className="warning small" key={reason}>{reason}</span>)}
   </div>;
 }
 
@@ -103,12 +104,16 @@ function CollectionArea({ data, loading, error, retry }: {
         <strong>{sourceLabel(source.source)}</strong><span>{source.lastStatus ?? 'Unknown'} · {source.consecutiveFailures} consecutive failures{source.blocked ? ' · Blocked' : ''}</span>
         {source.cooldownUntil && <span className="small">Cooldown {new Date(source.cooldownUntil).getTime() > Date.now() ? 'until' : 'ended'} {date(source.cooldownUntil, true)}</span>}
         {source.lastMessage && <span className="muted small">{source.lastMessage}</span>}
+        {source.source === 'linkedin' && <span className="small">Shared window: {source.searchRequests} search / {source.detailRequests} detail requests
+          {source.reservedSearch + source.reservedDetail > 0 ? ` · ${source.reservedSearch + source.reservedDetail} reserved` : ''}
+          {source.lastHttpStatus ? ` · Last HTTP ${source.lastHttpStatus}` : ''}
+          {source.lastRetryAfterSeconds != null ? ` · Retry-After ${source.lastRetryAfterSeconds}s` : ''}</span>}
       </div>)}</div> : <p className="muted small">No stored source health yet.</p>}
       {run?.errors.map((error, index) => <p className="warning small" key={index}>{error.source ?? 'Collection'} · {error.kind}: {error.message}</p>)}
       {data?.linkedinCoverage && <p className="muted small">LinkedIn: {data.linkedinCoverage.combinations} configured combinations ·
         up to {data.linkedinCoverage.slotsPerSequence} slots per {data.linkedinCoverage.sequenceHours} hours before cooldowns ·
         {data.linkedinCoverage.checkedWithinWindow}/{data.linkedinCoverage.combinations} had first-page checks in the last {data.linkedinCoverage.freshnessHours} hours.
-        A single sequence cannot cover every combination.</p>}
+        {data.linkedinCoverage.combinations > data.linkedinCoverage.slotsPerSequence ? ' A single sequence cannot cover every combination.' : ' Shared limits and cooldowns can reduce these slots.'}</p>}
       </div>
     </details>
   </section>;
@@ -116,7 +121,7 @@ function CollectionArea({ data, loading, error, retry }: {
 
 function AssessmentView({ assessment }: { assessment: SavedAssessment }) {
   return <div className="assessment-view">
-    <div className="assessment-heading"><strong>{assessment.fitScore ?? '—'}{assessment.fitScore !== null ? '/100 fit score' : ' Score missing'}</strong>
+    <div className="assessment-heading"><strong>{assessment.fitScore ?? '—'}{assessment.fitScore !== null ? '/100 suitability' : ' Score missing'}</strong>
       {assessment.recommendation && <Badge value={assessment.recommendation} />}</div>
     <p className="explanation">{assessment.explanation || 'No explanation saved.'}</p>
     {assessment.kind === 'ai-fallback' && <p className="warning small">
@@ -125,6 +130,7 @@ function AssessmentView({ assessment }: { assessment: SavedAssessment }) {
     {assessment.hardReject && <p className="warning">Hard rejection: {assessment.hardRejectReason ?? 'See mandatory gaps.'}</p>}
     <dl className="facts"><div><dt>Suggested CV variant</dt><dd>{assessment.suggestedCvVariant ?? 'Not suggested'}</dd></div></dl>
     <details><summary>Assessment details & evidence</summary>
+    <p className="small">Technical fit: {assessment.technicalFit}/100 · Employment: {assessment.commercialFit}/100 · Location/work mode: {assessment.locationFit}/100</p>
     <p className="muted small">{assessmentLabels[assessment.kind]} · {date(assessment.createdAt, true)}
       {assessment.model ? ` · ${assessment.model}` : ''} · Profile {assessment.profileVersion ?? 'Unknown'}</p>
     {([
@@ -252,7 +258,7 @@ function VacancyDetail({ job, conversion, onSaved, onDirty, onBusy, onAssessment
     </section>
     <details className="detail-section"><summary>Vacancy facts & dates</summary><dl className="facts">
       <div><dt>Contract type</dt><dd>{job.jobType ?? 'Not stated'}</dd></div><div><dt>Salary</dt><dd><Salary job={job} conversion={conversion} /></dd></div>
-      <div><dt>Work format</dt><dd>{job.isRemote === null ? 'Not stated' : job.isRemote ? 'Remote' : 'Not remote'}</dd></div>
+      <div><dt>Work format</dt><dd>{{ fully_remote: 'Fully remote', hybrid: 'Hybrid / limited remote work', onsite: 'Onsite', unknown: 'Could not establish from the description' }[job.workMode]}</dd></div>
       <div><dt>Published</dt><dd>{date(job.datePosted)}</dd></div><div><dt>First fetched</dt><dd>{date(job.firstSeenAt, true)}</dd></div>
       <div><dt>Last seen</dt><dd>{date(job.lastSeenAt, true)}</dd></div>
     </dl></details>
@@ -346,6 +352,7 @@ export default function App() {
   const data = list.data;
   const updating = list.loading || search !== filters.q || validScore && scoreInput !== filters.minScore;
   const hasFilters = Boolean(search || scoreInput || filters.sources.length || filters.status || filters.activity);
+  const linkedin = diagnostics.data?.sources.find((source) => source.source === 'linkedin');
   return <div className="app">
     <header className="app-header"><div className="brand"><div className="radar-mark"><RadarMark /></div><strong>Job Radar</strong></div>
       <span className="workspace-label">Personal · Local</span></header>
@@ -357,6 +364,9 @@ export default function App() {
           <button onClick={() => { if (guard()) setAddOpen(true); }} disabled={saving}>Add vacancy</button></div>
       </div>
       {notice && <div className="notice" role="status">{notice}<button className="text-button" onClick={() => setNotice(null)} aria-label="Dismiss import result">×</button></div>}
+      {linkedin?.cooldownUntil && new Date(linkedin.cooldownUntil).getTime() > Date.now() && <p className="warning small">
+        LinkedIn paused until {date(linkedin.cooldownUntil, true)} · {linkedin.lastMessage ?? linkedin.lastStatus}
+        {' '}· {linkedin.searchRequests} search / {linkedin.detailRequests} detail requests in the shared window.</p>}
       <CollectionProgress operation={collection.operation} error={collection.error}>
         <CollectionArea data={diagnostics.data} loading={diagnostics.loading} error={diagnostics.error} retry={refresh} />
         <button className="text-button" onClick={refresh}>Refresh saved data</button>
@@ -397,7 +407,7 @@ export default function App() {
             <tbody>{data.items.map((job) => <tr key={job.ID} className={job.activity === 'Closed' ? 'closed-row' : job.cvSent ? 'cv-sent-row' : ''}>
               <td className="vacancy-cell"><button className="job-title" onClick={() => select(job.ID)}>{job.title}</button>
                 <div className="company">{job.company ?? 'Company not stated'}{job.isDemo && <span className="demo">Demo</span>}</div>
-                <div className="vacancy-meta">{job.isRemote ? 'Remote · ' : ''}{job.location ?? 'Location not stated'}
+                <div className="vacancy-meta">{job.workMode === 'fully_remote' ? 'Fully remote · ' : job.workMode === 'hybrid' ? 'Hybrid · ' : ''}{job.location ?? 'Location not stated'}
                   {(job.salaryMin !== null || job.salaryMax !== null) && <> · <Salary job={job} conversion={conversion} /></>}
                   {job.activity === 'Closed' && ' · Closed'}{job.manuallyImportedAt && ' · Added manually'}</div></td>
               <td><Fit job={job} /></td><td><Badge value={job.status} />{job.cvSent && <div className="muted small tracking-indicator">✓ CV sent</div>}

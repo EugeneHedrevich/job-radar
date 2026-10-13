@@ -22,7 +22,7 @@ it('collects, deduplicates, caches and previews an offline demo cycle safely', a
     expect(loadConfig().llmAvailable).toBe(false);
     const fixture = loadFixture(path.join(PROJECT_ROOT, 'fixtures', 'demo-jobs.jsonl'));
     const first = await collect({ fixture });
-    expect(first.ingest).toMatchObject({ created: 6, mergedAcrossSources: 1 });
+    expect(first.ingest).toMatchObject({ created: 4, mergedAcrossSources: 1, accepted: 5, filtered: 2 });
     const ranked = await rank({ rulesOnly: true });
     const client = reviewSender();
     expect((await notify({ client, dryRun: true })).sent).toBeGreaterThan(0);
@@ -35,6 +35,6 @@ it('collects, deduplicates, caches and previews an offline demo cycle safely', a
     for (const entry of ranked.filter((row) => row.assessment.hardReject)) {
         expect(notifications.map((row) => row.job_ID)).not.toContain(entry.job.ID);
     }
-    expect(await query(SELECT.from(db().Jobs))).toHaveLength(6);
+    expect(await query(SELECT.from(db().Jobs))).toHaveLength(4);
     expect((await query<any>(SELECT.from(db().CollectionRuns))).every((run) => run.status === 'Completed' && run.finishedAt)).toBe(true);
 });

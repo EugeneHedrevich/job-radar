@@ -3,6 +3,8 @@ import { cds, db, SELECT, INSERT, UPDATE } from '../db/index.js';
 import type { NormalizedJob } from '../normalize/index.js';
 import { normalizeText, tokenSimilarity } from '../util/text.js';
 import { log } from '../util/log.js';
+import { loadConfig } from '../config/index.js';
+import { vacancyRelevance } from '../matching/relevance.js';
 
 export interface IngestResult {
   created: number;
@@ -12,6 +14,9 @@ export interface IngestResult {
   jobIds: string[];
   newJobIds: string[];
   updatedJobIds: string[];
+  accepted: number;
+  filtered: number;
+  exclusionReasons: Record<string, number>;
 }
 
 export interface JobRow {
@@ -48,7 +53,7 @@ export const DEDUPE = {
 
 export async function ingestJobs(
   normalized: NormalizedJob[],
-  context: { runId: string | null; seenAt?: Date; demo?: boolean; connection?: any },
+  context: { runId: string | null; seenAt?: Date; demo?: boolean; connection?: any; automatic?: boolean },
 ): Promise<IngestResult> {
   if (context.connection) return ingestWithin(normalized, context, context.connection);
   return cds.tx(async (tx: any) => {
@@ -58,7 +63,7 @@ export async function ingestJobs(
 }
 
 async function ingestWithin(normalized: NormalizedJob[],
-  context: { runId: string | null; seenAt?: Date; demo?: boolean }, connection: any): Promise<IngestResult> {
+  context: { runId: string | null; seenAt?: Date; demo?: boolean; automatic?: boolean }, connection: any): Promise<IngestResult> {
   const seenAt = (context.seenAt ?? new Date()).toISOString();
   const result: IngestResult = {
     created: 0,
@@ -68,13 +73,18 @@ async function ingestWithin(normalized: NormalizedJob[],
     jobIds: [],
     newJobIds: [],
     updatedJobIds: [],
+    accepted: normalized.length,
+    filtered: 0,
+    exclusionReasons: {},
   };
 
   // Guard against the same listing appearing twice inside one collection run
   // (e.g. two keywords returning the same vacancy).
   const combined = new Map<string, NormalizedJob>();
+  const occurrences = new Map<string, number>();
   for (const job of normalized) {
     const key = `${job.listing.source}|${job.listing.sourceJobId ?? job.listing.canonicalUrl}`;
+    occurrences.set(key, (occurrences.get(key) ?? 0) + 1);
     const previous = combined.get(key);
     if (!previous) { combined.set(key, job); continue; }
     // A later search or retry may have retrieved the description. Missing
@@ -94,7 +104,7 @@ async function ingestWithin(normalized: NormalizedJob[],
     combined.set(key, merged);
   }
 
-  for (const job of combined.values()) {
+  for (const [key, job] of combined) {
 
     const existingListing = await findListing(job, connection);
     if (existingListing) {
@@ -112,6 +122,16 @@ async function ingestWithin(normalized: NormalizedJob[],
       result.mergedAcrossSources += 1;
       result.updatedJobIds.push(duplicate.ID);
       result.jobIds.push(duplicate.ID);
+      continue;
+    }
+
+    // Existing listings and cross-source matches were handled first, preserving their history.
+    const relevance = context.automatic ? vacancyRelevance(loadConfig(), job) : null;
+    if (relevance && !relevance.accepted) {
+      const count = occurrences.get(key)!;
+      result.filtered += count;
+      result.accepted -= count;
+      result.exclusionReasons[relevance.reason!] = (result.exclusionReasons[relevance.reason!] ?? 0) + count;
       continue;
     }
 

@@ -3,7 +3,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vites
 import { loadConfig, resetConfigCache } from '../src/config/index.js';
 import { cds, connectDb, db, disconnectDb, INSERT, query, queryOne, SELECT, UPDATE } from '../src/db/index.js';
 import { listJobs, readCollectionStatus, readJob, updateTracking } from '../src/dashboard/store.js';
-import { assessmentCacheKey, findCurrentAssessment, rank } from '../src/pipeline/rank.js';
+import { assessmentCacheKey, findCurrentAssessment, rank, refreshDeterministicAssessments } from '../src/pipeline/rank.js';
 import { closeTempDb, resetTestDb, useTempDb } from './helpers/db.js';
 import { ingestReview, reviewRecord } from './helpers/review.js';
 
@@ -23,6 +23,22 @@ async function storedJob() {
 }
 
 describe('personal dashboard stored data', () => {
+  it('refreshes obsolete deterministic results locally and hides irrelevant untracked records without deleting history', async () => {
+    const id = (await ingestReview({ title: 'SAP Integration Expert',
+      description: 'Das bringst du mit:\nGute Deutsch- und Englischkenntnisse.\nWas dich erwartet:\nUnbefristete Anstellung. Homeoffice (max. 2 Tage pro Woche).' })).jobIds[0]!;
+    await updateTracking(id, { personalNotes: 'Keep the application', cvSent: true, cvSentAt: '2026-10-01T10:00:00Z' });
+    await rank({ rulesOnly: true });
+    const old = await queryOne<any>(SELECT.from(db().Assessments).where({ job_ID: id }));
+    await cds.run(UPDATE(db().Assessments).set({ cacheKey: 'obsolete-logic', fitScore: 80, recommendation: 'Apply',
+      explanation: 'Earlier rules fallback' }).where({ ID: old.ID }));
+    await ingestReview({ id: 'legacy-finance', company: 'Other', title: 'Finance Administrator', job_url: 'https://www.linkedin.com/jobs/view/787878' });
+    await refreshDeterministicAssessments();
+    expect(await readJob(id)).toMatchObject({ recommendation: 'Skip', fitScore: loadConfig().scoring.hard_rejects.score_cap,
+      personalNotes: 'Keep the application', cvSent: true, assessmentHistory: [expect.objectContaining({ ID: old.ID, fitScore: 80 })] });
+    expect(await query(SELECT.from(db().Jobs))).toHaveLength(2);
+    expect((await listJobs()).items.map((job) => job.ID)).toEqual([id]);
+    expect(fetch).not.toHaveBeenCalled();
+  });
   it('includes older, low-score, closed and unassessed jobs, with filters and stable pagination', async () => {
     const job = await storedJob();
     await rank({ rulesOnly: true });
@@ -155,7 +171,7 @@ describe('personal dashboard stored data', () => {
   });
 
   it('returns stored latest collection counts, errors and cooldowns without recovery or external calls', async () => {
-    expect(await readCollectionStatus()).toMatchObject({ latestRun: null, sources: [], linkedinCoverage: { combinations: 98, slotsPerSequence: 66, checkedWithinWindow: 0 } });
+    expect(await readCollectionStatus()).toMatchObject({ latestRun: null, sources: [], linkedinCoverage: { combinations: 91, slotsPerSequence: 66, checkedWithinWindow: 0 } });
     const runId = randomUUID();
     await cds.run(INSERT.into(db().CollectionRuns).entries([
       { ID: randomUUID(), startedAt: '2000-01-01T00:00:00.000Z', batchKey: 'older', status: 'Completed' },

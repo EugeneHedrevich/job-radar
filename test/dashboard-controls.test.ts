@@ -11,7 +11,7 @@ import { listJobs, readJob, updateTracking } from '../src/dashboard/store.js';
 import { collect } from '../src/pipeline/collect.js';
 import { withCollectionOperation } from '../src/pipeline/collection-operation.js';
 import { rank } from '../src/pipeline/rank.js';
-import { recordOutcomes } from '../src/collector/health.js';
+import { claimSourceRequests, recordOutcomes, settleSourceRequests } from '../src/collector/health.js';
 import { closeTempDb, resetTestDb, useTempDb } from './helpers/db.js';
 import { enableReviewAi, ingestReview, reviewRecord } from './helpers/review.js';
 import { startTestWorker, type TestWorker } from './helpers/worker.js';
@@ -78,6 +78,7 @@ describe('local dashboard controls', () => {
       .toMatchObject({ availability: 'Could not verify', failure: { httpStatus: status, retryAfterSeconds: delay } });
     await disconnectDb(); await connectDb(file);
     const health = await queryOne<any>(SELECT.from(db().SourceHealth).where({ source: 'linkedin' }));
+    expect(health).toMatchObject({ detailRequests: 1, reservedDetail: 0, lastHttpStatus: status, lastRetryAfterSeconds: delay });
     expect(new Date(health.cooldownUntil).getTime()).toBeGreaterThanOrEqual(Date.now() + (delay - 10) * 1000);
     // A success from an older in-flight collection cannot clear the newer import failure.
     await recordOutcomes(loadConfig(), [{ taskId: 'older', source: 'linkedin', searchTerm: 'SAP',
@@ -90,6 +91,51 @@ describe('local dashboard controls', () => {
       .toMatchObject({ availability: 'Could not verify', message: expect.stringContaining('cooldown') });
     expect(lookup).toHaveBeenCalledTimes(1);
     expect((await queryOne<any>(SELECT.from(db().SourceHealth).where({ source: 'linkedin' }))).cooldownUntil).toBe(health.cooldownUntil);
+    await cds.run(UPDATE(db().SourceHealth).set({ cooldownUntil: '2000-01-01T00:00:00Z', windowStartedAt: '2000-01-01T00:00:00Z' }).where({ source: 'linkedin' }));
+    await importVacancy({ url: 'https://www.linkedin.com/jobs/view/667788' }, lookup);
+    expect(lookup).toHaveBeenLastCalledWith('linkedin', expect.any(String), 1); // One bounded recovery request.
+    expect((await queryOne<any>(SELECT.from(db().SourceHealth).where({ source: 'linkedin' }))).detailRequests).toBe(1);
+    await importVacancy({ url: 'https://www.linkedin.com/jobs/view/778899' }, lookup);
+    expect(lookup).toHaveBeenCalledTimes(2); // Another 429/403 reopens the shared cooldown.
+  });
+
+  it('shares persistent LinkedIn allowances between collection/CLI claims and imports', async () => {
+    const allowance = await claimSourceRequests('linkedin', 6, 5);
+    if (!allowance.token) throw new Error('Expected request claim');
+    const lookup = vi.fn(async (): Promise<ImportMetadata> => { throw new Error('Must not perform another request'); });
+    await importVacancy({ url: 'https://www.linkedin.com/jobs/view/112233' }, lookup);
+    expect(lookup).not.toHaveBeenCalled(); // Shared source lease while collection is running.
+    await settleSourceRequests('linkedin', allowance.token, 6, 5);
+    await disconnectDb(); await connectDb(file);
+    expect((await collect({ onlySources: ['linkedin'] })).outcome).toBe('NoSources');
+    await importVacancy({ url: 'https://www.linkedin.com/jobs/view/223355' }, lookup);
+    expect(lookup).not.toHaveBeenCalled();
+    expect(runCollector).not.toHaveBeenCalled();
+    expect(await claimSourceRequests('linkedin', 6, 5)).toMatchObject({ searchLimit: 0, detailLimit: 0 });
+  });
+
+  it('filters new internships despite target keywords, while preserving listing updates and personal history', async () => {
+    const original = { ...reviewRecord, id: 'old-intern', title: 'Working student SAP CAP Developer', job_url: 'https://www.linkedin.com/jobs/view/889900' };
+    const id = (await ingestReview(original)).jobIds[0]!;
+    await updateTracking(id, { personalNotes: 'Deliberately tracked', cvSent: true, cvSentAt: '2026-10-01T10:00:00Z' });
+    const fixture = [original,
+      ...['SAP BTP Internship', 'Werkstudent SAP Fiori', 'Finance Administrator SAP CAP'].map((title, index) => ({
+        ...reviewRecord, id: `exclude-${index}`, company: `Excluded ${index}`, title,
+        job_url: `https://www.linkedin.com/jobs/view/${990000 + index}`,
+      })),
+      { ...reviewRecord, id: 'finance-process', company: 'Target', title: 'SAP CAP Developer for Finance Processes',
+        description: null, job_url: 'https://www.linkedin.com/jobs/view/991100' },
+    ].map((job) => ({ job, taskId: 'offline', source: 'linkedin' }));
+    const collected = await collect({ fixture });
+    expect(collected.ingest).toMatchObject({ created: 1, accepted: 2, filtered: 3 });
+    await rank({ rulesOnly: true });
+    expect(await readJob(id)).toMatchObject({ personalNotes: 'Deliberately tracked', cvSent: true });
+    expect(await listReminders(id)).toHaveLength(1);
+    expect(await query(SELECT.from(db().Jobs))).toHaveLength(2);
+    expect(await query(SELECT.from(db().AiAssessmentQueue))).toHaveLength(0);
+    expect((await listJobs()).total).toBe(2); // The personally tracked legacy record remains accessible.
+    const deliberate = await importVacancy({ url: 'https://example.com/student-role', title: 'SAP BTP Internship', description: 'SAP BTP and CAP internship.' });
+    expect(deliberate).toMatchObject({ result: 'Added', message: expect.stringContaining('Relevance warning') });
   });
 
   it('keeps separate assessment counts and provider errors through shared operation finalisation', async () => {

@@ -96,6 +96,7 @@ export function planBatch(config: AppConfig, options: PlanOptions = {}): Planned
 
     const tasks: CollectorTask[] = [];
     for (const geoId of geoIds) {
+      if (sourceConfig.queries?.geos && !sourceConfig.queries.geos.includes(geoId)) continue;
       const geo = sourceConfig.geos[geoId];
       if (!geo) continue;
       for (const keyword of batch.keywords) {
@@ -229,21 +230,37 @@ function slug(value: string): string {
 
 function makeTask(config: AppConfig, batchKey: string, source: string, geoId: string, keyword: string, options: PlanOptions = {}): CollectorTask {
   const searches = config.searches, settings = searches.sources[source]!, geo = settings.geos[geoId]!;
-  return { task_id: `${batchKey}:${source}:${geoId}:${slug(keyword)}`, source, search_term: keyword,
+  const query = settings.queries;
+  const supportsFilters = ['linkedin', 'indeed'].includes(source);
+  return { task_id: `${batchKey}:${source}:${geoId}:${slug(keyword)}`, source, search_term: sourceQuery(config, source, keyword),
     ...(geo.location ? { location: geo.location } : {}), ...(geo.country_indeed ? { country_indeed: geo.country_indeed } : {}),
     results_wanted: options.resultsWanted ?? settings.results_wanted ?? searches.defaults.results_wanted,
     hours_old: options.hoursOld ?? settings.hours_old ?? searches.defaults.hours_old,
     distance: searches.defaults.distance, description_format: searches.defaults.description_format, fetch_description: false,
     ...(source === 'linkedin' ? { search_request_limit: searches.linkedin_limits.max_search_requests_per_task } : {}),
-    ...(options.enrichOnly ? { enrich_only: true } : {}), is_remote: searches.defaults.is_remote,
-    ...(searches.defaults.job_type ? { job_type: searches.defaults.job_type } : {}) };
+    ...(options.enrichOnly ? { enrich_only: true } : {}), is_remote: supportsFilters ? query?.remote_only ?? searches.defaults.is_remote : false,
+    ...(supportsFilters && (query?.employment ?? searches.defaults.job_type) ? { job_type: query?.employment ?? searches.defaults.job_type! } : {}) };
+}
+
+/** Keep board syntax explicit; public adapters receive plain phrases. */
+export function sourceQuery(config: AppConfig, source: string, keyword: string): string {
+  const query = config.searches.sources[source]?.queries;
+  if (!query) return keyword;
+  const raw = query.roles[keyword] ?? keyword;
+  if (query.syntax === 'plain' || !['linkedin', 'indeed'].includes(source)) return raw;
+  const modifier = /\s+(freelance|contract|B2B)$/i.exec(raw)?.[1];
+  const phrase = modifier ? raw.slice(0, -(modifier.length + 1)) : raw;
+  const clean = (value: string) => value.replace(/["\r\n]/g, ' ').trim();
+  const main = query.exact_phrases ? `"${clean(phrase)}"${modifier ? ` ${modifier}` : ''}` : clean(raw);
+  return main + query.exclusions.map((term) => query.syntax === 'linkedin' ? ` NOT "${clean(term)}"` : ` -"${clean(term)}"`).join('');
 }
 
 export function linkedinCatalogue(config: AppConfig): CollectorTask[] {
   if (!config.searches.sources.linkedin) return [];
-  const tasks = config.searches.rotation.batches.flatMap((batch) => (batch.targets.linkedin ?? []).flatMap((geo) =>
+  const tasks = config.searches.rotation.batches.flatMap((batch) => (batch.targets.linkedin ?? []).filter((geo) =>
+    !config.searches.sources.linkedin?.queries?.geos || config.searches.sources.linkedin.queries.geos.includes(geo)).flatMap((geo) =>
     batch.keywords.map((keyword) => makeTask(config, batch.key, 'linkedin', geo, keyword))));
-  return [...new Map(tasks.map((task) => [task.task_id, task])).values()];
+  return [...new Map(tasks.map((task) => [`${task.location ?? ''}|${task.search_term}`, task])).values()];
 }
 
 /** Capacity of the actual configured sequence, before cooldowns; never a promise of complete coverage. */
@@ -255,7 +272,8 @@ export function linkedinCoverage(config: AppConfig) {
   const slotsPerSequence = sequence.reduce((slots, key) => {
     const batch = searches.rotation.batches.find((row) => row.key === key)!;
     const otherTasks = Object.entries(batch.targets).reduce((sum, [source, geos]) => sum +
-      (source !== 'linkedin' && searches.sources[source]?.enabled ? geos.length * batch.keywords.length : 0), 0);
+      (source !== 'linkedin' && searches.sources[source]?.enabled ? geos.filter((geo) =>
+        !searches.sources[source]?.queries?.geos || searches.sources[source]!.queries!.geos!.includes(geo)).length * batch.keywords.length : 0), 0);
     return slots + (searches.sources.linkedin?.enabled ? Math.min(2, searches.linkedin_limits.max_search_tasks_per_run,
       Math.max(0, limit - otherTasks)) : 0);
   }, 0);

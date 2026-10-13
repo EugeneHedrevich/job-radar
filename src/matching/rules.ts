@@ -1,9 +1,11 @@
 import type { AppConfig } from '../config/index.js';
 import { normalizeText } from '../util/text.js';
-import { deterministicGapEvidence, educationUncertainty, unknownSkillRequirements } from './evidence.js';
+import { capabilityUncertainty, deterministicGapEvidence, educationUncertainty, unresolvedMandatoryEducation } from './evidence.js';
+import { vacancyRelevance } from './relevance.js';
 import {
   detectEngagement,
   detectWorkMode,
+  employmentRuleMatches,
   hasMandatoryOnsiteCondition,
   hasUnclearOnsiteFrequency,
   hourlyRate,
@@ -25,6 +27,8 @@ export interface PrescreenResult {
 /** Stage 1: cheap keyword screening. Nothing here costs an API call. */
 export function prescreen(config: AppConfig, job: MatchableJob): PrescreenResult {
   const text = jobText(job);
+  const relevant = vacancyRelevance(config, job);
+  if (!relevant.accepted) return { passed: false, reason: relevant.reason };
   const { require_any, drop_title_terms, rescue_terms } = config.scoring.prescreen;
 
   if (require_any.length && !matchesAny(text.all, require_any)) {
@@ -52,6 +56,10 @@ export function findHardRejects(config: AppConfig, text: JobText): HardRejectHit
   for (const rule of config.scoring.hard_rejects.rules) {
     // Language checks use actual profile.languages and local obligations.
     if (rule.id === 'language_barrier') continue;
+    if (rule.id === 'contract_excluded' || rule.id === 'permanent_only') {
+      if (employmentRuleMatches(config, text.all, rule.any)) hits.push({ id: rule.id, reason: rule.reason });
+      continue;
+    }
     if (rule.id === 'onsite_heavy') {
       if (hasMandatoryOnsiteCondition(config, text.all)) hits.push({ id: rule.id, reason: rule.reason });
       continue;
@@ -143,6 +151,8 @@ function scoreCommercial(config: AppConfig, job: MatchableJob, text: JobText): D
   } else if (engagement === 'permanent') {
     score -= rules.permanent_signals_penalty;
     notes.push('permanent employment indicated');
+  } else if (engagement === 'alternatives') {
+    missing.push('contract/permanent alternatives need confirmation');
   } else {
     missing.push('contract type not stated');
   }
@@ -261,6 +271,8 @@ export function recommendationFor(config: AppConfig, score: number): Recommendat
 export function assessWithRules(config: AppConfig, job: MatchableJob): AssessmentResult {
   const text = jobText(job);
   const hardRejects = findHardRejects(config, text);
+  const relevance = vacancyRelevance(config, job);
+  if (!relevance.accepted) hardRejects.push({ id: 'role_relevance', reason: relevance.reason! });
   const technical = scoreTechnical(config, text);
   const commercial = scoreCommercial(config, job, text);
   const location = scoreLocation(config, job, text);
@@ -274,16 +286,20 @@ export function assessWithRules(config: AppConfig, job: MatchableJob): Assessmen
     technical.score * weights.technical + commercial.score * weights.commercial + location.score * weights.location,
   );
 
-  const undocumentedRequirements = unknownSkillRequirements(config, job);
+  const capabilityUnknown = capabilityUncertainty(config, job);
+  const undocumentedRequirements = capabilityUnknown.mandatory;
   const missingInformation = [...commercial.missing, ...location.missing, ...gaps.unclear,
-    ...educationUncertainty(config, job), ...undocumentedRequirements, ...constraints.missing, ...abap.missing];
+    ...educationUncertainty(config, job), ...undocumentedRequirements, ...capabilityUnknown.preferred, ...constraints.missing, ...abap.missing];
   if (!text.hasDescription) {
     missingInformation.unshift('full description was not retrieved - assessment is based on the title only');
     fitScore = Math.min(fitScore, config.scoring.uncertainty.cap_without_description);
   }
   // A known missing skill with an unresolved obligation needs review before
   // it can qualify for an application or a high-score notification.
-  if (gaps.unclear.length || undocumentedRequirements.length || constraints.requiresReview || abap.requiresReview) {
+  const needsReview = Boolean(gaps.unclear.length || undocumentedRequirements.length || constraints.requiresReview || abap.requiresReview ||
+    unresolvedMandatoryEducation(config, job) ||
+    location.missing.some((message) => /onsite attendance/.test(message)));
+  if (needsReview) {
     fitScore = Math.min(fitScore, config.scoring.thresholds.apply - 1);
   }
 
@@ -304,6 +320,7 @@ export function assessWithRules(config: AppConfig, job: MatchableJob): Assessmen
 
   const explanation = buildExplanation({
     hardRejectReason,
+    needsReview,
     technicalMatches: technical.matches,
     technicalFocus: technical.focus,
     commercialNotes: commercial.notes,
@@ -334,6 +351,7 @@ export function assessWithRules(config: AppConfig, job: MatchableJob): Assessmen
 
 function buildExplanation(input: {
   hardRejectReason: string | null;
+  needsReview: boolean;
   technicalMatches: string[];
   technicalFocus: string | null;
   commercialNotes: string[];
@@ -342,12 +360,11 @@ function buildExplanation(input: {
 }): string {
   if (input.hardRejectReason) return `Rejected: ${input.hardRejectReason}`;
   const parts: string[] = [];
-  if (input.technicalMatches.length) parts.push(`Matches ${input.technicalMatches.slice(0, 6).join(', ')}.`);
-  else parts.push('No profile skill matched the posting text.');
-  if (input.technicalFocus) parts.push(`${input.technicalFocus} role matches the profile's frontend skills.`);
+  if (input.needsReview) parts.push('Suitability requires review of the unresolved requirements.');
   parts.push(...input.commercialNotes.map(capitalise));
   parts.push(...input.locationNotes.map(capitalise));
-  if (input.missing.length) parts.push(`Unknown: ${input.missing.slice(0, 3).join('; ')}.`);
+  if (input.missing.length) parts.push(`Unknown: ${input.missing.filter((item) => /required|mandatory|unclear|needs confirmation|not stated/.test(item)).slice(0, 3).join('; ')}.`);
+  if (!parts.length) parts.push('Suitability is based on the stated employment and working conditions.');
   return parts.join(' ');
 }
 

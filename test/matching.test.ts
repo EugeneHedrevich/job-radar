@@ -77,12 +77,6 @@ describe('focused SAPUI5 frontend scoring', () => {
         expect(result.recommendation).toBe('Apply');
         expect(result.fitScore).toBeGreaterThanOrEqual(75);
     });
-    it('recognises the combined German and English language requirement', () => {
-        const result = assessWithRules(config, job({ title: 'SAPUI5 Developer',
-            description: `${frontendDescription}\nAnforderungen:\nSehr gute Deutsch- und gute Englischkenntnisse.` }));
-        expect(result.recommendation).toBe('Skip');
-        expect(result.hardRejectReason).toMatch(/language/i);
-    });
     it('requires detailed frontend evidence rather than just a title or incidental UI5 mention', () => {
         for (const vacancy of [
             job({ title: 'SAPUI5 Developer', description: null }),

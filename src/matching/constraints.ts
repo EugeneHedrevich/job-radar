@@ -114,6 +114,23 @@ export function matchingConstraints(config: AppConfig, job: MatchableJob): Match
     result.evidence.push({ requirement, vacancyQuote, profilePath, profileValue: typeof fact === 'object' ? JSON.stringify(fact) : String(fact) });
   };
 
+  const engagementText = jobText(job);
+  const offer = detectEngagement(config, job, engagementText);
+  if (offer === 'permanent' && config.profile.engagement.rejected_types.includes('permanent_only')) {
+    const quote = sentences(source).find((block) => (config.scoring.signals.permanent ?? [])
+      .some((pattern) => new RegExp(pattern, 'i').test(normalizeText(block))));
+    // A coarse jobType alone does not establish a permanent-only offer.
+    if (quote) reject('Permanent employment conflicts with the profile’s accepted contract engagements.',
+      'permanent employment', quote, 'engagement.rejected_types', config.profile.engagement.rejected_types);
+  } else if (offer === 'alternatives') addMissing('Contract and permanent employment are alternatives; confirm the offered engagement');
+  else if (offer === 'unknown' && config.profile.engagement.rejected_types.includes('permanent_only')) {
+    addMissing('Employment format is not established; confirm compatibility with the accepted contract engagements');
+  }
+  if (detectWorkMode(config, job, engagementText) === 'unknown' &&
+    config.profile.engagement.acceptable_work_modes.length && !config.profile.engagement.acceptable_work_modes.includes('unknown')) {
+    addMissing('Work mode and attendance are not verified; confirm compatibility with the profile');
+  }
+
   for (const [code, language] of Object.entries(LANGUAGES)) {
     const held = config.profile.languages.find((entry) => entry.code.toLowerCase() === code);
     for (const mention of language.aliases.flatMap((alias) => requirementMentions(config, source, alias))) {
@@ -126,10 +143,10 @@ export function matchingConstraints(config: AppConfig, job: MatchableJob): Match
       const distance = (start: number, end: number) => Math.max(mention.start - end, start - mention.end, 0);
       const level = [...mention.clause.matchAll(/\b(A[12]|B[12]|C[12])\b/gi)]
         .sort((a, b) => distance(a.index, a.index + a[0].length) - distance(b.index, b.index + b[0].length))[0]?.[0].toUpperCase();
-      const proficiency = [...mention.clause.matchAll(/\b(?:fluent|fluency|native|business|professional|verhandlungssicher\w*|sehr gute|biegł\w*|courant|vloeiend)\b/g)]
+      const proficiency = [...mention.clause.matchAll(/\b(?:fluent|fluency|native|business|professional|verhandlungssicher\w*|sehr gute|gute|biegł\w*|courant|vloeiend)\b/g)]
         .sort((a, b) => distance(a.index, a.index + a[0].length) - distance(b.index, b.index + b[0].length))[0]?.[0];
       const fluency = Boolean(proficiency);
-      if (kind === 'unclear' && !fluency && !/\b(?:language|kenntnisse|jezyk|język|langue|taal)\b/.test(mention.clause)) continue;
+      if (kind === 'unclear' && !fluency && !/(?:\b(?:language|jezyk|język|langue|taal)\b|kenntnisse\b)/.test(mention.clause)) continue;
       if (!held) {
         if (kind === 'mandatory') reject(`${language.name} language is mandatory and is not held in profile.languages.`,
           language.name, mention.quote, 'languages', config.profile.languages);
@@ -149,7 +166,7 @@ export function matchingConstraints(config: AppConfig, job: MatchableJob): Match
       } else if (proficiency) {
         const declared = held.proficiency.trim().toLowerCase();
         const accepted = proficiency === 'native' ? ['native'] :
-          ['professional', 'business'].includes(proficiency) ? ['professional', 'business', 'fluent', 'native'] : ['fluent', 'native'];
+          ['professional', 'business', 'gute'].includes(proficiency) ? ['professional', 'business', 'fluent', 'native', 'B2', 'C1', 'C2'].map((level) => level.toLowerCase()) : ['fluent', 'native'];
         if (!accepted.includes(declared)) {
           addMissing(`${language.name} ${proficiency} requirement needs confirmation; declared proficiency is ${held.proficiency}`);
         }

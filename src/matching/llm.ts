@@ -4,7 +4,7 @@ import { normalizeText, truncate } from '../util/text.js';
 import { log } from '../util/log.js';
 import { assessWithRules, suggestCvVariant } from './rules.js';
 import { jobText } from './signals.js';
-import { validateGapEvidence } from './evidence.js';
+import { unresolvedMandatoryEducation, validateGapEvidence } from './evidence.js';
 import type { AssessmentResult, MatchableJob } from './types.js';
 import { matchingConstraints } from './constraints.js';
 import { abapUncertainty } from './capabilities.js';
@@ -125,6 +125,9 @@ Rules you must follow:
 - Use profile availability for explicit start and weekly capacity requirements. Unknown start dates, hours or timezone compatibility belong in missing_information.
 - Distinguish job location, remote format and required candidate residence. Remote UK residents only is a residence restriction; a German office location alone is not. EU remote B2B permission establishes contractor work only, never local employment permission.
 - Use the actual languages list. Preferred languages never prove mandatory gaps. Professional proficiency does not establish a CEFR level. Preserve independent mandatory language requirements despite optional languages elsewhere.
+- B2B integrations, EDI, A2A/B2B/B2G and customer/supplier integrations are technical experience, not employment contracts. Explicit permanent employment takes precedence over unrelated technical terminology. Real permanent/contract alternatives require review.
+- A source remote flag is coarse metadata, not proof of fully remote work. Follow explicit attendance wording, including German Homeoffice/mobile working capped at a number of days per week.
+- Evaluate each required capability separately; a known CPI skill does not establish Commerce Cloud, Salesforce or EDI experience. Undocumented mandatory experience prevents an Apply-level score.
 - Evaluate a focused SAPUI5/Fiori frontend role against the candidate's frontend skills. Do not penalize it for lacking CAP, Node.js or BTP requirements that the vacancy does not ask for. Explicit mandatory ABAP requirements still take precedence.
 - suggested_cv_variant must be exactly one of the allowed CV variant ids.
 - Never invent requirements, technologies, rates or CV content that are not in the inputs.`;
@@ -250,7 +253,8 @@ export async function assessWithLlm(config: AppConfig, job: MatchableJob): Promi
   if (deterministic.hardReject) {
     fitScore = Math.min(fitScore, config.scoring.hard_rejects.score_cap);
     recommendation = 'Skip';
-  } else if (mandatoryGaps.length > 0 || constraints.requiresReview || abap.requiresReview || deterministic.missingInformation.some((item) =>
+  } else if (mandatoryGaps.length > 0 || constraints.requiresReview || abap.requiresReview || unresolvedMandatoryEducation(config, job) || deterministic.missingInformation.some((item) =>
+    /onsite attendance.*(?:unclear|not stated)|unclear whether onsite attendance/.test(item) ||
     item.startsWith('unclear whether "') && item.endsWith('" is mandatory') ||
     item.startsWith('profile evidence for required capability "') && item.endsWith('" is not stated'))) {
     fitScore = Math.min(fitScore, config.scoring.thresholds.apply - 1);
@@ -268,8 +272,8 @@ export async function assessWithLlm(config: AppConfig, job: MatchableJob): Promi
     fitScore,
     recommendation,
     technicalFit: Math.round(data.technical_fit),
-    commercialFit: Math.round(data.commercial_fit),
-    locationFit: Math.round(data.location_fit),
+    commercialFit: deterministic.hardReject ? Math.min(deterministic.commercialFit, Math.round(data.commercial_fit)) : Math.round(data.commercial_fit),
+    locationFit: deterministic.hardReject ? Math.min(deterministic.locationFit, Math.round(data.location_fit)) : Math.round(data.location_fit),
     strongMatches: data.strong_matches.slice(0, 12),
     mandatoryGaps,
     mandatoryGapEvidence: [...deterministic.mandatoryGapEvidence, ...modelEvidence]
@@ -277,7 +281,7 @@ export async function assessWithLlm(config: AppConfig, job: MatchableJob): Promi
     preferredGaps: preferredGaps.filter((gap) => !uncertainPreferred.includes(gap)),
     missingInformation: [...new Set([...deterministic.missingInformation, ...data.missing_information,
       ...uncertainPreferred.map((gap) => `preferred capability needs profile confirmation: ${gap}`)])],
-    explanation: data.explanation,
+    explanation: deterministic.hardReject ? deterministic.explanation : data.explanation,
     suggestedCvVariant: allowedVariant,
     hardReject: deterministic.hardReject,
     hardRejectReason,
@@ -289,6 +293,7 @@ function uncertainFallback(config: AppConfig, job: MatchableJob, reasons: string
   log.warn('Unsupported AI assessment; using rules with uncertainty', { reasons });
   return {
     ...result,
+    fitScore: result.hardReject ? result.fitScore : Math.min(result.fitScore, config.scoring.thresholds.apply - 1),
     recommendation: result.recommendation === 'Apply' ? 'Review' : result.recommendation,
     missingInformation: [...new Set([...result.missingInformation, ...reasons.map((reason) => `AI assessment uncertainty: ${reason}`)])],
     explanation: `${result.explanation} AI assessment could not confirm requirement evidence; rules fallback used.`,

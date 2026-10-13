@@ -23,6 +23,8 @@ export interface JobSummary extends Tracking {
   company: string | null;
   location: string | null;
   isRemote: boolean | null;
+  workMode: 'fully_remote' | 'hybrid' | 'onsite' | 'unknown';
+  mainBlockers: string[];
   manuallyImportedAt: string | null;
   nextFollowUp: { ID: string; dueDate: string } | null;
   jobType: string | null;
@@ -106,6 +108,9 @@ export interface CollectionOperation {
   jobsFound: number;
   jobsNew: number;
   jobsUpdated: number;
+  jobsAccepted?: number | null;
+  jobsFiltered?: number | null;
+  exclusionReasons?: Record<string, number>;
   jobsAssessed: number;
   aiCalls: number;
   cachedAssessments: number | null;
@@ -164,5 +169,12 @@ export interface CollectionStatus {
     lastStatus: string | null;
     lastMessage: string | null;
     updatedAt: string | null;
+    searchRequests: number;
+    detailRequests: number;
+    reservedSearch: number;
+    reservedDetail: number;
+    windowStartedAt: string | null;
+    lastHttpStatus: number | null;
+    lastRetryAfterSeconds: number | null;
   }[];
 }

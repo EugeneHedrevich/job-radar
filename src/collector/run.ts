@@ -150,6 +150,8 @@ export async function runCollector(config: AppConfig, options: RunCollectorOptio
         headChecked: Boolean(record.head_checked || checkedHeads.has(record.task_id)),
         durationMs: record.duration_ms,
         ...(record.error_kind ? { errorKind: record.error_kind } : {}),
+        ...(record.error_kind === 'rate_limit' ? { httpStatus: 429 }
+          : record.error_kind === 'blocked' && /HTTP 403/.test(record.message ?? '') ? { httpStatus: 403 } : {}),
         ...(record.message ? { message: redactProxy(record.message) } : {}),
         ...(statistics.get(record.task_id) ?? {}),
         ...(record.search_requests != null ? { searchRequests: record.search_requests } : {}),

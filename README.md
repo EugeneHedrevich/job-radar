@@ -394,8 +394,10 @@ including Germany, Switzerland, the UK, Poland, Austria and Ireland. LinkedIn al
 **two search tasks per cycle** by default; postponed keyword/location combinations rotate
 through a persisted catalogue cursor on subsequent available cycles, using spare task
 capacity instead of waiting for their original batch to return. The actual configuration
-has **98 combinations and at most 66 search slots per 108-hour sequence** before cooldowns:
-at least 32 combinations must wait beyond one sequence. Catalogue rotation avoids repeats
+has **98 configured task entries**, reduced to **91 distinct query/geography combinations**
+by exact role overrides, and at most **66 search slots per 108-hour sequence** before
+cooldowns/shared allowances. At least 25 distinct combinations must wait beyond one
+sequence. Catalogue rotation avoids duplicate queries and repeats
 until the sweep wraps; diagnostics report observed first-page coverage rather than promising
 complete coverage. The LinkedIn freshness window is 168 hours
 to accommodate its slower sweep; other source windows are unchanged. Larger custom batches
@@ -503,6 +505,32 @@ Key behaviours driven by configuration:
 * **Per-source geography** — LinkedIn only understands free-text `location`; Indeed and
   Glassdoor need `country_indeed` with JobSpy's exact spelling, and Glassdoor supports fewer
   countries. There is no single "Europe" location that works everywhere.
+* **Source queries** — `sources.<source>.queries` configures role phrase overrides, exact
+  phrases, exclusions and optional geography subsets. LinkedIn uses its documented
+  [quoted phrases and NOT](https://www.linkedin.com/help/linkedin/answer/a524335);
+  Indeed uses [quoted phrases and dash exclusions](https://support.indeed.com/hc/en-us/articles/204488950-Improving-Your-Job-Searches-Tips-and-Help).
+  Public adapters and Glassdoor keep plain phrases. The installed JobSpy LinkedIn/Indeed
+  adapters support optional `employment` and `remote_only` query filters; these are unset
+  by default. Query settings affect collection, independently of saved-job UI filters.
+* **Relevance before persistence** — `scoring.relevance.target_role_families` selects specific
+  SAP CAP/CAPM, UI5/Fiori, BTP, Joule/Business AI and Integration Suite/CPI roles.
+  `hard_title_exclusions` cannot be rescued by technical words. Internship/student roles
+  and unrelated finance/admin titles are rejected before a new automatic job is inserted.
+  Finance process descriptions do not exclude SAP developers. Plausible SAP technical
+  titles without descriptions remain available for bounded enrichment. Duplicate checks
+  precede this filter so existing listings, notes, applications and reminders can be updated.
+  Manual additions remain allowed with a relevance warning. Runs record received,
+  accepted and filtered records, with exclusion reasons; duplicate records are counted as
+  received/accepted records while new/updated counts refer to distinct jobs.
+* **Shared LinkedIn allowance** — SQLite records six search and five detail requests in a
+  rolling three-hour window, configurable downwards in `linkedin_limits`. Collection,
+  CLI/enrichment and manual imports reserve the same allowance and source lease. Repeated
+  runs do not reset it. Actual usage releases unused reservations; interrupted/unknown
+  requests remain charged conservatively. Structured 429/403 failures and Retry-After
+  persist in source health. After cooldown, a recovery task uses at most one search and
+  one detail request (one detail for imports); another 429 pauses LinkedIn while other
+  sources continue. Diagnostics show the pause, last failure and shared request counts.
+  Proxy secrets remain in the environment. Public access is not guaranteed.
 * **Description budget** — `description_budget.max_tasks_per_run` caps how many searches may
   fetch full descriptions (one extra HTTP request per job, and the fastest way to get
   blocked). A job without a description stays incomplete: it is shown and can be reviewed,
@@ -511,6 +539,24 @@ Key behaviours driven by configuration:
   those slots. Existing incomplete listings share the selected slots for enrichment.
 * **Scoring** — `weights` must sum to 1.0. Bumping `profile.version` or `scoring.version`
   invalidates every cached assessment.
+  Matching revision 15 separates technical B2B/EDI integrations from employment offers;
+  explicit permanent employment wins over unrelated technical wording, while genuine
+  alternatives require review. Source remote flags do not prove fully remote work.
+  Limited Homeoffice/mobile-working wording (including “max. 2 Tage pro Woche”) establishes
+  attendance constraints. Requirements under “Das bringst du mit” include combined German
+  and English language requirements and use the actual profile language policy.
+  `requirement_capabilities` lists technology aliases whose individual requirements need
+  checking, including Commerce Cloud, Salesforce and EDI. Undocumented experience is
+  unknown; it is not a confirmed missing skill. Unknown mandatory requirements cap the
+  overall score below Apply, including unknown employment/work conditions when the
+  profile restricts them, while preferred uncertainty remains separate. Independently
+  verified blockers force Skip even if the model omits or misformats evidence.
+
+The dashboard refreshes obsolete deterministic assessments at startup without provider
+or Telegram calls, including tracked closed records. Assessment history is retained;
+later eligible AI work uses the existing five-call allowance. The default view hides
+irrelevant untracked records without deleting them; applications and deliberate imports
+stay accessible. Suitability and main blockers lead the list, with technical fit in details.
 
 The profile declares Chemical Engineering education. Qualification level and institution
 remain unknown until supplied. This information is passed to OpenAI; it does not imply a

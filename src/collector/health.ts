@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { cds, db, SELECT, INSERT, UPDATE, query } from '../db/index.js';
-import type { AppConfig } from '../config/index.js';
+import { loadConfig, type AppConfig } from '../config/index.js';
 import { log } from '../util/log.js';
 import type { ErrorKind, TaskOutcome } from './types.js';
 
@@ -13,6 +13,16 @@ export interface SourceHealthRow {
   lastStatus: string | null;
   lastMessage: string | null;
   updatedAt: string | null;
+  windowStartedAt: string | null;
+  searchRequests: number;
+  detailRequests: number;
+  reservedSearch: number;
+  reservedDetail: number;
+  recoveryPending: boolean;
+  lastHttpStatus: number | null;
+  lastRetryAfterSeconds: number | null;
+  importToken: string | null;
+  importUntil: string | null;
 }
 
 export async function readHealth(): Promise<SourceHealthRow[]> {
@@ -20,14 +30,26 @@ export async function readHealth(): Promise<SourceHealthRow[]> {
 }
 
 /** Sources that must not be queried right now, with the reason why. */
-export async function activeCooldowns(now: Date = new Date()): Promise<Map<string, string>> {
+export async function activeCooldowns(now: Date = new Date(), enrichOnly = false): Promise<Map<string, string>> {
   const rows = await readHealth();
   const result = new Map<string, string>();
   for (const row of rows) {
-    if (!row.cooldownUntil) continue;
-    const until = new Date(row.cooldownUntil);
-    if (until > now) {
+    if (row.cooldownUntil && new Date(row.cooldownUntil) > now) {
+      const until = new Date(row.cooldownUntil);
       result.set(row.source, `on cooldown until ${until.toISOString()} (${row.lastStatus ?? 'unknown'})`);
+      continue;
+    }
+    if (row.source === 'linkedin') {
+      if (row.importToken && row.importUntil && new Date(row.importUntil) > now) {
+        result.set(row.source, 'A shared LinkedIn request is already running');
+        continue;
+      }
+      const limits = loadConfig().searches.linkedin_limits;
+      if (row.windowStartedAt && now.getTime() < new Date(row.windowStartedAt).getTime() + limits.window_minutes * 60_000 &&
+        (enrichOnly ? (row.detailRequests ?? 0) + (row.reservedDetail ?? 0) >= limits.max_detail_requests_per_window
+          : (row.searchRequests ?? 0) + (row.reservedSearch ?? 0) >= limits.max_search_requests_per_window)) {
+        result.set(row.source, `Shared LinkedIn request allowance used until ${new Date(new Date(row.windowStartedAt).getTime() + limits.window_minutes * 60_000).toISOString()}`);
+      }
     }
   }
   return result;
@@ -101,6 +123,9 @@ export async function recordOutcomes(config: AppConfig, outcomes: TaskOutcome[],
         lastStatus,
         lastMessage: lastMessage ? lastMessage.slice(0, 1900) : null,
         updatedAt: now.toISOString(),
+        recoveryPending: recovered ? false : Boolean(previous?.recoveryPending || worstKind === 'rate_limit' || worstKind === 'blocked'),
+        lastHttpStatus: failures.find((outcome) => outcome.httpStatus)?.httpStatus ?? previous?.lastHttpStatus ?? null,
+        lastRetryAfterSeconds: failures.find((outcome) => outcome.retryAfterSeconds !== undefined)?.retryAfterSeconds ?? previous?.lastRetryAfterSeconds ?? null,
       };
       if (previous) {
         await tx.run(UPDATE(db().SourceHealth).set(row).where({ source }));
@@ -134,20 +159,58 @@ function addMinutes(date: Date, minutes: number): Date {
 }
 
 /** Serialize metadata lookups per source, across local processes, without holding a DB transaction during I/O. */
-export async function claimImportSource(source: string): Promise<{ token?: string; reason?: string }> {
+export async function claimImportSource(source: string): Promise<SourceRequestClaim> {
+  return claimSourceRequests(source, 0, 3, 45_000);
+}
+
+export interface SourceRequestClaim { token?: string; reason?: string; searchLimit: number; detailLimit: number; recovery: boolean }
+
+/** Reserve a persistent allowance before I/O. Expired reservations remain charged because their result is unknown. */
+export async function claimSourceRequests(source: string, searchWanted: number, detailWanted: number, leaseMs = 45_000): Promise<SourceRequestClaim> {
+  const config = loadConfig();
   return cds.tx(async (tx: any) => {
     await tx.run('UPDATE sap_jobradar_Jobs SET ID = ID WHERE 0 = 1');
     const row = await tx.run(SELECT.one.from(db().SourceHealth).where({ source }));
-    if (row?.cooldownUntil && new Date(row.cooldownUntil) > new Date()) return { reason: `Source is on cooldown until ${row.cooldownUntil} (${row.lastStatus})` };
-    if (row?.importToken && row.importUntil && new Date(row.importUntil) > new Date()) return { reason: 'A metadata lookup for this source is already running. Try again later.' };
+    const unavailable = (reason: string): SourceRequestClaim => ({ reason, searchLimit: 0, detailLimit: 0, recovery: false });
+    const now = new Date();
+    if (row?.cooldownUntil && new Date(row.cooldownUntil) > now) return unavailable(`Source is on cooldown until ${row.cooldownUntil} (${row.lastStatus})`);
+    if (row?.importToken && row.importUntil && new Date(row.importUntil) > now) return unavailable('A request for this source is already running. Try again later.');
+    const limits = config.searches.linkedin_limits;
+    const reset = !row?.windowStartedAt || now.getTime() - new Date(row.windowStartedAt).getTime() >= limits.window_minutes * 60_000;
+    const windowStartedAt = reset ? now.toISOString() : row.windowStartedAt;
+    const usedSearch = reset ? 0 : (row.searchRequests ?? 0) + (row.reservedSearch ?? 0);
+    const usedDetail = reset ? 0 : (row.detailRequests ?? 0) + (row.reservedDetail ?? 0);
+    const recovery = Boolean(row?.recoveryPending || row?.cooldownUntil && ['rate_limit', 'blocked'].includes(row.lastStatus));
+    const searchLimit = source === 'linkedin' ? Math.min(searchWanted, recovery ? 1 : Infinity,
+      Math.max(0, limits.max_search_requests_per_window - usedSearch)) : searchWanted;
+    const detailLimit = source === 'linkedin' ? Math.min(detailWanted, recovery ? 1 : Infinity,
+      Math.max(0, limits.max_detail_requests_per_window - usedDetail)) : detailWanted;
+    if (searchWanted > 0 ? searchLimit === 0 : detailWanted > 0 && detailLimit === 0) return unavailable(
+      `LinkedIn request allowance used; available after ${new Date(new Date(windowStartedAt).getTime() + limits.window_minutes * 60_000).toISOString()}`);
     const token = randomUUID();
-    const values = { importToken: token, importUntil: new Date(Date.now() + 45_000).toISOString() };
+    const values = { importToken: token, importUntil: new Date(now.getTime() + leaseMs).toISOString(),
+      windowStartedAt,
+      searchRequests: reset ? 0 : usedSearch, detailRequests: reset ? 0 : usedDetail,
+      reservedSearch: searchLimit, reservedDetail: detailLimit };
     await tx.run(row ? UPDATE(db().SourceHealth).set(values).where({ source })
       : INSERT.into(db().SourceHealth).entries({ source, ...values }));
-    return { token };
+    return { token, searchLimit, detailLimit, recovery };
   });
 }
 
 export async function releaseImportSource(source: string, token: string): Promise<void> {
-  await cds.run(UPDATE(db().SourceHealth).set({ importToken: null, importUntil: null }).where({ source, importToken: token }));
+  await settleSourceRequests(source, token);
+}
+
+/** Unknown usage consumes the whole reservation; known usage returns only unused allowance. */
+export async function settleSourceRequests(source: string, token: string, searchUsed?: number, detailUsed?: number): Promise<void> {
+  await cds.tx(async (tx: any) => {
+    await tx.run('UPDATE sap_jobradar_Jobs SET ID = ID WHERE 0 = 1');
+    const row = await tx.run(SELECT.one.from(db().SourceHealth).where({ source, importToken: token }));
+    if (!row) return;
+    await tx.run(UPDATE(db().SourceHealth).set({ importToken: null, importUntil: null,
+      searchRequests: (row.searchRequests ?? 0) + (searchUsed ?? row.reservedSearch ?? 0),
+      detailRequests: (row.detailRequests ?? 0) + (detailUsed ?? row.reservedDetail ?? 0),
+      reservedSearch: 0, reservedDetail: 0 }).where({ source, importToken: token }));
+  });
 }

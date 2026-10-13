@@ -22,6 +22,10 @@ linkedin_limits:
   max_search_tasks_per_run: 2
   max_detail_requests_per_run: 5 # includes redirects, across both description slots
   max_search_requests_per_task: 3
+  # Shared across scheduler, CLI, dashboard and imports; clicking again cannot reset them.
+  window_minutes: 180
+  max_search_requests_per_window: 6
+  max_detail_requests_per_window: 5
 
 # Reference catalogue; actual execution is defined by rotation.batches below.
 keywords:
@@ -73,7 +77,15 @@ keywords:
 sources:
   linkedin:
     enabled: true
-    # 98 combinations share 66 slots per 108h sequence before cooldowns.
+    queries:
+      syntax: linkedin
+      exact_phrases: true
+      exclusions: [internship, working student, Werkstudent, Praktikum]
+      roles: { SAP CAP: SAP CAP Developer, SAP CAPM: SAP CAPM Developer, SAPUI5: SAPUI5 Developer }
+      # Optional: geos: [eu, de, bg]; employment: contract; remote_only: true.
+      # Leave filters unset to retain adverts with missing/coarse source fields.
+    # Exact phrase overrides collapse 98 task entries to 91 distinct query/geography combinations.
+    # These share up to 66 slots per 108h sequence before cooldowns/shared limits.
     # The catalogue rotates fairly; actual first-page coverage is diagnostic,
     # not guaranteed. Keep a wider window for this deliberately slower source.
     hours_old: 168
@@ -101,6 +113,11 @@ sources:
 
   indeed:
     enabled: true
+    queries:
+      syntax: indeed
+      exact_phrases: true
+      exclusions: [internship, working student, Werkstudent, Praktikum]
+      roles: { SAP CAP: SAP CAP Developer, SAP CAPM: SAP CAPM Developer, SAPUI5: SAPUI5 Developer }
     # country_indeed is mandatory and must use JobSpy's exact spelling.
     geos:
       de: { id: de, country_indeed: "Germany", location: "Germany" }
@@ -123,6 +140,7 @@ sources:
 
   glassdoor:
     enabled: true
+    queries: { syntax: plain, roles: { SAP CAP: SAP CAP Developer, SAPUI5: SAPUI5 Developer } }
     # Only countries marked with * in the JobSpy README support Glassdoor.
     geos:
       de: { id: de, country_indeed: "Germany", location: "Germany" }

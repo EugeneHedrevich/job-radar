@@ -54,6 +54,7 @@ export async function updateOperation(claim: CollectionClaim, patch: Partial<Col
       .where({ name: NAME, token: claim.token, operation_ID: claim.operationId, expiresAt: { '>': now.toISOString() } }));
     if (!renewed) throw new Error('Collection lease expired or changed owner');
     await tx.run(UPDATE(db().CollectionOperations).set({ ...patch,
+      ...(patch.exclusionReasons !== undefined ? { exclusionReasons: JSON.stringify(patch.exclusionReasons) } : {}),
       ...(patch.aiFailureReasons !== undefined ? { aiFailureReasons: JSON.stringify(patch.aiFailureReasons) } : {}), updatedAt: now.toISOString() })
       .where({ ID: claim.operationId }));
   });
@@ -91,5 +92,10 @@ export async function readOperation(id?: string): Promise<CollectionOperation | 
   try { const parsed: unknown = JSON.parse(row.aiFailureReasons ?? '[]');
     if (Array.isArray(parsed)) reasons = parsed.filter((value) => typeof value === 'string');
   } catch { /* Old diagnostic text remains in message. */ }
-  return { ...row, aiBudgetExhausted: Boolean(row.aiBudgetExhausted), aiFailureReasons: reasons };
+  let exclusionReasons: Record<string, number> = {};
+  try { const value = JSON.parse(row.exclusionReasons ?? '{}');
+    if (value && !Array.isArray(value) && typeof value === 'object') exclusionReasons = Object.fromEntries(
+      Object.entries(value).filter(([, count]) => typeof count === 'number' && Number.isFinite(count) && count >= 0)) as Record<string, number>;
+  } catch { /* Older runs did not record relevance counts. */ }
+  return { ...row, aiBudgetExhausted: Boolean(row.aiBudgetExhausted), aiFailureReasons: reasons, exclusionReasons };
 }

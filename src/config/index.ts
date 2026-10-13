@@ -100,6 +100,15 @@ const sourceSchema = z.object({
   supports_description_fetch: z.boolean().default(false),
   search_results_include_description: z.boolean().default(false),
   supports_backlog_enrichment: z.boolean().default(false),
+  queries: z.object({
+    syntax: z.enum(['plain', 'linkedin', 'indeed']).default('plain'),
+    exact_phrases: z.boolean().default(false),
+    exclusions: z.array(z.string().min(1)).default([]),
+    roles: z.record(z.string(), z.string().min(1)).default({}),
+    geos: z.array(z.string()).optional(),
+    employment: z.enum(['contract', 'fulltime', 'parttime', 'temporary']).optional(),
+    remote_only: z.boolean().optional(),
+  }).optional(),
 });
 
 export const searchesSchema = z.object({
@@ -107,6 +116,9 @@ export const searchesSchema = z.object({
     max_search_tasks_per_run: z.number().int().min(0).max(18).default(2),
     max_detail_requests_per_run: z.number().int().nonnegative().default(5),
     max_search_requests_per_task: z.number().int().positive().default(3),
+    window_minutes: z.number().positive().default(180),
+    max_search_requests_per_window: z.number().int().min(0).max(6).default(6),
+    max_detail_requests_per_window: z.number().int().min(0).max(5).default(5),
   }).prefault({}),
   defaults: z.object({
     hours_old: z.number().int().positive(),
@@ -214,6 +226,11 @@ export const scoringSchema = z.object({
     drop_title_terms: z.array(z.string()),
     rescue_terms: z.array(z.string()),
   }),
+  relevance: z.object({
+    target_role_families: z.record(z.string(), z.array(z.string()).min(1)),
+    hard_title_exclusions: z.record(z.string(), z.array(z.string()).min(1)),
+  }),
+  requirement_capabilities: z.record(z.string(), z.array(z.string())).default({}),
   signals: z.record(z.string(), z.array(z.string())),
   preferred_countries: z.array(z.string()),
 });
@@ -322,6 +339,14 @@ export function loadConfig(options: { reload?: boolean } = {}): AppConfig {
         }
       }
     }
+  }
+  for (const [source, settings] of Object.entries(searches.sources)) {
+    const query = settings.queries;
+    if (!query) continue;
+    if (query.syntax !== 'plain' && query.syntax !== source) throw new Error(`searches.yaml: ${source} does not support ${query.syntax} query syntax`);
+    if ((query.employment || query.remote_only !== undefined) && !['linkedin', 'indeed'].includes(source))
+      throw new Error(`searches.yaml: employment/remote query filters are only supported for LinkedIn and Indeed adapters`);
+    if (query.geos?.some((geo) => !settings.geos[geo])) throw new Error(`searches.yaml: ${source} query references an unknown geography`);
   }
   for (const key of searches.rotation.sequence ?? []) {
     if (!searches.rotation.batches.some((batch) => batch.key === key)) {

@@ -54,7 +54,7 @@ export function assessmentCacheKey(
   engine: 'rules' | 'llm',
 ): string {
   return sha256(JSON.stringify({
-    revision: 14,
+    revision: 15,
     job: {
       ID: job.ID, title: job.title, company: job.company,
       location: job.location, locationCountry: job.locationCountry,
@@ -239,6 +239,19 @@ export async function readTop(limit = 20, titleSearch?: string): Promise<RankedJ
     if (current) ranked.push({ job, assessment: rowToAssessment(current), assessmentId: current.ID, cached: true });
   }
   return ranked.sort((a, b) => b.assessment.fitScore - a.assessment.fitScore).slice(0, limit);
+}
+
+/** Refresh changed deterministic inputs locally, including tracked closed records. No provider or delivery path. */
+export async function refreshDeterministicAssessments(): Promise<number> {
+  const config = loadConfig();
+  let refreshed = 0;
+  for (const job of await query<MatchableJob>(SELECT.from(db().Jobs))) {
+    const key = assessmentCacheKey(config, job, 'rules');
+    if (await queryOne(SELECT.from(db().Assessments).where({ cacheKey: key }))) continue;
+    await storeAssessment(job.ID, key, assessWithRules(config, job));
+    refreshed += 1;
+  }
+  return refreshed;
 }
 
 async function storeAssessment(jobId: string, cacheKey: string, assessment: AssessmentResult,

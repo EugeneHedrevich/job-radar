@@ -76,6 +76,9 @@ entity CollectionRuns : cuid {
   jobsFound    : Integer default 0;
   jobsNew      : Integer default 0;
   jobsUpdated  : Integer default 0;
+  jobsAccepted : Integer;
+  jobsFiltered : Integer;
+  exclusionReasons : LargeString;
 
   tasks        : Composition of many CollectionTasks  on tasks.run = $self;
   errors       : Composition of many CollectionErrors on errors.run = $self;
@@ -117,6 +120,14 @@ entity SourceHealth {
   updatedAt           : Timestamp;
   importToken         : String(36);
   importUntil         : Timestamp;
+  windowStartedAt : Timestamp;
+  searchRequests : Integer default 0;
+  detailRequests : Integer default 0;
+  reservedSearch : Integer default 0;
+  reservedDetail : Integer default 0;
+  recoveryPending : Boolean default false;
+  lastHttpStatus : Integer;
+  lastRetryAfterSeconds : Double;
 }
 
 /** Per-batch description rotation, retained across CLI runs and restarts. */
@@ -159,6 +170,9 @@ entity CollectionOperations : cuid {
   jobsFound : Integer default 0;
   jobsNew : Integer default 0;
   jobsUpdated : Integer default 0;
+  jobsAccepted : Integer;
+  jobsFiltered : Integer;
+  exclusionReasons : LargeString;
   jobsAssessed : Integer default 0;
   aiCalls : Integer default 0;
   cachedAssessments : Integer default 0;

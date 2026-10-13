@@ -11,6 +11,8 @@ import { listReminders, syncCvFollowUp } from './reminders.js';
 import { aiOutcomeOf, MAX_AI_ATTEMPTS, PENDING_AI_STATUSES } from '../pipeline/ai-queue.js';
 import { eligibleForAiRetry } from './assessment-retry.js';
 import { linkedinCoverage } from '../collector/plan.js';
+import { hasPersonalTracking, vacancyRelevance } from '../matching/relevance.js';
+import { detectWorkMode, jobText } from '../matching/signals.js';
 
 export { ApiError } from './errors.js';
 
@@ -88,6 +90,9 @@ async function summarize(config: AppConfig, job: any, listings: any[], assessmen
     ['Pending', 'RetryPending', 'Attempting'].includes(row.status) && row.cacheKey === aiKey &&
     (row.status !== 'Pending' || !assessments.some((saved) => saved.cacheKey === aiKey)));
   return { ID: job.ID, title: job.title, company: job.company, location: job.location,
+    workMode: detectWorkMode(config, job, jobText(job)), mainBlockers: current ? (
+      rowToAssessment(current).mandatoryGaps.length ? rowToAssessment(current).mandatoryGaps : rowToAssessment(current).missingInformation.filter((item) =>
+        /required capability|unclear whether|alternatives|requirement needs confirmation|onsite attendance|Employment format|Work mode and attendance/.test(item))).slice(0, 3) : [],
     isRemote: job.isRemote ?? null, manuallyImportedAt: job.manuallyImportedAt ?? null, nextFollowUp: null,
     jobType: job.jobType, salaryMin: score(job.salaryMin), salaryMax: score(job.salaryMax),
     salaryCurrency: job.salaryCurrency, salaryInterval: job.salaryInterval,
@@ -126,7 +131,7 @@ export async function listJobs(params = new URLSearchParams()): Promise<JobList>
     query(SELECT.from(db().Jobs)),
     query(SELECT.from(db().SourceListings).columns('job_ID', 'source', 'activityState', 'validThrough')),
     query(SELECT.from(db().Assessments).columns('ID', 'job_ID', 'cacheKey', 'engine', 'fitScore', 'recommendation',
-      'createdAt', 'explanation', 'missingInformation', 'aiOutcome', 'aiReason')),
+      'createdAt', 'explanation', 'mandatoryGaps', 'missingInformation', 'aiOutcome', 'aiReason')),
     query(SELECT.from(db().AiAssessmentQueue).where({ status: { in: PENDING_AI_STATUSES.concat('Attempting') } })),
     listReminders(),
   ]);
@@ -140,6 +145,8 @@ export async function listJobs(params = new URLSearchParams()): Promise<JobList>
   }
   const needle = input.q.trim().toLocaleLowerCase();
   const filtered = summaries.filter((job) =>
+    (input.view !== 'vacancies' || hasPersonalTracking(job) || Boolean(job.manuallyImportedAt) ||
+      vacancyRelevance(config, jobs.find((row: any) => row.ID === job.ID) as any).accepted) &&
     (input.view !== 'applications' || job.cvSent || job.applicationDate || Boolean(job.personalNotes.trim()) || job.status !== 'New') &&
     (input.view !== 'imports' || Boolean(job.manuallyImportedAt)) &&
     (!needle || [job.title, job.company, job.location, job.personalNotes].some((value) => value?.toLocaleLowerCase().includes(needle))) &&
@@ -244,5 +251,9 @@ export async function readCollectionStatus(): Promise<CollectionStatus> {
     errors: errors.map((row) => ({ source: row.source ?? null, kind: row.kind, message: row.message, occurredAt: row.occurredAt ?? null })) } : null,
     sources: sources.map((row) => ({ source: row.source, consecutiveFailures: row.consecutiveFailures ?? 0,
       cooldownUntil: row.cooldownUntil ?? null, blocked: Boolean(row.blocked), lastStatus: row.lastStatus ?? null,
-      lastMessage: row.lastMessage ?? null, updatedAt: row.updatedAt ?? null })) };
+      lastMessage: row.lastMessage ?? null, updatedAt: row.updatedAt ?? null,
+      searchRequests: row.searchRequests ?? 0, detailRequests: row.detailRequests ?? 0,
+      reservedSearch: row.reservedSearch ?? 0, reservedDetail: row.reservedDetail ?? 0,
+      windowStartedAt: row.windowStartedAt ?? null, lastHttpStatus: row.lastHttpStatus ?? null,
+      lastRetryAfterSeconds: row.lastRetryAfterSeconds ?? null })) };
 }

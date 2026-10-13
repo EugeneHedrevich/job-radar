@@ -15,7 +15,7 @@ from collector import failure_info
 MAX_BYTES = 2_000_000
 MAX_REQUESTS = 3
 
-def lookup(source, url, counts):
+def lookup(source, url, counts, request_limit=MAX_REQUESTS):
     def validate(value):
         if source == "linkedin":
             linkedin_job_id(value)
@@ -28,7 +28,7 @@ def lookup(source, url, counts):
     def bounded_get(target, **_kwargs):
         nonlocal used
         target = validate(target)
-        if used >= MAX_REQUESTS:
+        if used >= request_limit:
             raise ValueError("Public detail redirect limit reached")
         used += 1
         counts['requests'] = used
@@ -53,7 +53,7 @@ def lookup(source, url, counts):
     row = {"job_url": url}
     if source == "linkedin":
         row["id"] = linkedin_job_id(url)
-        with use_transport(LinkedInTransport(detail_limit=MAX_REQUESTS)):
+        with use_transport(LinkedInTransport(detail_limit=request_limit)):
             return hydrate_board(source, row, "markdown", bounded_get)
     while True:
         response = bounded_get(url)
@@ -74,7 +74,8 @@ def main():
         source = payload["source"]
         if source not in {"linkedin", *SOURCES, *PUBLIC_SOURCES}:
             raise ValueError("This source has no supported public detail adapter")
-        row = lookup(source, payload["url"], counts)
+        request_limit = max(0, min(MAX_REQUESTS, int(payload.get('request_limit', MAX_REQUESTS))))
+        row = lookup(source, payload["url"], counts, request_limit)
         status = row.pop("activity_status", None)
         reason = row.pop("activity_reason", None)
         evidence = row.pop("activity_evidence", None)

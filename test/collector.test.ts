@@ -205,9 +205,9 @@ describe("priority-coverage", () => {
             salaryInterval: null, salaryCurrency: null, primaryUrl: 'https://example.com/job', datePosted: null };
     }
     describe('priority search coverage within operational limits', () => {
-        it('covers the actual 98-combination catalogue fairly across the configured 66-slot/108h sequence', () => {
+        it('covers distinct source queries fairly across the configured 66-slot/108h sequence', () => {
             const config = loadConfig();
-            expect(linkedinCoverage(config)).toMatchObject({ combinations: 98, slotsPerSequence: 66, sequenceHours: 108 });
+            expect(linkedinCoverage(config)).toMatchObject({ combinations: 91, slotsPerSequence: 66, sequenceHours: 108 });
             let state: ReturnType<typeof planBatch>['descriptionRotation'] | undefined;
             const seen = new Set<string>();
             const count = config.searches.rotation.sequence!.length;
@@ -225,7 +225,7 @@ describe("priority-coverage", () => {
                 for (const task of tasks) if (task.source === 'linkedin') seen.add(task.task_id);
                 if (slot === count - 1) expect(seen.size).toBe(66);
             }
-            expect(seen.size).toBe(98); // A second real sequence, not repeated sap-specialists cycles.
+            expect(seen.size).toBe(91); // Query overrides are deduplicated across batches/geographies.
         });
         it('revisits every broad priority group and public catalogue within 36 hours', () => {
             const config = loadConfig();

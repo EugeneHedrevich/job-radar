@@ -120,6 +120,11 @@ async function ensureRecoveryFields(connection: any): Promise<void> {
       ['aiSucceeded', 'INTEGER'], ['aiFailures', 'INTEGER'], ['aiFailureReasons', 'TEXT']]],
     ['SourceHealth', [['importToken', 'VARCHAR(36)'], ['importUntil', 'TIMESTAMP']]],
     ['SearchProgress', [['headCheckedAt', 'TIMESTAMP']]],
+    ['SourceHealth', [['windowStartedAt', 'TIMESTAMP'], ['searchRequests', 'INTEGER DEFAULT 0'],
+      ['detailRequests', 'INTEGER DEFAULT 0'], ['reservedSearch', 'INTEGER DEFAULT 0'], ['reservedDetail', 'INTEGER DEFAULT 0'],
+      ['recoveryPending', 'BOOLEAN DEFAULT 0'], ['lastHttpStatus', 'INTEGER'], ['lastRetryAfterSeconds', 'REAL']]],
+    ['CollectionRuns', [['jobsAccepted', 'INTEGER'], ['jobsFiltered', 'INTEGER'], ['exclusionReasons', 'TEXT']]],
+    ['CollectionOperations', [['jobsAccepted', 'INTEGER'], ['jobsFiltered', 'INTEGER'], ['exclusionReasons', 'TEXT']]],
   ] as const) {
     const columns: Array<{ name: string }> = await connection.run(`PRAGMA table_info(sap_jobradar_${table})`);
     for (const [field, type] of fields) if (!columns.some((column) => column.name === field))

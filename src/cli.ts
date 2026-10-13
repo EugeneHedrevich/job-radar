@@ -110,6 +110,9 @@ async function runCollect(flags: Args['flags'], claim?: CollectionClaim) {
   out(`  outcome            : ${summary.outcome}`);
   out(`  batch              : ${summary.batchKey}${file ? ' (offline demo fixture)' : ''}`);
   out(`  listings collected : ${summary.jobsFound}`);
+  out(`  records accepted   : ${summary.ingest.accepted}`);
+  out(`  records filtered   : ${summary.ingest.filtered}`);
+  for (const [reason, count] of Object.entries(summary.ingest.exclusionReasons)) out(`    ${count}: ${reason}`);
   out(`  new jobs           : ${summary.ingest.created}`);
   out(`  updated jobs       : ${summary.ingest.updatedJobIds.length}`);
   out(`  merged cross-source: ${summary.ingest.mergedAcrossSources}`);

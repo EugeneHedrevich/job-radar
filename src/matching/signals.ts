@@ -3,16 +3,17 @@ import { normalizeText } from '../util/text.js';
 import type { MatchableJob } from './types.js';
 
 export type WorkMode = 'fully_remote' | 'hybrid' | 'onsite' | 'unknown';
-export type Engagement = 'contract' | 'permanent' | 'unknown';
+export type Engagement = 'contract' | 'permanent' | 'alternatives' | 'unknown';
 
 const cache = new Map<string, RegExp>();
 
 /** Compile a configured pattern once. Patterns come from config, never from job text. */
-export function pattern(source: string): RegExp {
-  let compiled = cache.get(source);
+export function pattern(source: string, flags = 'i'): RegExp {
+  const key = `${flags}:${source}`;
+  let compiled = cache.get(key);
   if (!compiled) {
-    compiled = new RegExp(source, 'i');
-    cache.set(source, compiled);
+    compiled = new RegExp(source, flags);
+    cache.set(key, compiled);
   }
   return compiled;
 }
@@ -29,14 +30,14 @@ export interface JobText {
   hasDescription: boolean;
 }
 
-export function jobText(job: MatchableJob): JobText {
+export function jobText(job: Pick<MatchableJob, 'title' | 'description'>): JobText {
   const title = normalizeText(job.title);
   // Keep list/paragraph boundaries for requirements and attendance schedules.
   const body = (job.description ?? '')
     .replace(/<\/?(?:li|p|div|h[1-6])\b[^>]*>|<br\s*\/?\s*>/gi, '\n')
     .replace(/<[^>]+>/g, '')
     .split(/\r?\n/).map(normalizeText).join('\n');
-  return { title, body, all: `${title}\n${body}`, hasDescription: Boolean(job.description) };
+  return { title, body, all: `${title}\n${body}`, hasDescription: Boolean(body.trim()) };
 }
 
 export function detectEngagement(config: AppConfig, job: MatchableJob, text: JobText): Engagement {
@@ -45,26 +46,50 @@ export function detectEngagement(config: AppConfig, job: MatchableJob, text: Job
   const exclusions = config.scoring.hard_rejects.rules.filter((rule) =>
     rule.id === 'contract_excluded' || rule.id === 'permanent_only',
   );
-  if (exclusions.some((rule) => matchesAny(text.all, rule.any))) return 'permanent';
-  const jobType = normalizeText(job.jobType ?? '');
-  if (jobType.includes('contract')) return 'contract';
-  const contract = matchesAny(text.all, signals.contract ?? []);
-  const permanent = matchesAny(text.all, signals.permanent ?? []);
+  if (exclusions.some((rule) => employmentRuleMatches(config, text.all, rule.any))) return 'permanent';
+  if (matchesAny(text.all, signals.employment_alternatives ?? [])) return 'alternatives';
+  const clauses = sentences(text.all);
+  const permanent = clauses.some((clause) => matchesAny(clause, signals.permanent ?? []));
+  const contract = clauses.some((clause) => {
+    // Match each occurrence locally. Technical B2B/contract terminology is not an offer.
+    return (signals.contract ?? []).some((source) => [...clause.matchAll(new RegExp(source, 'gi'))].some((match) => {
+      const local = clause.slice(Math.max(0, match.index - 45), match.index + match[0].length + 65);
+      if (/b2b|contract/i.test(match[0]) && matchesAny(local, signals.technical_contract_context ?? []) &&
+        !matchesAny(local, signals.employment_context ?? [])) return false;
+      if (/^contract$/i.test(match[0]) && matchesAny(clause, signals.permanent ?? []) &&
+        !/\b(?:or|oder|alternatively|either)\b|\s\/\s/.test(clause)) return false;
+      return true;
+    }));
+  });
   if (contract && !permanent) return 'contract';
   if (permanent && !contract) return 'permanent';
-  if (contract && permanent) return 'contract'; // mixed postings stay open
+  if (contract && permanent) return 'alternatives';
+  const jobType = normalizeText(job.jobType ?? '');
+  if (/\bcontract\b/.test(jobType) && /\b(?:permanent|fulltime)\b/.test(jobType)) return 'alternatives';
+  if (/\bcontract\b/.test(jobType)) return 'contract';
+  if (/\bpermanent\b/.test(jobType)) return 'permanent';
   return 'unknown';
+}
+
+/** Negative technical B2B wording is not an exclusion of contractors either. */
+export function employmentRuleMatches(config: AppConfig, text: string, patterns: readonly string[]): boolean {
+  return sentences(text).some((clause) => patterns.some((source) => [...clause.matchAll(new RegExp(source, 'gi'))].some((match) => {
+    const local = clause.slice(Math.max(0, match.index - 45), match.index + match[0].length + 65);
+    return !/b2b|c2c/i.test(match[0]) || !matchesAny(local, config.scoring.signals.technical_contract_context ?? []) ||
+      matchesAny(local, config.scoring.signals.employment_context ?? []);
+  })));
 }
 
 export function detectWorkMode(config: AppConfig, job: MatchableJob, text: JobText): WorkMode {
   const signals = config.scoring.signals;
   const attendance = onsiteDaysPerMonth(config, text.all);
   if (Math.max(attendance.mandatory ?? 0, attendance.unclear ?? 0) > 0) return 'hybrid';
-  if (matchesAny(text.all, signals.fully_remote ?? [])) return 'fully_remote';
   if (matchesAny(text.all, signals.hybrid ?? [])) return 'hybrid';
+  if (limitedHomeoffice(config, text.all).length) return 'hybrid';
+  if (hasMandatoryOnsiteCondition(config, text.all)) return 'onsite';
+  if (matchesAny(text.all, signals.fully_remote ?? [])) return 'fully_remote';
   if (matchesAny(text.all, signals.onsite ?? [])) return 'onsite';
-  if (job.isRemote === true) return 'fully_remote';
-  if (job.isRemote === false && text.hasDescription) return 'onsite';
+  // Source flags also cover hybrid work and never establish an attendance schedule.
   return 'unknown';
 }
 
@@ -110,9 +135,23 @@ export function hourlyRate(config: AppConfig, job: MatchableJob): HourlyRate {
 /** Preserve list items and clauses, without splitting technology names at dots. */
 export function sentences(text: string): string[] {
   return text
-    .split(/[\r\n;]+|(?<=[.!?])\s+/)
+    .split(/[\r\n;]+|(?<!\bmax\.)(?<!\bmin\.)(?<!\bca\.)(?<=[.!?])\s+/i)
     .map((sentence) => sentence.trim())
     .filter(Boolean);
+}
+
+/** A cap on mobile/home working implies the remaining working days are onsite. */
+export function limitedHomeoffice(config: AppConfig, text: string): Array<{ quote: string; onsiteDays: number }> {
+  return sentences(text).flatMap((quote) => {
+    const clause = normalizeText(quote);
+    if (!matchesAny(clause, config.scoring.signals.homeoffice ?? [])) return [];
+    return (config.scoring.signals.remote_weekly_limits ?? []).flatMap((source) => {
+      const match = new RegExp(source, 'i').exec(clause);
+      const amount = match ? Number(match[1]) : NaN;
+      if (!Number.isFinite(amount) || amount < 0 || amount > 5) return [];
+      return [{ quote, onsiteDays: (5 - amount) * config.profile.compensation.working_days_per_month / 5 }];
+    });
+  });
 }
 
 export type Requirement = 'mandatory' | 'preferred' | 'unclear';
@@ -133,7 +172,7 @@ export function requirementSource(job: MatchableJob): string {
 interface Marker<T> { start: number; end: number; kind: T }
 
 function markers<T>(text: string, sources: readonly string[], kind: T): Marker<T>[] {
-  return sources.flatMap((source) => [...text.matchAll(new RegExp(source, 'gi'))]
+  return sources.flatMap((source) => [...text.matchAll(pattern(source, 'gi'))]
     .map((match) => ({ start: match.index, end: match.index + match[0].length, kind })));
 }
 
@@ -146,6 +185,10 @@ function nearestMarker<T>(found: Marker<T>[], start: number, end: number): Marke
 export function requirementMentions(config: AppConfig, text: string, term: string): RequirementMention[] {
   const needle = normalizeText(term);
   if (!needle) return [];
+  const escapedNeedle = needle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const occurrenceSource = `(?<![a-z0-9])${escapedNeedle}(?![a-z0-9])`;
+  // Most configured aliases do not occur in a given ad; avoid reparsing their sections.
+  if (!pattern(occurrenceSource).test(normalizeText(text))) return [];
   const mandatoryMarkers = config.scoring.signals.mandatory_markers ?? [];
   const preferredMarkers = config.scoring.signals.preferred_markers ?? [];
   const mentions: RequirementMention[] = [];
@@ -174,7 +217,10 @@ export function requirementMentions(config: AppConfig, text: string, term: strin
     }
     // A shared marker governs the remaining comma-separated items in this
     // sentence, until an item supplies its own mandatory/preferred marker.
-    let listKind: Requirement | null = section;
+    const normalBlock = normalizeText(block);
+    const sharedPreferred = !matchesAny(normalBlock, mandatoryMarkers) && preferredMarkers.some((source) =>
+      new RegExp(`(?:${source})[.!?]?$`, 'i').test(normalBlock));
+    let listKind: Requirement | null = sharedPreferred ? 'preferred' : section;
     for (const part of block.split(/,|\s+[|•]\s*/)) {
       const clause = normalizeText(part).replace(/^(?:[-+*#]+|\d+[.)])\s*/, '');
       const attendancePart = pattern(ONSITE).test(clause) || pattern(SCHEDULE).test(clause) ||
@@ -216,8 +262,7 @@ export function requirementMentions(config: AppConfig, text: string, term: strin
         section = null;
         listKind = null;
       }
-      const escapedNeedle = needle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      for (const occurrence of clause.matchAll(new RegExp(`(?<![a-z0-9])${escapedNeedle}(?![a-z0-9])`, 'g'))) {
+      for (const occurrence of clause.matchAll(pattern(occurrenceSource, 'g'))) {
         const local = nearestMarker(foundMarkers, occurrence.index, occurrence.index + needle.length);
         const kind = local?.kind ?? listKind ?? 'unclear';
         mentions.push({ kind, clause, start: occurrence.index, end: occurrence.index + needle.length,
@@ -365,6 +410,7 @@ export function hasUnclearOnsiteFrequency(config: AppConfig, text: string): bool
 /** Keep explicit frequency separate from whether that attendance is required. */
 export function onsiteDaysPerMonth(config: AppConfig, text: string): OnsiteDays {
   const days: OnsiteDays = { mandatory: null, optional: null, unclear: null };
+  for (const limit of limitedHomeoffice(config, text)) days.mandatory = Math.max(days.mandatory ?? 0, limit.onsiteDays);
   for (const clause of attendanceClauses(config, text)) {
     for (const match of onsiteSchedules(clause)) {
       const amount = NUMBER_WORDS[match[2] ?? match[1]!] ?? Number(match[2] ?? match[1]);

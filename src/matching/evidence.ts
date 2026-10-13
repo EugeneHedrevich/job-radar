@@ -32,8 +32,9 @@ export function validateGapEvidence(config: AppConfig, job: MatchableJob, gap: M
     if (!fact || !Object.hasOwn(fact, part)) { fact = undefined; break; }
     fact = fact[part];
   }
-  const value = gap.profilePath === 'languages' ? JSON.stringify(fact) : String(fact);
-  if (unknown(fact) || (!['string', 'number', 'boolean'].includes(typeof fact) && gap.profilePath !== 'languages') || value !== gap.profileValue) {
+  const arrayFact = gap.profilePath === 'languages' || gap.profilePath === 'engagement.rejected_types';
+  const value = arrayFact ? JSON.stringify(fact) : String(fact);
+  if (unknown(fact) || (!['string', 'number', 'boolean'].includes(typeof fact) && !arrayFact) || value !== gap.profileValue) {
     return `profile fact for "${gap.requirement}" is unknown or does not match the stated evidence`;
   }
   const text = jobText(job).all;
@@ -92,7 +93,7 @@ export function validateGapEvidence(config: AppConfig, job: MatchableJob, gap: M
   }
   if (gap.profilePath === 'travel.max_onsite_days_per_month' && typeof fact === 'number') {
     const days = onsiteDaysPerMonth(config, text).mandatory;
-    if (days !== null && days > fact && /\b(?:onsite|on-site|office|travel)\b/.test(sourceText(gap.requirement)) && /\b(?:onsite|on-site|office)\b/.test(quote) &&
+    if (days !== null && days > fact && /\b(?:onsite|on-site|office|travel|homeoffice|anwesenheit)\b/.test(sourceText(gap.requirement)) &&
       (onsiteDaysPerMonth(config, quote).mandatory ?? 0) > fact) return null;
   }
   // SAP experience is a stated floor (7+), never a confirmed upper bound.
@@ -102,29 +103,48 @@ export function validateGapEvidence(config: AppConfig, job: MatchableJob, gap: M
 /** Education omissions are retained even if the model forgets to report them. */
 export function educationUncertainty(config: AppConfig, job: MatchableJob): string[] {
   const text = jobText(job).all;
-  if (!/\b(?:degree|bachelor\w*|master\w*|phd|doctorate|education)\b/.test(text)) return [];
+  if (!/\b(?:degree|bachelor\w*|master\w*|phd|doctorate|education|studium|ausbildung|abschluss\w*)\b/.test(text)) return [];
   const missing: string[] = [];
   if (!config.profile.education.length) missing.push('candidate education is not stated; vacancy education requirements need confirmation');
   else if (config.profile.education.some((entry) => unknown(entry.qualification))) {
     missing.push('candidate qualification level is unknown; vacancy degree requirements need confirmation');
   }
-  if (/\b(?:related field|related discipline|equivalent (?:education|experience)|similar (?:field|qualification))\b/.test(text)) {
+  if (/\b(?:related field|related discipline|equivalent (?:education|experience)|similar (?:field|qualification)|vergleichbare\w* (?:qualifikation|ausbildung))\b/.test(text)) {
     missing.push('whether the declared education or experience satisfies the vacancy education alternatives is unknown');
   }
   return missing;
 }
 
+export function unresolvedMandatoryEducation(config: AppConfig, job: MatchableJob): boolean {
+  if (!educationUncertainty(config, job).length) return false;
+  const text = jobText(job).all;
+  return [...text.matchAll(/\b(?:degree|bachelor\w*|master\w*|phd|doctorate|education|studium|ausbildung|abschluss\w*)\b/g)]
+    .some((match) => requirementKind(config, text, match[0]) === 'mandatory');
+}
+
 /** Preserve explicit but undocumented capability requirements independently of
  * the model. Lists use requirementKind's local mandatory/preferred boundaries. */
 export function unknownSkillRequirements(config: AppConfig, job: MatchableJob): string[] {
+  return capabilityUncertainty(config, job).mandatory;
+}
+
+export function capabilityUncertainty(config: AppConfig, job: MatchableJob): { mandatory: string[]; preferred: string[] } {
   const text = jobText(job).all;
   const known = [
     ...Object.values(config.profile.skills).flatMap((skills) => skills.flatMap((skill) => [skill.name, ...(skill.aliases ?? [])])),
     ...config.profile.not_claimed.flatMap((claim) => [claim, ...(config.profile.not_claimed_aliases[claim] ?? [])]),
   ];
   const result: string[] = [];
+  const preferred: string[] = [];
+  for (const [name, terms] of Object.entries(config.scoring.requirement_capabilities)) {
+    if (termsInQuote(normalizeText(terms.join(' ')), known)) continue;
+    const kinds = terms.map((term) => requirementKind(config, text, term));
+    if (kinds.includes('mandatory')) result.push(`profile evidence for required capability "${name}" is not stated`);
+    else if (kinds.includes('preferred')) preferred.push(`profile evidence for preferred capability "${name}" is not stated`);
+  }
   const markers = [...(config.scoring.signals.mandatory_markers ?? []), ...(config.scoring.signals.preferred_markers ?? [])];
-  for (const clause of sentences(text).flatMap((part) => part.split(','))) {
+  const catalogTerms = Object.values(config.scoring.requirement_capabilities).flat();
+  for (const clause of sentences(text).flatMap((part) => part.split(/,|\s+(?:and|und|sowie|as well as)\s+|\s*&\s*/))) {
     if (nonSkillConstraintClause(clause)) continue;
     let capability = clause;
     for (const marker of markers) capability = capability.replace(new RegExp(marker, 'gi'), '');
@@ -132,13 +152,14 @@ export function unknownSkillRequirements(config: AppConfig, job: MatchableJob): 
       .replace(/\b(?:is|are|a|an|skills?|requirements?|qualifications?)\b/g, '').replace(/[:.!?]/g, '').trim();
     // Connective fragments under a requirement heading are not capabilities.
     if (/^(?:(?:and|or|with|in|of|to|for|the|you|will|we|our|your|mit|und|oder|der|die|das)\s*)+$/.test(capability)) continue;
-    if (!capability || termsInQuote(capability, known) ||
-      /\b(?:onsite|on-site|office|remote|hybrid|travel|attendance|relocat\w*|days?|hours?|years?|degree|bachelor\w*|master\w*|education|english|german|french|dutch|italian|spanish|polish|russian|language|rate|salary|contract|freelanc\w*|b2b|work permit|authori[sz]ation)\b/.test(capability)) continue;
-    if (requirementKind(config, text, capability) === 'mandatory') {
+    if (!capability || termsInQuote(capability, known) || termsInQuote(capability, catalogTerms) ||
+      /\b(?:onsite|on-site|office|remote|hybrid|travel|attendance|relocat\w*|days?|hours?|years?|degree|bachelor\w*|master\w*|education|studium|ausbildung|abschluss\w*|english|german|french|dutch|italian|spanish|polish|russian|language|rate|salary|contract|freelanc\w*|b2b|work permit|authori[sz]ation)\b/.test(capability)) continue;
+    const kind = requirementKind(config, text, capability);
+    if (kind === 'mandatory') {
       result.push(`profile evidence for required capability "${capability}" is not stated`);
-    }
+    } else if (kind === 'preferred') preferred.push(`profile evidence for preferred capability "${capability}" is not stated`);
   }
-  return [...new Set(result)];
+  return { mandatory: [...new Set(result)], preferred: [...new Set(preferred)] };
 }
 
 export function deterministicGapEvidence(config: AppConfig, job: MatchableJob): MandatoryGapEvidence[] {

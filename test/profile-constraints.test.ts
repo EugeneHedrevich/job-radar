@@ -3,6 +3,7 @@ import { loadConfig, resetConfigCache, type AppConfig } from '../src/config/inde
 import { validateGapEvidence } from '../src/matching/evidence.js';
 import { assessWithLlm } from '../src/matching/llm.js';
 import { assessWithRules } from '../src/matching/rules.js';
+import { detectEngagement, detectWorkMode, jobText } from '../src/matching/signals.js';
 import { enableReviewAi, reviewAiResponse, reviewJob } from './helpers/review.js';
 let config: AppConfig;
 beforeEach(() => { resetConfigCache(); config = loadConfig(); });
@@ -23,7 +24,7 @@ describe('language obligations use the actual profile and local context', () => 
     });
     it.each(['German is mandatory.', 'German optional. French is mandatory.',
         'German is preferred, French is required.', 'Requirements:\n- German',
-        'Anforderungen:\n- Deutschkenntnisse', 'Profil kandydata:\n- język niemiecki',
+        'Das bringst du mit:\nGute Deutsch- und Englischkenntnisse.', 'Profil kandydata:\n- język niemiecki',
         'Profil recherché:\n- allemand', 'Jouw profiel:\n- Duits'])('rejects independent unheld requirements: %s', (condition) => {
         const job = reviewJob(condition), result = assessWithRules(config, job);
         expect(result.hardReject).toBe(true);
@@ -34,6 +35,7 @@ describe('language obligations use the actual profile and local context', () => 
     it('accepts a held language and does not infer a CEFR level from professional', () => {
         config.profile.languages.push({ code: 'de', proficiency: 'professional' });
         expect(assessWithRules(config, reviewJob('German is mandatory.')).hardReject).toBe(false);
+        expect(assessWithRules(config, reviewJob('Das bringst du mit:\nGute Deutsch- und Englischkenntnisse.')).recommendation).toBe('Apply');
         const result = assessWithRules(config, reviewJob('German C1 is mandatory.'));
         expect(result.hardReject).toBe(false);
         expect(result.recommendation).toBe('Review');
@@ -45,6 +47,74 @@ describe('language obligations use the actual profile and local context', () => 
         expect(result.hardReject).toBe(true);
         for (const gap of result.mandatoryGapEvidence)
             expect(validateGapEvidence(config, job, gap)).toBeNull();
+    });
+});
+describe('employment and limited remote work use description evidence', () => {
+    it.each(['B2B integrations and EDI experience.', 'A2A/B2B/B2G integration experience.',
+        'Customer/supplier B2B integration experience.'])('does not interpret technical terms as an employment offer: %s', (technical) => {
+        const job = reviewJob('', { jobType: null, description: `SAP BTP and SAP Integration Suite. ${technical}` });
+        expect(detectEngagement(config, job, jobText(job))).toBe('unknown');
+        expect(detectWorkMode(config, job, jobText(job))).toBe('unknown'); // Coarse source remote=true is insufficient.
+        const permanent = { ...job, description: `${job.description}\nUnbefristete Anstellung.` };
+        expect(assessWithRules(config, permanent)).toMatchObject({ hardReject: true, recommendation: 'Skip' });
+    });
+    it('retains real contract/permanent alternatives for review and still recognises employment B2B', () => {
+        const contract = reviewJob('B2B contract engagement.');
+        expect(detectEngagement(config, contract, jobText(contract))).toBe('contract');
+        const alternatives = { ...contract, description: 'SAP BTP, CAP, Node.js and TypeScript. Fully remote. Permanent role or freelance contract.' };
+        expect(assessWithRules(config, alternatives)).toMatchObject({ hardReject: false, recommendation: 'Review' });
+    });
+    it('keeps the verified Einhell blockers when AI evidence is invalid, without inventing experience gaps', async () => {
+        const job = reviewJob('', { title: 'SAP Integration Expert (m/w/d)', company: 'Einhell Germany AG',
+            jobType: 'fulltime', isRemote: true, description: [
+                '**Das bringst du mit:**',
+                'Fundierte, mehrjährige Erfahrung mit der SAP Integration Suite, insbesondere Cloud Integration, API Management und Event Mesh.',
+                'Sehr gute Erfahrung in der Integration von SAP-Cloud-Lösungen, insbesondere SAP Commerce Cloud, sowie von Non-SAP-Systemen wie Salesforce.',
+                'Erfahrung mit B2B-Integrationen und EDI-Anbindungen an Kunden und Lieferanten.',
+                'Gute Deutsch- und Englischkenntnisse in Wort und Schrift;',
+                '**Was dich erwartet:**',
+                'Flexible Arbeitszeiten ohne Kernzeiten, die Möglichkeit zum mobilen Arbeiten (max. 2 Tage pro Woche).',
+                'Attraktive Vergütung – selbstverständlich in unbefristeter Anstellung.',
+            ].join('\n') });
+        const rules = assessWithRules(config, job);
+        expect(detectEngagement(config, job, jobText(job))).toBe('permanent');
+        expect(detectWorkMode(config, job, jobText(job))).toBe('hybrid');
+        expect(rules).toMatchObject({ recommendation: 'Skip', hardReject: true, fitScore: config.scoring.hard_rejects.score_cap });
+        expect(rules.hardRejectReason).toMatch(/Permanent/);
+        expect(rules.hardRejectReason).toMatch(/German/);
+        expect(rules.hardRejectReason).toMatch(/12\.0 days\/month/);
+        for (const skill of ['Commerce Cloud', 'Salesforce', 'EDI']) {
+            expect(rules.missingInformation.join(' ')).toContain(`required capability "${skill}"`);
+            expect(rules.mandatoryGaps.join(' ')).not.toContain(skill);
+        }
+        for (const evidence of rules.mandatoryGapEvidence) expect(validateGapEvidence(config, job, evidence)).toBeNull();
+        enableReviewAi(config);
+        vi.stubGlobal('fetch', vi.fn(async () => reviewAiResponse('Apply', 99, { mandatory_gaps: [{
+            requirement: 'Invented skill', vacancy_quote: 'Not in this vacancy', profile_path: 'skills.core.0.proficiency', profile_value: 'expert',
+        }] })));
+        const fallback = await assessWithLlm(config, job);
+        expect(fallback).toMatchObject({ engine: 'rules', recommendation: 'Skip', hardReject: true, mandatoryGaps: rules.mandatoryGaps });
+    });
+    it('treats a capped Homeoffice schedule as attendance evidence despite a fully-remote source flag', () => {
+        const job = reviewJob('Homeoffice (max. 2 Tage pro Woche).');
+        expect(assessWithRules(config, job)).toMatchObject({ recommendation: 'Skip', hardReject: true });
+        expect(detectWorkMode(config, job, jobText(job))).toBe('hybrid');
+    });
+    it('evaluates each named experience requirement and keeps preferred uncertainty separate', () => {
+        const job = reviewJob('Requirements:\nSAP CPI and Commerce Cloud experience.\nSalesforce and EDI are preferred.');
+        const result = assessWithRules(config, job);
+        expect(result).toMatchObject({ hardReject: false, mandatoryGaps: [], recommendation: 'Review' });
+        expect(result.fitScore).toBeLessThan(config.scoring.thresholds.apply);
+        expect(result.missingInformation).toContain('profile evidence for required capability "Commerce Cloud" is not stated');
+        for (const name of ['Salesforce', 'EDI']) expect(result.missingInformation).toContain(`profile evidence for preferred capability "${name}" is not stated`);
+    });
+    it('keeps technical overlap below Apply when mandatory employment/work conditions are unresolved', () => {
+        const result = assessWithRules(config, reviewJob('', { jobType: null, isRemote: true,
+            description: 'SAP BTP, CAP, Node.js, TypeScript, CDS, SAP HANA Cloud, OData, REST, Cloud Foundry, SAPUI5, SAP Fiori and SAP Integration Suite.' }));
+        expect(result).toMatchObject({ hardReject: false, mandatoryGaps: [], recommendation: 'Review' });
+        expect(result.fitScore).toBeLessThan(config.scoring.thresholds.apply);
+        expect(result.missingInformation.join(' ')).toMatch(/Employment format/);
+        expect(result.missingInformation.join(' ')).toMatch(/Work mode and attendance/);
     });
 });
 describe('ABAP capability scope', () => {
