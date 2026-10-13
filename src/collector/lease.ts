@@ -53,7 +53,8 @@ export async function updateOperation(claim: CollectionClaim, patch: Partial<Col
       .set({ expiresAt: new Date(now.getTime() + LEASE_MS).toISOString() })
       .where({ name: NAME, token: claim.token, operation_ID: claim.operationId, expiresAt: { '>': now.toISOString() } }));
     if (!renewed) throw new Error('Collection lease expired or changed owner');
-    await tx.run(UPDATE(db().CollectionOperations).set({ ...patch, updatedAt: now.toISOString() })
+    await tx.run(UPDATE(db().CollectionOperations).set({ ...patch,
+      ...(patch.aiFailureReasons !== undefined ? { aiFailureReasons: JSON.stringify(patch.aiFailureReasons) } : {}), updatedAt: now.toISOString() })
       .where({ ID: claim.operationId }));
   });
 }
@@ -85,5 +86,10 @@ export async function readOperation(id?: string): Promise<CollectionOperation | 
   const selectedId = id ?? activeId;
   const row = await queryOne<any>(selectedId ? SELECT.from(db().CollectionOperations).where({ ID: selectedId })
     : SELECT.from(db().CollectionOperations).orderBy('startedAt desc', 'ID desc'));
-  return row ? { ...row, aiBudgetExhausted: Boolean(row.aiBudgetExhausted) } : null;
+  if (!row) return null;
+  let reasons: string[] = [];
+  try { const parsed: unknown = JSON.parse(row.aiFailureReasons ?? '[]');
+    if (Array.isArray(parsed)) reasons = parsed.filter((value) => typeof value === 'string');
+  } catch { /* Old diagnostic text remains in message. */ }
+  return { ...row, aiBudgetExhausted: Boolean(row.aiBudgetExhausted), aiFailureReasons: reasons };
 }

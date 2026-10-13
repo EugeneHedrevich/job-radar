@@ -73,6 +73,7 @@ export async function connectDb(dbPathOverride?: string): Promise<any> {
       await ensureMatchingState(tx);
       await ensurePersonalTracking(tx);
       await ensureLocalControls(tx);
+      await ensureRecoveryFields(tx);
       await ensureIndexes(tx);
     });
     entities = cds.entities(NAMESPACE) as unknown as Entities;
@@ -108,6 +109,22 @@ async function ensureLocalControls(connection: any): Promise<void> {
   await connection.run(`CREATE TABLE IF NOT EXISTS sap_jobradar_FollowUpReminders
     (ID VARCHAR(36) PRIMARY KEY NOT NULL, job_ID VARCHAR(36), kind VARCHAR(30), sentAt TIMESTAMP NOT NULL,
     dueDate DATE NOT NULL, status VARCHAR(20), createdAt TIMESTAMP, updatedAt TIMESTAMP, completedAt TIMESTAMP)`);
+}
+
+async function ensureRecoveryFields(connection: any): Promise<void> {
+  for (const [table, fields] of [
+    ['Assessments', [['aiOutcome', 'VARCHAR(30)'], ['aiReason', 'VARCHAR(2000)']]],
+    ['AiAssessmentQueue', [['attempts', 'INTEGER DEFAULT 0'], ['attemptedAt', 'TIMESTAMP'],
+      ['retryAfter', 'TIMESTAMP'], ['lastOutcome', 'VARCHAR(30)'], ['lastReason', 'VARCHAR(2000)']]],
+    ['CollectionOperations', [['cachedAssessments', 'INTEGER'], ['rulesAssessments', 'INTEGER'],
+      ['aiSucceeded', 'INTEGER'], ['aiFailures', 'INTEGER'], ['aiFailureReasons', 'TEXT']]],
+    ['SourceHealth', [['importToken', 'VARCHAR(36)'], ['importUntil', 'TIMESTAMP']]],
+    ['SearchProgress', [['headCheckedAt', 'TIMESTAMP']]],
+  ] as const) {
+    const columns: Array<{ name: string }> = await connection.run(`PRAGMA table_info(sap_jobradar_${table})`);
+    for (const [field, type] of fields) if (!columns.some((column) => column.name === field))
+      await connection.run(`ALTER TABLE sap_jobradar_${table} ADD COLUMN ${field} ${type}`);
+  }
 }
 
 async function ensureMatchingState(connection: any): Promise<void> {

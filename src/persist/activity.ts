@@ -73,5 +73,5 @@ async function applyObservations(tx: any, observations: ListingActivity[]): Prom
   }
   const closed = await closedJobIds(tx);
   if (closed.size) await tx.run(UPDATE(db().AiAssessmentQueue).set({ status: 'Superseded' })
-    .where({ job_ID: { in: [...closed] }, status: 'Pending' }));
+    .where({ job_ID: { in: [...closed] }, status: { in: ['Pending', 'RetryPending'] } }));
 }

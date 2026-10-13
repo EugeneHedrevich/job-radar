@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import type { CollectionOperation } from '../../src/dashboard/types';
 import { request } from './api';
 
@@ -47,25 +47,45 @@ export function useCollection(onFinished: () => void) {
 }
 
 const stages = ['Preparing', 'Collecting', 'Saving', 'Assessing', 'Finished'];
-export function CollectionProgress({ operation, error }: { operation: CollectionOperation | null; error: string | null }) {
-  if (!operation && !error) return null;
-  const index = operation ? stages.indexOf(operation.stage) : -1;
+export function CollectionProgress({ operation, error, children }: {
+  operation: CollectionOperation | null; error: string | null; children?: ReactNode;
+}) {
+  if (!operation && !error) return <details className="collection-idle"><summary>Collection diagnostics</summary>{children}</details>;
+  const running = operation?.outcome === 'Running';
+  const title = operation ? running ? operation.stage : {
+    Completed: 'Collection finished', Empty: 'Searches returned no vacancies', Partial: 'Finished with some failures',
+    Failed: 'Collection failed', NoSources: 'No sources available', Running: 'Collecting',
+  }[operation.outcome] : 'Collection unavailable';
+  const counts = operation && <>
+    <p className="small progress-counts">{operation.tasksDone}/{operation.tasksTotal} tasks reported · {operation.jobsFound} records found · {operation.jobsNew} new jobs · {operation.jobsUpdated} updated jobs</p>
+    {operation.cachedAssessments !== null && operation.cachedAssessments !== undefined ? <p className="small">
+      {operation.cachedAssessments} cached assessments · {operation.rulesAssessments ?? 0} new rules assessments ·
+      {' '}{operation.aiSucceeded ?? 0} successful AI assessments · {operation.aiFailures ?? 0} failed AI attempts ({operation.aiCalls} calls)</p>
+      : <p className="muted small">{operation.jobsAssessed} records processed. Assessment breakdown was not recorded for this older run.</p>}
+    {operation.tasksFailed > 0 && <p className="warning small">{operation.tasksFailed} failed source tasks · {operation.tasksSucceeded} succeeded · {operation.tasksSkipped} skipped</p>}
+    {operation.message && <p className="muted small">{operation.message}</p>}
+    {operation.aiFailureReasons.length > 0 && <ul className="failure-reasons">{operation.aiFailureReasons.map((reason, index) => <li key={index}>{reason}</li>)}</ul>}
+    {!running && operation.aiBacklog > 0 && <p className="pending small">
+      {operation.aiBudgetExhausted ? `AI call allowance reached (${operation.aiCalls} calls). ` : ''}
+      {operation.aiBacklog} remain queued for a later collection.</p>}
+  </>;
+  const failure = error && <p className="error small" role="alert">{error}</p>;
+  if (!running) return <section aria-label="Collection result" aria-live="polite">
+    <details className="progress-panel terminal-result" key={operation?.ID}>
+      <summary><strong>{title}</strong>{operation && <span className="muted small"> · {operation.jobsNew} new / {operation.jobsUpdated} updated
+        {operation.aiFailures ? ` · ${operation.aiFailures} AI failures` : ''}
+        {operation.aiBacklog ? ` · ${operation.aiBacklog} AI queued` : ''}</span>}</summary>
+      <div className="terminal-diagnostics">{counts}{children}</div>
+    </details>{failure}</section>;
+  const index = stages.indexOf(operation!.stage);
   return <section className="progress-panel" aria-label="Collection progress" aria-live="polite">
-    {operation && <>
-      <div className="progress-heading"><strong>{operation.outcome === 'Running' ? operation.stage :
-        { Completed: 'Collection finished', Empty: 'No vacancies found', Partial: 'Finished with partial failures',
-          Failed: 'Collection failed', NoSources: 'No sources available' }[operation.outcome]}</strong>
-        <span className="muted small">{operation.outcome === 'Running' ? <><span className="spinner" /> Running</> : operation.outcome}</span></div>
-      <ol className="stages" aria-label="Collection stages">{stages.map((stage, position) =>
-        <li key={stage} className={position === index ? 'current' : position < index ? 'done' : ''}
-          aria-current={position === index ? 'step' : undefined}>{stage}</li>)}</ol>
-      <p className="small progress-counts">{operation.tasksDone}/{operation.tasksTotal} tasks reported · {operation.jobsFound} found · {operation.jobsNew} new · {operation.jobsUpdated} updated · {operation.jobsAssessed} assessed · {operation.aiCalls} AI calls</p>
-      {operation.tasksFailed > 0 && <p className="warning small">{operation.tasksFailed} failed tasks · {operation.tasksSucceeded} succeeded · {operation.tasksSkipped} skipped</p>}
-      {operation.message && <p className={operation.outcome === 'Failed' || operation.outcome === 'Partial' ? 'warning small' : 'muted small'}>{operation.message}</p>}
-      {operation.outcome !== 'Running' && operation.aiBacklog > 0 && <p className="pending small">
-        {operation.aiBudgetExhausted ? `AI call budget reached (${operation.aiCalls} calls). ` : ''}
-        {operation.aiBacklog} vacancies remain in the AI backlog for a later collection.</p>}
-    </>}
-    {error && <p className="error" role="alert">{error}</p>}
+    <div className="progress-heading"><strong>{title}</strong><span className="muted small"><span className="spinner" /> Running</span></div>
+    <ol className="stages">{stages.map((stage, position) => <li key={stage}
+      className={position === index ? 'current' : position < index ? 'done' : ''}
+      aria-current={position === index ? 'step' : undefined}>{stage}</li>)}</ol>
+    <p className="small">{operation!.tasksDone}/{operation!.tasksTotal} tasks reported · {operation!.jobsFound} found ·
+      {' '}{operation!.jobsNew} new jobs · {operation!.jobsUpdated} updated · {operation!.aiSucceeded ?? 0} successful AI · {operation!.aiCalls} AI calls</p>
+    {Boolean(operation!.tasksFailed || operation!.aiFailures) && <p className="warning small">Some attempts failed; details are available below.</p>}
+    <details><summary>Diagnostics</summary>{counts}{children}</details>{failure}
   </section>;
 }

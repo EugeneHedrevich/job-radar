@@ -1,16 +1,19 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { createElement } from 'react';
+import { renderToStaticMarkup } from 'react-dom/server';
 import { claimCollection, readOperation, updateOperation } from '../src/collector/lease.js';
 import { runCollector } from '../src/collector/run.js';
-import { planBatch } from '../src/collector/plan.js';
-import { recordSearchProgress, reserveBatchPlan } from '../src/collector/rotation.js';
-import { loadConfig, resetConfigCache } from '../src/config/index.js';
+import { loadConfig, PROJECT_ROOT, resetConfigCache } from '../src/config/index.js';
 import { cds, connectDb, db, disconnectDb, query, queryOne, SELECT, UPDATE } from '../src/db/index.js';
 import { importVacancy, type ImportMetadata } from '../src/dashboard/import.js';
 import { listReminders, updateReminder } from '../src/dashboard/reminders.js';
 import { listJobs, readJob, updateTracking } from '../src/dashboard/store.js';
 import { collect } from '../src/pipeline/collect.js';
+import { withCollectionOperation } from '../src/pipeline/collection-operation.js';
+import { rank } from '../src/pipeline/rank.js';
+import { recordOutcomes } from '../src/collector/health.js';
 import { closeTempDb, resetTestDb, useTempDb } from './helpers/db.js';
-import { ingestReview, reviewRecord } from './helpers/review.js';
+import { enableReviewAi, ingestReview, reviewRecord } from './helpers/review.js';
 import { startTestWorker, type TestWorker } from './helpers/worker.js';
 
 vi.mock('../src/collector/run.js', () => ({ runCollector: vi.fn() }));
@@ -65,6 +68,51 @@ describe('local dashboard controls', () => {
     expect(lookup).toHaveBeenCalledTimes(1);
   });
 
+  it.each([429, 403])('persists import HTTP %s, honours Retry-After and keeps later imports off the source', async (status) => {
+    const began = new Date(Date.now() - 1000);
+    const delay = 18 * 3600;
+    const lookup = vi.fn(async (): Promise<ImportMetadata> => ({ job: null, activity: null, requests: 1,
+      message: `HTTP ${status}`, failure: { kind: status === 429 ? 'rate_limit' : 'blocked',
+        httpStatus: status, message: `HTTP ${status}`, retryAfterSeconds: delay } }));
+    expect(await importVacancy({ url: 'https://www.linkedin.com/jobs/view/445566' }, lookup))
+      .toMatchObject({ availability: 'Could not verify', failure: { httpStatus: status, retryAfterSeconds: delay } });
+    await disconnectDb(); await connectDb(file);
+    const health = await queryOne<any>(SELECT.from(db().SourceHealth).where({ source: 'linkedin' }));
+    expect(new Date(health.cooldownUntil).getTime()).toBeGreaterThanOrEqual(Date.now() + (delay - 10) * 1000);
+    // A success from an older in-flight collection cannot clear the newer import failure.
+    await recordOutcomes(loadConfig(), [{ taskId: 'older', source: 'linkedin', searchTerm: 'SAP',
+      location: undefined, countryIndeed: undefined, status: 'Succeeded', resultCount: 1, durationMs: 1 }], new Date(), began);
+    // A later timeout from that older collection cannot shorten the import cooldown either.
+    await recordOutcomes(loadConfig(), [{ taskId: 'older-timeout', source: 'linkedin', searchTerm: 'SAP',
+      location: undefined, countryIndeed: undefined, status: 'Failed', resultCount: 0, durationMs: 1,
+      errorKind: 'timeout', message: 'Timed out' }], new Date(), began);
+    expect(await importVacancy({ url: 'https://www.linkedin.com/jobs/view/556677' }, lookup))
+      .toMatchObject({ availability: 'Could not verify', message: expect.stringContaining('cooldown') });
+    expect(lookup).toHaveBeenCalledTimes(1);
+    expect((await queryOne<any>(SELECT.from(db().SourceHealth).where({ source: 'linkedin' }))).cooldownUntil).toBe(health.cooldownUntil);
+  });
+
+  it('keeps separate assessment counts and provider errors through shared operation finalisation', async () => {
+    const id = (await ingestReview()).jobIds[0]!;
+    await rank({ rulesOnly: true }); // Stored rules cache exists before the operation.
+    enableReviewAi();
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('Temporary outage', { status: 503 })));
+    const reservation = await claimCollection('cli-cycle');
+    if (!reservation.acquired) throw new Error('Expected lease');
+    await withCollectionOperation(reservation.claim, () => collect({ claim: reservation.claim, fixture: [] }),
+      (_summary, report) => rank({ jobIds: [id], includePendingAi: true, onProgress: report }));
+    expect(await readOperation()).toMatchObject({ outcome: 'Partial', jobsNew: 0, jobsUpdated: 0,
+      cachedAssessments: 0, rulesAssessments: 0, aiSucceeded: 0, aiFailures: 1, aiCalls: 1,
+      aiFailureReasons: [expect.stringContaining('503')], message: expect.stringContaining('AI attempts failed') });
+    const second = await claimCollection('dashboard');
+    if (!second.acquired) throw new Error('Expected next lease');
+    await withCollectionOperation(second.claim, () => collect({ claim: second.claim, fixture: [] }),
+      (_summary, report) => rank({ jobIds: [id], includePendingAi: true, onProgress: report }));
+    expect(await readOperation()).toMatchObject({ outcome: 'Empty', cachedAssessments: 1, rulesAssessments: 0,
+      aiSucceeded: 0, aiFailures: 0, aiCalls: 0 });
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
   it('returns one shared active operation to overlapping dashboard and scheduler processes', async () => {
     for (const trigger of ['dashboard', 'scheduled']) workers.push(startTestWorker('collection-claim-worker.ts', {
       JOB_RADAR_TEST_DB_PATH: file, JOB_RADAR_TEST_TRIGGER: trigger,
@@ -105,37 +153,6 @@ describe('local dashboard controls', () => {
     expect(await readOperation()).toMatchObject({ outcome, stage: scenario === 'failed' ? 'Error' : 'Finished' });
   });
 
-  it('keeps pagination after 108 hours and ignores an empty failed cursor reset', async () => {
-    const config = loadConfig(), at = new Date('2026-10-01T00:00:00Z');
-    const first = await reserveBatchPlan(config, { batchKey: 'cap-broad', onlySources: ['linkedin'], at });
-    const task = first.tasksBySource.get('linkedin')![0]!;
-    const outcome = { taskId: task.task_id, source: task.source, searchTerm: task.search_term,
-      location: task.location, countryIndeed: task.country_indeed, status: 'Succeeded' as const,
-      resultCount: 25, durationMs: 1, nextCursor: { offset: 20 } };
-    await recordSearchProgress([outcome], at);
-    await recordSearchProgress([{ ...outcome, status: 'Failed', resultCount: 0, nextCursor: { offset: 0 } }], at);
-    await disconnectDb(); await connectDb(file);
-    const resumed = await reserveBatchPlan(config, { batchKey: 'cap-broad', onlySources: ['linkedin'],
-      at: new Date(at.getTime() + 108 * 3_600_000) });
-    expect(resumed.tasksBySource.get('linkedin')!.find((row) => row.task_id === task.task_id)?.offset).toBe(20);
-    await recordSearchProgress([{ ...outcome, resultCount: 0, nextCursor: { offset: 0 } }], at);
-    expect(JSON.parse((await queryOne<any>(SELECT.from(db().SearchProgress).where({ taskKey: task.task_id }))).state)).toEqual({ offset: 0 });
-  });
-
-  it('drains a large postponed LinkedIn batch on subsequent three-hour cycles', () => {
-    const config = loadConfig();
-    let plan = planBatch(config, { batchKey: 'emea-frontend' });
-    const seen = new Set<string>();
-    for (let cycle = 0; cycle < 9; cycle += 1) {
-      const tasks = [...plan.tasksBySource.values()].flat();
-      expect(tasks.length).toBeLessThanOrEqual(18);
-      expect(tasks.filter((task) => task.source === 'linkedin').length).toBeLessThanOrEqual(2);
-      for (const task of tasks) if (task.source === 'linkedin') seen.add(task.task_id);
-      plan = planBatch(config, { batchKey: 'sap-specialists', descriptionRotation: plan.descriptionRotation });
-    }
-    expect(seen.size).toBe(18);
-  });
-
   it('persists calendar follow-ups across restart without resetting them on unchanged tracking saves', async () => {
     const id = (await ingestReview()).jobIds[0]!;
     const sentAt = '2026-10-23T20:30:00.000Z'; // Sofia 23:30, before the DST transition.
@@ -161,13 +178,24 @@ describe('local dashboard controls', () => {
   it('leaves legacy send dates unknown until supplied and keeps closed applications in their view', async () => {
     const id = (await ingestReview()).jobIds[0]!;
     await cds.run(UPDATE(db().Jobs).set({ cvSent: true }).where({ ID: id }));
-    await updateTracking(id, { personalNotes: 'Legacy application' });
+    await updateTracking(id, { cvSent: true, cvSentAt: null, personalNotes: 'Legacy application' });
+    const legacy = await readJob(id);
+    expect(legacy).toMatchObject({ status: 'New', cvSentAt: null });
+    const module = await import(`${PROJECT_ROOT}/frontend/src/App.tsx`);
+    const markup = renderToStaticMarkup(createElement(module.TrackingForm, { job: legacy,
+      onSaved: () => {}, onDirty: () => {}, onBusy: () => {} }));
+    const datetime = markup.match(/<input[^>]*type="datetime-local"[^>]*>/)![0];
+    expect(datetime).not.toMatch(/\brequired(?:=|\s|>)/);
+    await updateTracking(id, { status: 'Interview', personalNotes: 'Status can change without a date' });
     expect(await listReminders()).toHaveLength(0);
     expect(await readJob(id)).toMatchObject({ cvSentAt: null });
     await updateTracking(id, { cvSentAt: '2026-10-13T10:00:00Z' });
+    await updateTracking(id, { cvSent: true, personalNotes: 'Date retained' });
+    expect(await listReminders()).toHaveLength(1);
     await cds.run(UPDATE(db().SourceListings).set({ activityState: 'Closed' }).where({ job_ID: id }));
     expect((await listJobs(new URLSearchParams({ view: 'applications', minScore: '100', activity: 'Active' }))).items.map((row) => row.ID)).toEqual([id]);
     await updateTracking(id, { cvSent: false });
     expect(await listReminders(id)).toMatchObject([{ status: 'Cancelled' }]);
+    await expect(updateTracking(id, { cvSent: true, personalNotes: 'Do not partially save' })).rejects.toMatchObject({ status: 400 });
   });
 });

@@ -34,6 +34,7 @@ export async function runCollector(config: AppConfig, options: RunCollectorOptio
   const pending = new Map<string, CollectorTask>(options.tasks.map((task) => [task.task_id, task]));
   const statistics = new Map<string, { searchRequests: number; detailRequests: number }>();
   const progress = new Map<string, NonNullable<TaskOutcome['nextCursor']>>();
+  const checkedHeads = new Set<string>();
   const positions = new Map<string, number>();
   let activeTaskId = options.tasks[0]?.task_id;
   let timedOut = false;
@@ -117,6 +118,8 @@ export async function runCollector(config: AppConfig, options: RunCollectorOptio
       statistics.set(record.task_id, { searchRequests: record.search_requests, detailRequests: record.detail_requests });
     } else if (record.type === 'search_progress' && pending.has(record.task_id)) {
       progress.set(record.task_id, record.cursor);
+    } else if (record.type === 'search_head_checked' && pending.has(record.task_id)) {
+      checkedHeads.add(record.task_id);
     } else if (record.type === 'job') {
       if (pending.get(record.task_id)?.source !== record.source) return;
       const key = `${record.task_id}:${record.job.job_url ?? record.job.id ?? positions.size}`;
@@ -144,6 +147,7 @@ export async function runCollector(config: AppConfig, options: RunCollectorOptio
         countryIndeed: task?.country_indeed,
         status: record.status === 'succeeded' ? 'Succeeded' : record.status === 'skipped' ? 'Skipped' : 'Failed',
         resultCount: record.count,
+        headChecked: Boolean(record.head_checked || checkedHeads.has(record.task_id)),
         durationMs: record.duration_ms,
         ...(record.error_kind ? { errorKind: record.error_kind } : {}),
         ...(record.message ? { message: redactProxy(record.message) } : {}),
@@ -200,6 +204,7 @@ export async function runCollector(config: AppConfig, options: RunCollectorOptio
       countryIndeed: task.country_indeed,
       status: timedOut && task.task_id !== activeTaskId ? 'Skipped' : 'Failed',
       resultCount: output.jobs.filter((record) => record.taskId === task.task_id).length,
+      headChecked: checkedHeads.has(task.task_id),
       durationMs: timedOut && task.task_id === activeTaskId ? options.taskTimeoutSeconds * 1000 : 0,
       ...(timedOut && task.task_id !== activeTaskId ? {} : { errorKind: timedOut ? 'timeout' : exitCode === 0 ? 'parse' : 'error' }),
       message: timedOut ? task.task_id === activeTaskId ? 'Source process terminated after collection deadline expired'

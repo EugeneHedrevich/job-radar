@@ -31,8 +31,12 @@ export default function Reminders({ items, select, changed }: { items: FollowUpR
   const due = items.filter((item) => item.dueDate <= sofiaDate());
   const upcoming = items.filter((item) => item.dueDate > sofiaDate());
   const rows = (values: FollowUpReminder[]) => values.map((reminder) => <ReminderRow key={`${reminder.ID}:${reminder.dueDate}`} reminder={reminder} select={select} changed={changed} />);
+  if (!due.length) return <div className="reminder-indicator">
+    <span className="muted small">✓ No follow-ups due</span>
+    {upcoming.length > 0 && <details><summary>{upcoming.length} upcoming · next {upcoming[0]!.dueDate}</summary>{rows(upcoming)}</details>}
+  </div>;
   return <section className="reminders-panel" aria-labelledby="reminders-heading"><div className="progress-heading">
-    <h2 id="reminders-heading">Follow-ups <span className="count">{due.length}</span></h2><span className="muted small">Europe/Sofia</span></div>
+    <h2 id="reminders-heading">Follow-ups due <span className="count">{due.length}</span></h2><span className="muted small">Europe/Sofia</span></div>
     {due.length ? rows(due) : <p className="muted small">No follow-ups due today.</p>}
     {upcoming.length > 0 && <details><summary>Upcoming ({upcoming.length})</summary>{rows(upcoming)}</details>}
     <p className="muted small reminder-note">In-app reminders appear when Job Radar is running.</p>

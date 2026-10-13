@@ -42,6 +42,7 @@ export type ListingActivity = z.infer<typeof listingActivitySchema>;
 export const collectorLineSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('meta'), jobspy_version: z.string(), tasks: z.number() }),
   z.object({ type: z.literal('task_started'), task_id: z.string() }),
+  z.object({ type: z.literal('search_head_checked'), task_id: z.string() }),
   z.object({ type: z.literal('request_stats'), task_id: z.string(),
     search_requests: z.number().int().nonnegative(), detail_requests: z.number().int().nonnegative() }),
   z.object({ type: z.literal('search_progress'), task_id: z.string(), cursor: z.object({
@@ -63,6 +64,7 @@ export const collectorLineSchema = z.discriminatedUnion('type', [
     error_kind: z.enum(['rate_limit', 'blocked', 'timeout', 'network', 'error', 'parse']).optional(),
     message: z.string().optional(),
     count: z.number(),
+    head_checked: z.boolean().optional(),
     duration_ms: z.number(),
     search_requests: z.number().int().nonnegative().nullable().optional(),
     detail_requests: z.number().int().nonnegative().nullable().optional(),
@@ -73,6 +75,7 @@ export const collectorLineSchema = z.discriminatedUnion('type', [
 export type CollectorLine = z.infer<typeof collectorLineSchema>;
 
 export type ErrorKind = 'rate_limit' | 'blocked' | 'timeout' | 'network' | 'error' | 'parse';
+export interface SourceFailure { kind: ErrorKind; message: string; httpStatus?: number; retryAfterSeconds?: number }
 
 export interface CollectorTask {
   task_id: string;
@@ -86,6 +89,7 @@ export interface CollectorTask {
   description_format: 'markdown' | 'html';
   fetch_description: boolean;
   offset?: number;
+  head_only?: boolean;
   search_cursor?: SearchCursor;
   detail_request_limit?: number;
   search_request_limit?: number;
@@ -111,6 +115,7 @@ export interface TaskOutcome {
   detailRequests?: number;
   retryAfterSeconds?: number;
   nextCursor?: SearchCursor;
+  headChecked?: boolean;
 }
 
 export interface SearchCursor { offset?: number; page?: number; index?: number }

@@ -155,7 +155,7 @@ describe('personal dashboard stored data', () => {
   });
 
   it('returns stored latest collection counts, errors and cooldowns without recovery or external calls', async () => {
-    expect(await readCollectionStatus()).toEqual({ latestRun: null, sources: [] });
+    expect(await readCollectionStatus()).toMatchObject({ latestRun: null, sources: [], linkedinCoverage: { combinations: 98, slotsPerSequence: 66, checkedWithinWindow: 0 } });
     const runId = randomUUID();
     await cds.run(INSERT.into(db().CollectionRuns).entries([
       { ID: randomUUID(), startedAt: '2000-01-01T00:00:00.000Z', batchKey: 'older', status: 'Completed' },

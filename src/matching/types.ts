@@ -27,6 +27,8 @@ export interface AssessmentResult {
   hardRejectReason: string | null;
 }
 
+export type AiOutcome = 'Succeeded' | 'ProviderFailure' | 'RejectedOutput';
+
 export interface MatchableJob {
   ID: string;
   isDemo?: boolean;

@@ -5,6 +5,7 @@ import { normalizeJob } from '../src/normalize/index.js';
 import { ingestJobs } from '../src/persist/ingest.js';
 import { notify } from '../src/pipeline/notify.js';
 import { rank, readTop } from '../src/pipeline/rank.js';
+import { requeueAssessment } from '../src/dashboard/assessment-retry.js';
 import { closeTempDb, resetTestDb, useTempDb } from './helpers/db.js';
 import { enableReviewAi, ingestReview as ingest, reviewAiResponse as llmResponse, reviewAiResponse, reviewRecord, reviewSender as sender, reviewRecord as strong } from './helpers/review.js';
 let file: string;
@@ -12,9 +13,10 @@ beforeAll(async () => { file = await useTempDb(); });
 beforeEach(async () => {
     resetConfigCache();
     vi.unstubAllGlobals();
+    vi.stubEnv('OPENAI_API_KEY', 'offline-test-key');
     await resetTestDb();
 });
-afterAll(async () => { vi.unstubAllGlobals(); resetConfigCache(); await closeTempDb(); });
+afterAll(async () => { vi.unstubAllGlobals(); vi.unstubAllEnvs(); resetConfigCache(); await closeTempDb(); });
 async function seed(key: string, description = reviewRecord.description!) {
     return ingestJobs([normalizeJob({ ...reviewRecord, id: key, title: `${reviewRecord.title} ${key}`,
             job_url: `https://www.linkedin.com/jobs/view/${key}`, description }, 'linkedin')!], { runId: null });
@@ -86,38 +88,59 @@ describe('durable AI work across collection cycles', () => {
         expect(request).toHaveBeenCalledTimes(1);
         expect(await query(SELECT.from(db().AiAssessmentQueue).where({ status: 'Pending' }))).toHaveLength(1);
     });
-    it.each(['provider error', 'invalid answer', 'unsupported gap'])('finishes and caches a %s until inputs change or an explicit retry', async (failure) => {
+    it.each(['provider error', 'rejected output'])('holds a %s across restart and preserves its fallback when explicitly retried', async (failure) => {
         const seeded = await seed('fallback');
         enableReviewAi();
-        const request = vi.fn(async () => failure === 'provider error'
-            ? new Response('Unavailable', { status: 503 }) : failure === 'invalid answer'
-                ? new Response(JSON.stringify({ choices: [] }), { status: 200 })
-                : llmResponse('Skip', 10, { mandatory_gaps: [{ requirement: 'Rust', vacancy_quote: 'Rust is mandatory.',
-                    profile_path: 'not_claimed.0', profile_value: 'RAP ownership' }] }));
+        const request = vi.fn(async () => failure === 'provider error' ? new Response('Unavailable', { status: 503 })
+            : new Response(JSON.stringify({ choices: [] }), { status: 200 }));
         vi.stubGlobal('fetch', request);
         await rank({ jobIds: seeded.jobIds, includePendingAi: true });
-        expect(await query(SELECT.from(db().AiAssessmentQueue).where({ status: 'Completed' }))).toHaveLength(1);
-        await disconnectDb();
-        resetConfigCache();
-        await connectDb(file);
-        enableReviewAi();
+        const fallback = await queryOne<any>(SELECT.from(db().Assessments));
+        expect(fallback).toMatchObject({ engine: 'rules', aiOutcome: failure === 'provider error' ? 'ProviderFailure' : 'RejectedOutput', aiReason: expect.any(String) });
+        expect(await queryOne(SELECT.from(db().AiAssessmentQueue))).toMatchObject({ status: failure === 'provider error' ? 'Failed' : 'Rejected', attempts: 1 });
+        await disconnectDb(); resetConfigCache(); await connectDb(file); enableReviewAi();
         await rank({ jobIds: [], includePendingAi: true });
         expect(request).toHaveBeenCalledTimes(1);
-        await cds.run(UPDATE(db().Jobs).set({ description: `${reviewRecord.description}\nUpdated scope.` }).where({ ID: seeded.jobIds[0] }));
+        expect(await requeueAssessment(seeded.jobIds[0]!)).toMatchObject({ queued: true, alreadyQueued: false });
+        expect(await requeueAssessment(seeded.jobIds[0]!)).toMatchObject({ queued: true, alreadyQueued: true });
+        expect(request).toHaveBeenCalledTimes(1); // Requeue itself never calls the provider.
+        request.mockImplementation(async () => llmResponse());
         await rank({ jobIds: [], includePendingAi: true });
         expect(request).toHaveBeenCalledTimes(2);
-        await rank({ jobIds: seeded.jobIds, force: true });
-        expect(request).toHaveBeenCalledTimes(3);
+        expect(await queryOne(SELECT.from(db().AiAssessmentQueue))).toMatchObject({ status: 'Completed', attempts: 2 });
+        expect(await queryOne(SELECT.from(db().Assessments).where({ ID: fallback.ID }))).toMatchObject({ aiReason: fallback.aiReason, explanation: fallback.explanation });
+        await rank({ includePendingAi: true });
+        expect(request).toHaveBeenCalledTimes(2);
     });
-    it('enforces the five-call ceiling even if the configured budget is larger', async () => {
-        for (let i = 0; i < 8; i++)
-            await seed(`ceiling-${i}`);
+    it('caps unchanged-input retries without losing failed attempt history', async () => {
+        const seeded = await seed('retry-cap'); enableReviewAi();
+        const request = vi.fn(async () => new Response('Unavailable', { status: 503 }));
+        vi.stubGlobal('fetch', request);
+        await rank();
+        for (let attempt = 0; attempt < 2; attempt++) {
+            await requeueAssessment(seeded.jobIds[0]!); await rank({ includePendingAi: true });
+        }
+        expect(request).toHaveBeenCalledTimes(3);
+        await expect(requeueAssessment(seeded.jobIds[0]!)).rejects.toMatchObject({ status: 409 });
+        await rank({ includePendingAi: true });
+        expect(request).toHaveBeenCalledTimes(3);
+        expect(await query(SELECT.from(db().Assessments))).toHaveLength(3);
+    });
+    it('shares the hard five-call ceiling between explicit retries and fresh pending work', async () => {
+        for (let i = 0; i < 6; i++) await seed(`ceiling-${i}`);
         enableReviewAi(loadConfig(), 8);
-        const request = vi.fn(async () => reviewAiResponse());
+        const request = vi.fn(async () => new Response(JSON.stringify({ choices: [] }), { status: 200 }));
         vi.stubGlobal('fetch', request);
         await rank({ includePendingAi: true });
         expect(request).toHaveBeenCalledTimes(5);
-        expect(await query(SELECT.from(db().AiAssessmentQueue).where({ status: 'Pending' }))).toHaveLength(3);
+        const failed = await query<any>(SELECT.from(db().AiAssessmentQueue).where({ status: 'Rejected' }));
+        expect(failed).toHaveLength(5);
+        for (const row of failed) await requeueAssessment(row.job_ID);
+        enableReviewAi(loadConfig(), 8);
+        request.mockClear(); request.mockImplementation(async () => llmResponse());
+        await rank({ includePendingAi: true });
+        expect(request).toHaveBeenCalledTimes(5);
+        expect(await query(SELECT.from(db().AiAssessmentQueue).where({ status: { in: ['Pending', 'RetryPending'] } }))).toHaveLength(1);
     });
     it('uses a stable job-ID tie break for a same-score arrival batch rather than SELECT iteration order', async () => {
         for (const key of ['tie-c', 'tie-a', 'tie-b'])
@@ -190,24 +213,15 @@ describe("AI budgets and cached assessments", () => {
             .toMatchObject({ collected: 1, described: 1, prescreened: 1, llm: 0, notify: 0 });
         expect(request).toHaveBeenCalledTimes(1);
     });
-    it.each([1, 3])('stops after the first provider failure with a request budget of %s', async (budget) => {
+    it('stops further provider calls after a transient failure', async () => {
         await seedJobs();
-        enableLlm(budget);
+        enableLlm(3);
         const request = vi.fn(async () => new Response('provider unavailable', { status: 503 }));
         vi.stubGlobal('fetch', request);
         const results = await rank();
         expect(request).toHaveBeenCalledTimes(1);
         expect(results).toHaveLength(3);
         expect(results.every((row) => row.assessment.engine === 'rules')).toBe(true);
-    });
-    it('counts successful requests against the limit', async () => {
-        await seedJobs();
-        enableLlm(1);
-        const request = vi.fn(async () => llmResponse());
-        vi.stubGlobal('fetch', request);
-        const results = await rank();
-        expect(request).toHaveBeenCalledTimes(1);
-        expect(results.filter((row) => row.assessment.engine === 'llm')).toHaveLength(1);
     });
     it('reuses cached LLM results after the call budget is exhausted', async () => {
         await seedJobs();

@@ -15,7 +15,7 @@ const assessmentLabels: Record<AssessmentState, string> = {
 };
 
 const compactAssessmentLabels: Record<AssessmentState, string> = {
-  ai: 'AI', rules: 'Rules', 'ai-fallback': 'AI fallback · Rules', outdated: 'Outdated', unassessed: 'Unassessed',
+  ai: 'AI', rules: 'Rules', 'ai-fallback': 'Rules · AI unavailable', outdated: 'Needs refresh', unassessed: 'Awaiting assessment',
 };
 
 function date(value: string | null | undefined, time = false): string {
@@ -65,8 +65,7 @@ function Fit({ job }: { job: JobSummary }) {
     <strong className={job.fitScore === null ? 'score unknown' : `score score-${job.recommendation?.toLowerCase()}`}>{job.fitScore ?? '—'}
       {job.fitScore !== null && <small>/100</small>}</strong>
     {job.recommendation && <Badge value={job.recommendation} />}
-    <span className="muted small" title={assessmentLabels[job.assessmentState]}>{compactAssessmentLabels[job.assessmentState]}</span>
-    {job.aiPending && <span className="pending small">AI pending</span>}
+    <span className="muted small" title={assessmentLabels[job.assessmentState]}>{job.aiPending ? 'Rules · AI queued' : compactAssessmentLabels[job.assessmentState]}</span>
   </div>;
 }
 
@@ -106,6 +105,10 @@ function CollectionArea({ data, loading, error, retry }: {
         {source.lastMessage && <span className="muted small">{source.lastMessage}</span>}
       </div>)}</div> : <p className="muted small">No stored source health yet.</p>}
       {run?.errors.map((error, index) => <p className="warning small" key={index}>{error.source ?? 'Collection'} · {error.kind}: {error.message}</p>)}
+      {data?.linkedinCoverage && <p className="muted small">LinkedIn: {data.linkedinCoverage.combinations} configured combinations ·
+        up to {data.linkedinCoverage.slotsPerSequence} slots per {data.linkedinCoverage.sequenceHours} hours before cooldowns ·
+        {data.linkedinCoverage.checkedWithinWindow}/{data.linkedinCoverage.combinations} had first-page checks in the last {data.linkedinCoverage.freshnessHours} hours.
+        A single sequence cannot cover every combination.</p>}
       </div>
     </details>
   </section>;
@@ -116,6 +119,9 @@ function AssessmentView({ assessment }: { assessment: SavedAssessment }) {
     <div className="assessment-heading"><strong>{assessment.fitScore ?? '—'}{assessment.fitScore !== null ? '/100 fit score' : ' Score missing'}</strong>
       {assessment.recommendation && <Badge value={assessment.recommendation} />}</div>
     <p className="explanation">{assessment.explanation || 'No explanation saved.'}</p>
+    {assessment.kind === 'ai-fallback' && <p className="warning small">
+      {assessment.aiOutcome === 'RejectedOutput' ? 'AI output was rejected by validation.' : 'The AI provider did not return a usable assessment.'}
+      {' '}{assessment.aiReason ?? 'The original fallback reason is preserved below.'}</p>}
     {assessment.hardReject && <p className="warning">Hard rejection: {assessment.hardRejectReason ?? 'See mandatory gaps.'}</p>}
     <dl className="facts"><div><dt>Suggested CV variant</dt><dd>{assessment.suggestedCvVariant ?? 'Not suggested'}</dd></div></dl>
     <details><summary>Assessment details & evidence</summary>
@@ -140,7 +146,7 @@ function extractTracking(job: Tracking): Tracking {
     cvSent: job.cvSent, cvSentAt: job.cvSentAt, sentCvLabel: job.sentCvLabel };
 }
 
-function TrackingForm({ job, onSaved, onDirty, onBusy }: {
+export function TrackingForm({ job, onSaved, onDirty, onBusy }: {
   job: JobDetail; onSaved: (tracking: Tracking) => void; onDirty: (dirty: boolean) => void; onBusy: (busy: boolean) => void;
 }) {
   const [form, setForm] = useState(() => extractTracking(job));
@@ -177,12 +183,12 @@ function TrackingForm({ job, onSaved, onDirty, onBusy }: {
       </select></label><label>Application date<input type="date" value={form.applicationDate ?? ''}
         onChange={(event) => change({ applicationDate: event.target.value || null })} /></label></div>
       <label className="checkbox"><input type="checkbox" checked={form.cvSent} onChange={(event) => change({ cvSent: event.target.checked })} />I actually sent a CV</label>
-      {form.cvSent && <><label>Actual CV send date and time · Europe/Sofia<input type="datetime-local" required
+      {form.cvSent && <><label>Actual CV send date and time · Europe/Sofia<input type="datetime-local" required={!job.cvSent}
         value={form.cvSentAt ? sofiaDateTime(new Date(form.cvSentAt)) : ''} onChange={(event) => {
           try { change({ cvSentAt: event.target.value ? sofiaInstant(event.target.value) : null }); setError(null); }
           catch (failure) { setError(String(failure)); }
         }} /></label>
-        {!job.cvSentAt && job.cvSent && <p className="warning small">The send date is unknown. Enter the actual date to create a follow-up.</p>}
+        {!job.cvSentAt && job.cvSent && <p className="muted small">Send date unknown. You can edit notes and status now; enter the actual date when known to create a follow-up.</p>}
         <p className="muted small">A follow-up is due seven calendar days after sending. The application date is separate.</p></>}
       <label>CV actually sent <span className="muted">(optional filename or version)</span><input maxLength={500}
         placeholder="e.g. BTP-CV-v3.pdf" value={form.sentCvLabel ?? ''} onChange={(event) => change({ sentCvLabel: event.target.value || null })} /></label>
@@ -196,8 +202,28 @@ function TrackingForm({ job, onSaved, onDirty, onBusy }: {
   </form>;
 }
 
-function VacancyDetail({ job, conversion, onSaved, onDirty, onBusy }: {
-  job: JobDetail; conversion: EuroConversion; onSaved: (tracking: Tracking) => void; onDirty: (dirty: boolean) => void; onBusy: (busy: boolean) => void;
+function RetryAssessment({ job, onQueued }: { job: JobDetail; onQueued: () => void }) {
+  const [queued, setQueued] = useState(Boolean(job.aiRetry?.queued));
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  if (!job.aiRetry) return null;
+  async function retry() {
+    setBusy(true); setError(null);
+    try { await request(`/api/jobs/${encodeURIComponent(job.ID)}/assessment/retry`, { method: 'POST' }); setQueued(true); onQueued(); }
+    catch (failure) { setError(failure instanceof Error ? failure.message : 'Unable to queue retry'); }
+    finally { setBusy(false); }
+  }
+  return <div className="retry-assessment"><button disabled={busy || queued || !job.aiRetry.canRetry} onClick={retry}>
+    {queued ? 'AI retry queued' : busy ? 'Queuing…' : 'Queue AI retry'}</button>
+    <p className="muted small">{job.aiRetry.attempts}/{job.aiRetry.maxAttempts} attempts used for these inputs.
+      {job.aiRetry.retryAfter ? ` Provider cooldown: ${date(job.aiRetry.retryAfter, true)}.` : ''}
+      {' '}Retries share a later collection’s five-call allowance.</p>
+    {job.aiRetry.reason && job.currentAssessment?.kind !== 'ai-fallback' && <details><summary>Last AI attempt</summary><p className="small">{job.aiRetry.reason}</p></details>}
+    {error && <p className="error small" role="alert">{error}</p>}</div>;
+}
+
+function VacancyDetail({ job, conversion, onSaved, onDirty, onBusy, onAssessmentQueued }: {
+  job: JobDetail; conversion: EuroConversion; onSaved: (tracking: Tracking) => void; onDirty: (dirty: boolean) => void; onBusy: (busy: boolean) => void; onAssessmentQueued: () => void;
 }) {
   return <>
     <div className="detail-intro"><span className="eyebrow">Vacancy details{job.isDemo ? ' · Demo data' : ''}</span>
@@ -216,6 +242,7 @@ function VacancyDetail({ job, conversion, onSaved, onDirty, onBusy }: {
       {job.currentAssessment ? <AssessmentView assessment={job.currentAssessment} /> : <p className="muted">
         {job.assessmentState === 'outdated' ? 'The saved assessment is outdated for the current vacancy or matching configuration. No current score is available.' : 'No saved current assessment yet.'}</p>}
       {!job.aiPending && <p className="muted small">No current AI work pending in the stored queue.</p>}
+      <RetryAssessment key={job.ID} job={job} onQueued={onAssessmentQueued} />
       {job.assessmentHistory.length > 0 && <details className="history"><summary>Assessment history ({job.assessmentHistory.length})</summary>
         {job.assessmentHistory.map((assessment) => <div className="historical" key={assessment.ID}>
           <span className="eyebrow">{assessment.current ? 'Earlier saved assessment · Inputs still valid' : 'Outdated · Historical score only'}</span>
@@ -245,16 +272,12 @@ function VacancyDetail({ job, conversion, onSaved, onDirty, onBusy }: {
 
 const defaultFilters = { q: '', sources: [] as string[], minScore: '', status: '', activity: '', sort: 'firstSeenAt', direction: 'desc', pageSize: '20' };
 
-function nextAction(job: JobSummary): string {
-  if (job.nextFollowUp) return `${job.nextFollowUp.dueDate <= sofiaDate() ? 'Follow up' : 'Follow-up'} · ${job.nextFollowUp.dueDate}`;
+function nextAction(job: JobSummary): string | null {
+  if (job.nextFollowUp && job.nextFollowUp.dueDate <= sofiaDate()) return `Follow up · ${job.nextFollowUp.dueDate}`;
   if (job.cvSent && !job.cvSentAt) return 'Set CV send date';
   if (job.status === 'Interview') return 'Prepare for interview';
-  if (['Ignored', 'Rejected'].includes(job.status)) return 'View history';
-  if (job.cvSent || job.status === 'Applied') return 'Check application';
-  if (job.aiPending) return 'Await AI assessment';
-  if (['unassessed', 'outdated'].includes(job.assessmentState)) return 'Await assessment';
-  if (job.activity === 'Closed') return 'View closed listing';
-  return job.recommendation === 'Apply' ? 'Review and apply' : 'Review vacancy';
+  if (['Ignored', 'Rejected', 'Applied'].includes(job.status) || job.cvSent || job.aiPending || job.activity === 'Closed') return null;
+  return job.recommendation === 'Apply' ? 'Consider applying' : null;
 }
 
 export default function App() {
@@ -329,12 +352,15 @@ export default function App() {
     <main>
       <div className="page-heading"><div><h1 id="vacancies-heading">Job Radar <span className="count">{data?.storedTotal ?? '—'}</span></h1>
         <p className="muted">Vacancies, applications and your next steps.</p></div>
-        <div className="primary-actions"><button className="primary" onClick={collection.start} disabled={collection.starting}>
-          {collection.starting ? 'Starting…' : 'Collect vacancies'}</button>
+        <div className="primary-actions"><button className="primary" onClick={collection.start} disabled={collection.starting || collection.running}>
+          {collection.running ? 'Collecting…' : collection.starting ? 'Starting…' : 'Collect vacancies'}</button>
           <button onClick={() => { if (guard()) setAddOpen(true); }} disabled={saving}>Add vacancy</button></div>
       </div>
       {notice && <div className="notice" role="status">{notice}<button className="text-button" onClick={() => setNotice(null)} aria-label="Dismiss import result">×</button></div>}
-      <CollectionProgress operation={collection.operation} error={collection.error} />
+      <CollectionProgress operation={collection.operation} error={collection.error}>
+        <CollectionArea data={diagnostics.data} loading={diagnostics.loading} error={diagnostics.error} retry={refresh} />
+        <button className="text-button" onClick={refresh}>Refresh saved data</button>
+      </CollectionProgress>
       {reminders.error ? <p className="error" role="alert">Follow-ups: {reminders.error} <button onClick={refresh}>Retry</button></p>
         : reminders.data && <Reminders items={reminders.data} select={select} changed={refresh} />}
       <nav className="view-tabs" aria-label="Vacancy views">{[['vacancies', 'Vacancies'], ['applications', 'My applications'], ['imports', 'Added manually']].map(([key, label]) =>
@@ -353,28 +379,34 @@ export default function App() {
             <select aria-label="Sort direction" value={filters.direction} onChange={(event) => filter('direction', event.target.value)}><option value="desc">Descending</option><option value="asc">Ascending</option></select>
           </div></details>
         </div>
-        <div className="list-toolbar"><span className="muted small" role="status">{updating ? 'Updating…' : `${data?.total ?? 0} vacancies`}</span>
+        {hasFilters && <div className="filter-chips" aria-label="Active filters">
+          {search && <button onClick={() => { setSearch(''); filter('q', ''); }}>Search: {search} ×</button>}
+          {filters.sources.map((source) => <button key={source} onClick={() => setSources(filters.sources.filter((value) => value !== source))}>{sourceLabel(source)} ×</button>)}
+          {filters.minScore && <button onClick={() => { setScoreInput(''); filter('minScore', ''); }}>Fit ≥ {filters.minScore} ×</button>}
+          {filters.status && <button onClick={() => filter('status', '')}>{filters.status} ×</button>}
+          {filters.activity && <button onClick={() => filter('activity', '')}>{filters.activity === 'Unknown' ? 'Could not verify' : filters.activity} ×</button>}
+        </div>}
+        <div className="list-toolbar"><span className="muted small" role="status">{updating ? 'Updating…' : `${data?.items.length ?? 0} shown / ${data?.total ?? 0} matches`}</span>
           {hasFilters && <button className="text-button" onClick={resetFilters}>Clear filters</button>}</div>
         {list.loading && !data && <div className="load-state" role="status"><span className="spinner" />Loading vacancies…</div>}
         {list.error && <div className="error-banner" role="alert"><p>{list.error}</p><button onClick={refresh}>Try again</button></div>}
         {data && !data.total && <div className="empty-state"><h3>{data.storedTotal ? 'No vacancies in this view' : 'Your radar is ready'}</h3><p className="muted">{data.storedTotal ? 'Try clearing filters or choose another view.' : 'Collect vacancies or add one by URL to get started.'}</p></div>}
         {data && data.total > 0 && <>
           <div className={`table-scroll ${updating ? 'is-updating' : ''}`} aria-busy={updating}><table className="compact-jobs"><caption className="sr-only">Saved deduplicated vacancies</caption>
-            <thead><tr><th>Vacancy / company</th><th>Current assessment</th><th>Application</th><th>Next action</th></tr></thead>
+            <thead><tr><th>Vacancy / company</th><th>Assessment</th><th>Application / next step</th></tr></thead>
             <tbody>{data.items.map((job) => <tr key={job.ID} className={job.activity === 'Closed' ? 'closed-row' : job.cvSent ? 'cv-sent-row' : ''}>
               <td className="vacancy-cell"><button className="job-title" onClick={() => select(job.ID)}>{job.title}</button>
                 <div className="company">{job.company ?? 'Company not stated'}{job.isDemo && <span className="demo">Demo</span>}</div>
                 <div className="vacancy-meta">{job.isRemote ? 'Remote · ' : ''}{job.location ?? 'Location not stated'}
                   {(job.salaryMin !== null || job.salaryMax !== null) && <> · <Salary job={job} conversion={conversion} /></>}
                   {job.activity === 'Closed' && ' · Closed'}{job.manuallyImportedAt && ' · Added manually'}</div></td>
-              <td><Fit job={job} /></td><td><Badge value={job.status} />{job.cvSent && <div className="muted small tracking-indicator">✓ CV sent</div>}</td>
-              <td><button className="next-action" onClick={() => select(job.ID)}>{nextAction(job)}</button></td>
+              <td><Fit job={job} /></td><td><Badge value={job.status} />{job.cvSent && <div className="muted small tracking-indicator">✓ CV sent</div>}
+                {nextAction(job) && <div><button className="next-action" onClick={() => select(job.ID)}>{nextAction(job)}</button></div>}</td>
             </tr>)}</tbody></table></div>
           <div className="pagination"><span className="muted small">{(data.page - 1) * data.pageSize + 1}–{Math.min(data.page * data.pageSize, data.total)} of {data.total}</span>
             <div><button disabled={updating || data.page <= 1} onClick={() => setPage(data.page - 1)}>← Previous</button><span className="small">Page {data.page} of {Math.ceil(data.total / data.pageSize)}</span><button disabled={updating || data.page * data.pageSize >= data.total} onClick={() => setPage(data.page + 1)}>Next →</button></div></div>
         </>}
       </section>
-      <details className="diagnostics"><summary>Collection diagnostics</summary><CollectionArea data={diagnostics.data} loading={diagnostics.loading} error={diagnostics.error} retry={refresh} /><button className="text-button" onClick={refresh}>Refresh saved data</button></details>
       <footer>Fit scores measure profile match, not hiring probability.</footer>
     </main>
     {addOpen && <AddVacancy onClose={() => setAddOpen(false)} onAdded={imported} />}
@@ -382,7 +414,7 @@ export default function App() {
       <div className="panel-toolbar"><span className="muted small">Vacancy details</span><button onClick={() => select(null)} disabled={saving} aria-label="Close vacancy details">✕</button></div>
       {detail.loading && <div className="load-state" role="status"><h2 id="loading-detail-title" className="sr-only">Vacancy details</h2><span className="spinner" />Loading vacancy…</div>}
       {detail.error && <div className="empty-state error" role="alert"><h2 id="loading-detail-title">Couldn’t load vacancy</h2><p>{detail.error}</p><button onClick={() => setDetailRevision((value) => value + 1)}>Try again</button></div>}
-      {detail.data && <VacancyDetail job={detail.data} conversion={conversion} onSaved={saved} onDirty={setDirty} onBusy={setSaving} />}
+      {detail.data && <VacancyDetail job={detail.data} conversion={conversion} onSaved={saved} onDirty={setDirty} onBusy={setSaving} onAssessmentQueued={refresh} />}
     </dialog>
   </div>;
 }

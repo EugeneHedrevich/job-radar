@@ -4,11 +4,13 @@ import { readHealth } from './collector/health.js';
 import { recoverInterruptedRuns } from './collector/lifecycle.js';
 import { connectDb, db, disconnectDb, SELECT, query } from './db/index.js';
 import { loadFixture } from './fixtures/load.js';
-import { collect, outcomeMessage } from './pipeline/collect.js';
-import { claimCollection, CollectionBusyError, finishOperation, readOperation, startLeaseHeartbeat, updateOperation,
+import { collect } from './pipeline/collect.js';
+import { withCollectionOperation } from './pipeline/collection-operation.js';
+import { claimCollection, CollectionBusyError, readOperation,
   type CollectionClaim } from './collector/lease.js';
 import { notify } from './pipeline/notify.js';
-import { rank, readTop } from './pipeline/rank.js';
+import { rank, readTop, emptyRankProgress, type RankOptions } from './pipeline/rank.js';
+import { PENDING_AI_STATUSES } from './pipeline/ai-queue.js';
 import { directionCounters } from './pipeline/coverage.js';
 import { startScheduler } from './scheduler.js';
 import { log, out } from './util/log.js';
@@ -109,7 +111,7 @@ async function runCollect(flags: Args['flags'], claim?: CollectionClaim) {
   out(`  batch              : ${summary.batchKey}${file ? ' (offline demo fixture)' : ''}`);
   out(`  listings collected : ${summary.jobsFound}`);
   out(`  new jobs           : ${summary.ingest.created}`);
-  out(`  updated jobs       : ${summary.ingest.updated}`);
+  out(`  updated jobs       : ${summary.ingest.updatedJobIds.length}`);
   out(`  merged cross-source: ${summary.ingest.mergedAcrossSources}`);
   out(`  unusable records   : ${summary.ingest.unusable}`);
   out(`  malformed lines    : ${summary.malformedLines}`);
@@ -157,18 +159,19 @@ function truncatePad(value: string, width: number): string {
   return (clean.length > width ? `${clean.slice(0, width - 1)}\u2026` : clean).padEnd(width);
 }
 
-async function runRank(flags: Args['flags'], jobIds?: string[], includePendingAi = false, claim?: CollectionClaim) {
+async function runRank(flags: Args['flags'], jobIds?: string[], includePendingAi = false, report?: RankOptions['onProgress']) {
+  let progress = emptyRankProgress();
   const ranked = await rank({
     jobIds,
     includePendingAi,
     limit: num(flags, 'limit') ?? 20,
     rulesOnly: Boolean(flags.get('rules-only')),
     force: Boolean(flags.get('force')),
-    ...(claim ? { onProgress: async (progress: { assessed: number; aiCalls: number; aiFailures: number }) =>
-      updateOperation(claim, { jobsAssessed: progress.assessed, aiCalls: progress.aiCalls,
-        ...(progress.aiFailures ? { message: 'AI failed; rules fallback saved.' } : {}) }) } : {}),
+    onProgress: async (next) => { progress = next; await report?.(next); },
   });
   printTable(ranked);
+  out(`Assessments: ${progress.cachedAssessments} cached, ${progress.rulesAssessments} new rules, ${progress.aiSucceeded} successful AI, ${progress.aiFailures} failed AI attempts (${progress.aiCalls} calls).`);
+  for (const reason of progress.failureReasons) out(`  AI diagnostic: ${reason}`);
   for (const row of ranked.slice(0, 5)) {
     out('');
     out(`${row.assessment.fitScore}/100  ${row.job.title}`);
@@ -202,21 +205,10 @@ async function runCycle(flags: Args['flags']) {
   const reservation = await claimCollection('cli-cycle');
   if (!reservation.acquired) throw new CollectionBusyError(reservation.operationId);
   const claim = reservation.claim;
-  const stop = startLeaseHeartbeat(claim);
-  try {
-    const collected = await runCollect(flags, claim);
-    await updateOperation(claim, { stage: 'Assessing' });
-    await runRank(flags, collected.ingest.jobIds, !fixtureFile(flags), claim);
-    const operation = await readOperation(claim.operationId);
-    const aiBacklog = (await query(SELECT.from(db().AiAssessmentQueue).where({ status: 'Pending' }))).length;
-    await finishOperation(claim, { stage: collected.outcome === 'Failed' ? 'Error' : 'Finished', outcome: collected.outcome,
-      aiBacklog, aiBudgetExhausted: !flags.get('rules-only') && loadConfig().llmAvailable && aiBacklog > 0 &&
-        (operation?.aiCalls ?? 0) >= Math.min(5, loadConfig().settings.llm.max_jobs_per_run),
-      message: outcomeMessage(collected.outcome) });
-  } catch (error) {
-    await finishOperation(claim, { stage: 'Error', outcome: 'Failed', message: String(error).slice(0, 1900) }).catch(() => undefined);
-    throw error;
-  } finally { await stop(); }
+  await withCollectionOperation(claim, () => runCollect(flags, claim),
+    (collected, report) => runRank(flags, collected.ingest.jobIds, !fixtureFile(flags), report), Boolean(flags.get('rules-only')));
+  const operation = await readOperation(claim.operationId);
+  out(`Cycle outcome: ${operation?.outcome}. ${operation?.message ?? ''}`);
   await runNotify(flags);
 }
 
@@ -242,7 +234,7 @@ async function runStatus() {
   out(`  source listings     : ${await count(SourceListings)}`);
   out(`  collection runs     : ${await count(CollectionRuns)}`);
   out(`  assessments         : ${await count(Assessments)}`);
-  out(`  AI queue pending    : ${await count(AiAssessmentQueue, { status: 'Pending' })}`);
+  out(`  AI queue pending    : ${await count(AiAssessmentQueue, { status: { in: PENDING_AI_STATUSES } })}`);
   out(`  listings closed     : ${await count(SourceListings, { activityState: 'Closed' })}`);
   out(`  notifications sent  : ${await count(Notifications, { status: 'Sent' })}`);
   out(`  notifications open  : ${await count(Notifications, { status: { in: ['Pending', 'Failed', 'Sending'] } })}`);

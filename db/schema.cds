@@ -115,6 +115,8 @@ entity SourceHealth {
   lastStatus          : String(50);
   lastMessage         : String(2000);
   updatedAt           : Timestamp;
+  importToken         : String(36);
+  importUntil         : Timestamp;
 }
 
 /** Per-batch description rotation, retained across CLI runs and restarts. */
@@ -130,6 +132,7 @@ entity SearchProgress {
   state : LargeString;
   sweepStartedAt : Timestamp;
   updatedAt : Timestamp;
+  headCheckedAt : Timestamp;
 }
 
 /** One shared lease for UI, CLI and scheduler, including bounded assessment. */
@@ -158,6 +161,11 @@ entity CollectionOperations : cuid {
   jobsUpdated : Integer default 0;
   jobsAssessed : Integer default 0;
   aiCalls : Integer default 0;
+  cachedAssessments : Integer default 0;
+  rulesAssessments : Integer default 0;
+  aiSucceeded : Integer default 0;
+  aiFailures : Integer default 0;
+  aiFailureReasons : LargeString;
   aiBacklog : Integer default 0;
   aiBudgetExhausted : Boolean default false;
   message : String(2000);
@@ -181,7 +189,12 @@ entity AiAssessmentQueue {
   rulesScore   : Integer;
   queuedAt     : Timestamp;
   completedAt  : Timestamp;
-  status       : String(20); // Pending | Completed | Superseded
+  status       : String(20); // Pending | RetryPending | Attempting | Completed | Failed | Rejected | Superseded
+  attempts     : Integer default 0;
+  attemptedAt  : Timestamp;
+  retryAfter   : Timestamp;
+  lastOutcome  : String(30);
+  lastReason   : String(2000);
 }
 
 /** Preserve confirmed listing activity observations without changing user status. */
@@ -199,6 +212,8 @@ entity Assessments : cuid {
   job                : Association to Jobs;
   cacheKey           : String(128) not null; // hash(job content + profile version + engine)
   engine             : String(20);           // rules | llm
+  aiOutcome          : String(30);           // Succeeded | ProviderFailure | RejectedOutput; null for ordinary rules
+  aiReason           : String(2000);
   model              : String(100);
   profileVersion     : String(50);
   fitScore           : Integer;              // 0-100 fit score, NOT a hiring probability

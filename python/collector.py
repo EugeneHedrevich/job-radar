@@ -34,7 +34,7 @@ from contextlib import contextmanager
 from unittest.mock import patch
 from datetime import date, datetime
 from typing import Any
-from transport import LinkedInTransport, network_config, retry_after, safe_message, use_transport
+from transport import LinkedInTransport, RequestBudgetExhausted, network_config, retry_after, safe_message, use_transport
 
 EMIT_LOCK = Lock()
 
@@ -82,6 +82,7 @@ ALLOWED_TASK_PARAMS = {
     "fetch_description",
     "enforce_annual_salary",
     "enrich_only",
+    "head_only",
     "detail_request_limit", "search_request_limit", "search_cursor",
 }
 
@@ -158,8 +159,11 @@ def build_kwargs(task: dict[str, Any]) -> dict[str, Any]:
 
 
 def failure_info(exc):
+    if not exc:
+        return None
+    delay = getattr(exc, 'retry_after_seconds', None)
     return (classify_error(exc), safe_message(f"{type(exc).__name__}: {exc}"),
-            getattr(exc, "retry_after_seconds", None) or retry_after(getattr(exc, "response", None))) if exc else None
+            delay if delay is not None else retry_after(getattr(exc, 'response', None)))
 
 
 @contextmanager
@@ -177,13 +181,15 @@ def jobspy_search(source, transport, kwargs):
     scrapers = {}
     processed_count = 0
 
-    def session_factory(**kwargs):
-        session = create_session(**kwargs)
+    def session_factory(**session_options):
+        session = create_session(**session_options)
         request = session.request
         def guarded(method, url, **options):
             if transport.failure:
                 raise transport.failure
             if source in {"linkedin", "indeed"}:
+                if transport.search_requests >= kwargs.get('_request_stop_at', transport.search_limit):
+                    raise RequestBudgetExhausted('LinkedIn request allowance exhausted')
                 transport.before("search")
             options["allow_redirects"] = False
             response = request(method, url, **options)
@@ -303,7 +309,7 @@ def scrape_with_failures(kwargs: dict[str, Any]) -> tuple[Any, tuple[str, str, f
         # A backlog reuses this task's description request allowance rather
         # than requesting full search details plus a second set of URLs.
         search_kwargs = {key: value for key, value in kwargs.items() if key in ALLOWED_TASK_PARAMS or key in {"site_name", "verbose"}}
-        for key in {"enrich_only", "detail_request_limit", "search_request_limit", "search_cursor"}:
+        for key in {"enrich_only", "detail_request_limit", "search_request_limit", "search_cursor", "head_only"}:
             search_kwargs.pop(key, None)
         # All JobSpy searches disable its silently failing internal enrichment.
         search_kwargs["fetch_description"] = False
@@ -314,29 +320,44 @@ def scrape_with_failures(kwargs: dict[str, Any]) -> tuple[Any, tuple[str, str, f
             search_kwargs["ca_cert"] = verify
         source = kwargs["site_name"][0]
         transport = kwargs.get("transport") or LinkedInTransport()
-        with jobspy_search(source, transport, kwargs):
-            frame = scrape_jobs(**search_kwargs)
-            failure = failure_info(transport.failure) or capture.worst()
-            if source in {"linkedin", "indeed"} and (len(frame) or not failure):
-                # Overlap a rounded page boundary rather than skipping cards.
-                offset = int(kwargs.get("offset", 0))
-                count = len(frame)
-                next_offset = offset + (max(10, (count // 10) * 10) if source == "linkedin" else count)
-                cap = 1000 if source == "linkedin" else 300
-                kwargs["next_cursor"] = {"offset": next_offset if count and next_offset < cap else 0}
-                if kwargs.get("on_progress"):
-                    kwargs["on_progress"](kwargs["next_cursor"])
-            if failure and len(failure) == 2:
-                failure = (*failure, None)
-            if source in {"linkedin", "glassdoor"} and kwargs.get("fetch_description") and not failure:
-                import pandas as pd
-                from details import enrich_board
-                columns = [column for column in FORWARDED_COLUMNS if column in frame.columns]
-                rows = [{key: clean_value(value) for key, value in row.items()}
-                        for row in frame[columns].to_dict(orient="records")]
-                records, detail_failure = enrich_board(source, rows, kwargs)
-                frame = pd.DataFrame(records)
-                failure = failure_info(detail_failure)
+        import pandas as pd
+        offset = int(kwargs.get('offset', 0))
+        phases = [False] if kwargs.get('head_only') else [False, True] if source in {'linkedin', 'indeed'} and offset > 0 and transport.search_limit > 1 else [True]
+        frames = []
+        failure = None
+        for backfill in phases:
+            phase = kwargs if backfill else {**kwargs, 'offset': 0, 'on_progress': None}
+            phase['_request_stop_at'] = transport.search_limit if backfill else min(transport.search_limit, transport.search_requests + 1)
+            search_kwargs['offset'] = int(phase.get('offset', 0))
+            with jobspy_search(source, transport, phase):
+                frame = scrape_jobs(**search_kwargs)
+                frames.append(frame)
+                failure = failure_info(transport.failure) or capture.worst()
+                if not failure and int(phase.get('offset', 0)) == 0 and kwargs.get('on_head_checked'):
+                    kwargs['on_head_checked']()
+                if backfill and source in {'linkedin', 'indeed'} and (len(frame) or not failure):
+                    count = len(frame)
+                    next_offset = offset + (max(10, (count // 10) * 10) if source == 'linkedin' else count)
+                    cap = 1000 if source == 'linkedin' else 300
+                    kwargs['next_cursor'] = {'offset': next_offset if count and next_offset < cap else 0}
+                    if kwargs.get('on_progress'):
+                        kwargs['on_progress'](kwargs['next_cursor'])
+                combined = pd.concat(frames, ignore_index=True)
+                if 'job_url' in combined.columns:
+                    combined = combined.drop_duplicates(subset=['job_url'], keep='last')
+                if (backfill or len(phases) == 1) and source in {'linkedin', 'glassdoor'} and kwargs.get('fetch_description') and not failure:
+                    from details import enrich_board
+                    columns = [column for column in FORWARDED_COLUMNS if column in combined.columns]
+                    rows = [{key: clean_value(value) for key, value in row.items()}
+                            for row in combined[columns].to_dict(orient='records')]
+                    records, detail_failure = enrich_board(source, rows, kwargs)
+                    combined = pd.DataFrame(records)
+                    failure = failure_info(detail_failure)
+            if failure:
+                break
+        if failure and len(failure) == 2:
+            failure = (*failure, None)
+        frame = combined
         return frame, failure
     finally:
         for logger, level in zip(loggers, levels):
@@ -390,6 +411,10 @@ def run_task(task: dict[str, Any], timeout_seconds: int) -> dict[str, Any]:
         emit({"type": "request_stats", "task_id": task_id, "search_requests": search, "detail_requests": detail})
     kwargs["on_record"] = stream
     kwargs["on_progress"] = lambda cursor: emit({"type": "search_progress", "task_id": task_id, "cursor": cursor})
+    def checked_head():
+        kwargs['head_checked'] = True
+        emit({'type': 'search_head_checked', 'task_id': task_id})
+    kwargs['on_head_checked'] = checked_head
     transport = LinkedInTransport(int(kwargs.get("detail_request_limit", 5)), int(kwargs.get("search_request_limit", 3)), stats)
     kwargs["transport"] = transport
     # Synchronous source work: the Node parent kills this entire process at
@@ -415,6 +440,7 @@ def run_task(task: dict[str, Any], timeout_seconds: int) -> dict[str, Any]:
             **({"retry_after_seconds": upstream_failure[2]} if len(upstream_failure) > 2 and upstream_failure[2] is not None else {})}
            if upstream_failure else {}),
         "count": len(collected_urls),
+        "head_checked": bool(kwargs.get('head_checked')),
         "duration_ms": int((time.monotonic() - started) * 1000),
         "search_requests": transport.search_requests if source == "linkedin" else None,
         "detail_requests": transport.detail_requests if source == "linkedin" else None,

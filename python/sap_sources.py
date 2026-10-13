@@ -346,13 +346,18 @@ def scrape_agency(kwargs: dict[str, Any]) -> tuple[list[dict[str, Any]], BaseExc
             stream(updated)
     if kwargs.get("enrich_only"):
         return enriched + closures, failure
-    start = 1 if source == "eursap" else progress.start_page
-    for page in range(start, min(100, start + (1 if source == "eursap" else MAX_SEARCH_PAGES) - 1) + 1):
+    backfill_count = 0
+    # Eursap has a single filtered response; read its head on each visit too.
+    if source == 'eursap':
+        progress.start_page = 1
+    pages = progress.pages(2 if source == 'eursap' else MAX_SEARCH_PAGES)
+    for page in pages:
         try:
             candidates, more = parse_search(source, search_html(source, kwargs.get("search_term", "SAP"), page))
         except Exception as exc:
             failure = exc
             break
+        progress.checked_head(page)
         for row in progress.candidates(candidates, page):
             if row["job_url"] in seen:
                 continue
@@ -383,10 +388,12 @@ def scrape_agency(kwargs: dict[str, Any]) -> tuple[list[dict[str, Any]], BaseExc
                     continue
             rows.append(row)
             stream(row)
-            if len(rows) >= wanted:
+            if not progress.fresh:
+                backfill_count += 1
+            if not progress.fresh and backfill_count >= wanted:
                 break
-        if len(rows) < wanted:
+        if backfill_count < wanted:
             progress.finish_page(page, more)
-        if len(rows) >= wanted or not more or (fetch_description and detail_requests >= MAX_DETAIL_REQUESTS_PER_TASK):
+        if not progress.fresh and (backfill_count >= wanted or not more or (fetch_description and detail_requests >= MAX_DETAIL_REQUESTS_PER_TASK)):
             break
     return enriched + rows + closures, failure

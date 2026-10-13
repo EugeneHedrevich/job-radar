@@ -1,13 +1,13 @@
 import { randomUUID } from 'node:crypto';
 import { loadConfig, type AppConfig } from '../config/index.js';
 import { cds, db, SELECT, INSERT, UPDATE, query, queryOne } from '../db/index.js';
-import { assessWithLlm, LlmUnavailableError } from '../matching/llm.js';
+import { assessWithLlm, LlmProviderError, LlmRejectedOutputError } from '../matching/llm.js';
 import { assessWithRules, prescreen } from '../matching/rules.js';
 import type { AssessmentResult, MatchableJob } from '../matching/types.js';
 import { normalizeText, sha256 } from '../util/text.js';
 import { log } from '../util/log.js';
 import { closedJobIds, expireListingDeadlines, isJobClosed } from '../persist/activity.js';
-import { aiPriority, completeAiAttempt, synchronizeAiQueue } from './ai-queue.js';
+import { aiPriority, claimAiAttempt, completeAiAttempt, synchronizeAiQueue, type AiOutcome } from './ai-queue.js';
 import { suppressIgnoredWork } from './ignored.js';
 
 export interface RankedJob {
@@ -27,7 +27,21 @@ export interface RankOptions {
   limit?: number;
   /** Re-evaluate even when a cached assessment exists. */
   force?: boolean;
-  onProgress?: (progress: { assessed: number; aiCalls: number; aiFailures: number }) => Promise<void>;
+  onProgress?: (progress: RankProgress) => Promise<void>;
+}
+
+export interface RankProgress {
+  assessed: number;
+  cachedAssessments: number;
+  rulesAssessments: number;
+  aiSucceeded: number;
+  aiCalls: number;
+  aiFailures: number;
+  failureReasons: string[];
+}
+
+export function emptyRankProgress(): RankProgress {
+  return { assessed: 0, cachedAssessments: 0, rulesAssessments: 0, aiSucceeded: 0, aiCalls: 0, aiFailures: 0, failureReasons: [] };
 }
 
 /**
@@ -107,7 +121,7 @@ export async function rank(options: RankOptions = {}): Promise<RankedJob[]> {
   });
   const queue = await synchronizeAiQueue(prepared.filter((row) => row.eligible).map((row) => ({
     jobId: row.job.ID, cacheKey: row.llmKey, rulesScore: row.assessment.fitScore,
-  })), stored.map((job) => job.ID));
+  })), stored.map((job) => job.ID), (config.settings.llm.request_timeout_seconds + 60) * 1000);
   const at = new Date();
   prepared.sort((a, b) => {
     const left = queue.get(a.llmKey), right = queue.get(b.llmKey);
@@ -120,69 +134,78 @@ export async function rank(options: RankOptions = {}): Promise<RankedJob[]> {
   const useLlm = config.llmAvailable && !options.rulesOnly;
   let llmBudget = useLlm ? Math.min(5, config.settings.llm.max_jobs_per_run) : 0;
   const ranked: RankedJob[] = [];
-  let aiCalls = 0, aiFailures = 0;
-  const report = async () => options.onProgress?.({ assessed: ranked.length, aiCalls, aiFailures });
+  const progress = emptyRankProgress();
+  const report = async () => options.onProgress?.({ ...progress, assessed: ranked.length, failureReasons: [...progress.failureReasons] });
+  const append = async (result: RankedJob, category: 'cached' | 'rules' | AiOutcome) => {
+    ranked.push(result);
+    if (category === 'cached') progress.cachedAssessments += 1;
+    else if (category === 'rules') progress.rulesAssessments += 1;
+    else if (category === 'Succeeded') progress.aiSucceeded += 1;
+    else progress.aiFailures += 1;
+    await report();
+  };
 
   for (const preparedJob of prepared) {
     const { job } = preparedJob;
     if (await isJobClosed(job.ID)) continue;
     let engine: 'rules' | 'llm' = 'rules';
     let assessment = preparedJob.assessment;
-    const eligibleForLlm = useLlm && preparedJob.eligible;
+    const work = queue.get(preparedJob.llmKey);
+    const eligibleForLlm = useLlm && preparedJob.eligible &&
+      (options.force || work?.status === 'Pending' || work?.status === 'RetryPending');
+    const cachedLlm = preparedJob.eligible ? await queryOne<any>(SELECT.from(Assessments).where({ cacheKey: preparedJob.llmKey })) : undefined;
 
     // Cached evaluations cost no requests, including after the request budget
     // has been spent. The budget governs calls rather than cache reads.
-    if (preparedJob.eligible && !options.rulesOnly && !options.force) {
-      const cached = await queryOne<any>(SELECT.from(Assessments)
-        .where({ cacheKey: assessmentCacheKey(config, job, 'llm') }));
-      if (cached) {
-        ranked.push({ job, assessment: rowToAssessment(cached), assessmentId: cached.ID, cached: true });
-        await report();
-        continue;
-      }
+    if (cachedLlm && !options.force && (work?.status !== 'RetryPending' || !eligibleForLlm || llmBudget <= 0)) {
+      await append({ job, assessment: rowToAssessment(cachedLlm), assessmentId: cachedLlm.ID, cached: true }, 'cached');
+      continue;
     }
-    const shouldUseLlm = eligibleForLlm && llmBudget > 0;
+    const attempt = eligibleForLlm && llmBudget > 0 ? await claimAiAttempt(preparedJob.llmKey, options.force) : null;
+    const shouldUseLlm = attempt !== null;
+    if (!shouldUseLlm && cachedLlm && !options.force) {
+      await append({ job, assessment: rowToAssessment(cachedLlm), assessmentId: cachedLlm.ID, cached: true }, 'cached');
+      continue;
+    }
     if (shouldUseLlm) engine = 'llm';
 
     const cacheKey = assessmentCacheKey(config, job, engine);
-    if (!options.force) {
+    if (!options.force && !shouldUseLlm) {
       const cached = await queryOne<any>(SELECT.from(Assessments).where({ cacheKey }));
       if (cached) {
-        ranked.push({ job, assessment: rowToAssessment(cached), assessmentId: cached.ID, cached: true });
-        await report();
+        await append({ job, assessment: rowToAssessment(cached), assessmentId: cached.ID, cached: true }, 'cached');
         continue;
       }
     }
 
+    let aiOutcome: AiOutcome | null = null, aiReason: string | null = null, retryAfter: string | null = null;
     if (shouldUseLlm) {
       // Tracking may have changed while cache lookups were in flight.
       const beforeRequest = await queryOne<MatchableJob>(SELECT.from(Jobs).where({ ID: job.ID }));
       if (!beforeRequest || beforeRequest.status === 'Ignored' || await isJobClosed(job.ID)) {
         await suppressIgnoredWork(cds, job.ID);
+        await cds.run(UPDATE(db().AiAssessmentQueue).set({ status: 'Superseded', attempts: attempt! - 1 })
+          .where({ cacheKey: preparedJob.llmKey, status: 'Attempting', attempts: attempt }));
         continue;
       }
       llmBudget -= 1;
-      aiCalls += 1;
+      progress.aiCalls += 1;
       await report();
       try {
         assessment = await assessWithLlm(config, job);
         engine = assessment.engine;
-        if (engine !== 'llm') aiFailures += 1;
+        aiOutcome = engine === 'llm' ? 'Succeeded' : 'RejectedOutput';
+        if (aiOutcome === 'RejectedOutput') aiReason = assessment.missingInformation
+          .filter((reason) => /AI assessment uncertainty/i.test(reason)).join('; ').slice(0, 1000) || 'Model output failed evidence validation';
       } catch (error) {
-        aiFailures += 1;
-        // Stop further calls for this run when the provider is failing.
-        llmBudget = 0;
-        if (error instanceof LlmUnavailableError) {
-          log.warn('LLM unavailable, keeping deterministic assessment', { reason: error.message });
-        } else {
-          log.error('LLM assessment failed, keeping deterministic assessment', {
-            title: job.title,
-            message: error instanceof Error ? error.message : String(error),
-          });
-        }
+        aiOutcome = error instanceof LlmRejectedOutputError ? 'RejectedOutput' : 'ProviderFailure';
+        aiReason = `${error instanceof LlmProviderError ? error.transient ? 'Transient provider failure: ' : 'Provider access/configuration failure: ' : ''}${error instanceof Error ? error.message : String(error)}`.slice(0, 1000);
+        if (aiOutcome === 'ProviderFailure') llmBudget = 0;
+        if (error instanceof LlmProviderError && error.retryAfterSeconds) retryAfter = new Date(Date.now() + Math.min(31_536_000, error.retryAfterSeconds) * 1000).toISOString();
+        log.warn('AI attempt failed; preserving rules fallback', { outcome: aiOutcome, reason: aiReason });
         assessment = { ...assessment,
-          missingInformation: [...assessment.missingInformation, 'AI assessment unavailable; cached rules fallback. Use rank --force to retry.'],
-          explanation: `${assessment.explanation} AI request failed; rules fallback used: ${error instanceof Error ? error.message.slice(0, 500) : 'provider failure'}.`,
+          missingInformation: [...assessment.missingInformation, 'AI assessment unavailable; rules fallback saved. Retry can be queued explicitly.'],
+          explanation: `${assessment.explanation} AI ${aiOutcome === 'ProviderFailure' ? 'request failed' : 'output was rejected'}; rules fallback used: ${aiReason}.`,
         };
         engine = 'rules';
       }
@@ -191,10 +214,12 @@ export async function rank(options: RankOptions = {}): Promise<RankedJob[]> {
     // Cache the performed attempt, including rejected model output or provider
     // failure. The fallback still reports its actual rules engine and reason.
     const storedKey = assessmentCacheKey(config, job, shouldUseLlm ? 'llm' : engine);
-    const assessmentId = await storeAssessment(job.ID, storedKey, assessment);
-    if (shouldUseLlm) await completeAiAttempt(storedKey);
-    ranked.push({ job, assessment, assessmentId, cached: false });
-    await report();
+    const assessmentId = await storeAssessment(job.ID, storedKey, assessment, aiOutcome, aiReason);
+    if (shouldUseLlm && aiOutcome) {
+      await completeAiAttempt(storedKey, attempt!, aiOutcome, aiReason, retryAfter);
+      if (aiReason) progress.failureReasons.push(`${job.title.slice(0, 80)} · ${aiOutcome === 'ProviderFailure' ? 'Provider failure' : 'Rejected output'}: ${aiReason}`);
+    }
+    await append({ job, assessment, assessmentId, cached: false }, aiOutcome ?? 'rules');
   }
 
   ranked.sort((a, b) => b.assessment.fitScore - a.assessment.fitScore);
@@ -216,12 +241,14 @@ export async function readTop(limit = 20, titleSearch?: string): Promise<RankedJ
   return ranked.sort((a, b) => b.assessment.fitScore - a.assessment.fitScore).slice(0, limit);
 }
 
-async function storeAssessment(jobId: string, cacheKey: string, assessment: AssessmentResult): Promise<string> {
+async function storeAssessment(jobId: string, cacheKey: string, assessment: AssessmentResult,
+  aiOutcome: AiOutcome | null = null, aiReason: string | null = null): Promise<string> {
   const { Assessments } = db();
   const values = {
     job_ID: jobId,
     cacheKey,
     engine: assessment.engine,
+    aiOutcome, aiReason,
     model: assessment.model,
     profileVersion: assessment.profileVersion,
     fitScore: assessment.fitScore,
@@ -242,7 +269,12 @@ async function storeAssessment(jobId: string, cacheKey: string, assessment: Asse
   };
   return cds.tx(async (tx: any) => {
     await tx.run('UPDATE sap_jobradar_Jobs SET ID = ID WHERE 0 = 1');
-    const existing = await tx.run(SELECT.one.from(Assessments).columns('ID').where({ cacheKey }));
+    let existing = await tx.run(SELECT.one.from(Assessments).columns('ID', 'engine').where({ cacheKey }));
+    if (existing && aiOutcome && (existing.engine !== 'llm' || aiOutcome !== 'Succeeded')) {
+      // Keep every failed fallback and its reason in history when retrying.
+      await tx.run(UPDATE(Assessments).set({ cacheKey: `${cacheKey}:${existing.ID}` }).where({ ID: existing.ID }));
+      existing = undefined;
+    }
     const id = existing?.ID ?? randomUUID();
     await tx.run(existing ? UPDATE(Assessments).set(values).where({ ID: id })
       : INSERT.into(Assessments).entries({ ID: id, ...values }));

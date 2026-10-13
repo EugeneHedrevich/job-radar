@@ -43,6 +43,8 @@ export interface PlanOptions {
   onlySources?: string[];
   /** Force a specific batch key instead of the rotation. */
   batchKey?: string;
+  /** Internal: keep the full LinkedIn catalogue rotating during time-based cycles. */
+  globalLinkedin?: boolean;
   /** Override the freshness window. */
   hoursOld?: number;
   /** Override results per task. */
@@ -97,25 +99,7 @@ export function planBatch(config: AppConfig, options: PlanOptions = {}): Planned
       const geo = sourceConfig.geos[geoId];
       if (!geo) continue;
       for (const keyword of batch.keywords) {
-        tasks.push({
-          task_id: `${batch.key}:${source}:${geoId}:${slug(keyword)}`,
-          source,
-          search_term: keyword,
-          ...(geo.location ? { location: geo.location } : {}),
-          ...(geo.country_indeed ? { country_indeed: geo.country_indeed } : {}),
-          results_wanted: options.resultsWanted ?? sourceConfig.results_wanted ?? searches.defaults.results_wanted,
-          hours_old: options.hoursOld ?? sourceConfig.hours_old ?? searches.defaults.hours_old,
-          distance: searches.defaults.distance,
-          description_format: searches.defaults.description_format,
-          fetch_description: false,
-          ...(source === 'linkedin' ? { search_request_limit: searches.linkedin_limits.max_search_requests_per_task } : {}),
-          ...(options.enrichOnly ? { enrich_only: true } : {}),
-          // Remote/contract are deliberately NOT pre-filtered: most postings
-          // omit those fields and would be lost. Filtering happens after
-          // normalization instead.
-          is_remote: searches.defaults.is_remote,
-          ...(searches.defaults.job_type ? { job_type: searches.defaults.job_type } : {}),
-        });
+        tasks.push(makeTask(config, batch.key, source, geoId, keyword, options));
       }
     }
     if (tasks.length) tasksBySource.set(source, tasks);
@@ -150,17 +134,18 @@ function applySearchBudget(config: AppConfig, batchKey: string, tasksBySource: M
     const start = tasks.findIndex((task) => task.task_id === cursors[key]);
     return [...tasks.slice(start + 1), ...tasks.slice(0, start + 1)];
   };
-  const linkedin = tasksBySource.get('linkedin');
-  for (const task of rotate(linkedin ?? [], `${batchKey}:linkedin`)) {
-    if (!pending.some((row) => row.task_id === task.task_id)) pending.push(task);
-  }
+  const global = options.globalLinkedin ?? (!options.batchKey && !options.onlySources?.length);
+  const linkedin = global ? linkedinCatalogue(config) : tasksBySource.get('linkedin') ?? [];
+  const scope = global ? '__catalogue__:linkedin' : `${batchKey}:linkedin`;
   const linkedinAvailable = config.searches.sources.linkedin?.enabled && !options.skipSources?.has('linkedin') &&
     (!options.onlySources?.length || options.onlySources.includes('linkedin'));
   tasksBySource.delete('linkedin');
   const all = [...tasksBySource.values()].flat();
   const capacity = Math.min(18, config.searches.resilience.max_tasks_per_run);
-  const selectedLinkedin = linkedinAvailable ? pending.slice(0, Math.min(2,
+  const selectedLinkedin = linkedinAvailable ? rotate(linkedin, scope).slice(0, Math.min(2,
     config.searches.linkedin_limits.max_search_tasks_per_run, Math.max(0, capacity - all.length))) : [];
+  // Old queues are replaced by a catalogue cursor; saved per-query backfill is retained.
+  pending.splice(0);
   const key = `${batchKey}:__all__`;
   const selected = rotate(all, key).slice(0, Math.max(0,
     Math.min(18, config.searches.resilience.max_tasks_per_run) - selectedLinkedin.length));
@@ -177,11 +162,11 @@ function applySearchBudget(config: AppConfig, batchKey: string, tasksBySource: M
     tasksBySource.set('linkedin', selectedLinkedin.map((task) => ({ ...task, fetch_description: false,
       hours_old: options.hoursOld ?? source.hours_old ?? config.searches.defaults.hours_old,
       results_wanted: options.resultsWanted ?? source.results_wanted ?? config.searches.defaults.results_wanted })));
-    pending.splice(0, selectedLinkedin.length);
+    cursors[scope] = selectedLinkedin.at(-1)!.task_id;
     for (const task of selectedLinkedin) cursors[`${task.task_id.split(':')[0]}:linkedin`] = task.task_id;
   }
-  if (pending.length) skipped.push({ source: 'linkedin', reason:
-    `${pending.length} combinations queued for subsequent available cycles (two per cycle)` });
+  if (linkedinAvailable && selectedLinkedin.length < linkedin.length) skipped.push({ source: 'linkedin',
+    reason: `${linkedin.length - selectedLinkedin.length} catalogue combinations deferred; no more than two per available cycle` });
 }
 
 /**
@@ -240,4 +225,40 @@ function applyDescriptionBudget(
 
 function slug(value: string): string {
   return value.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+}
+
+function makeTask(config: AppConfig, batchKey: string, source: string, geoId: string, keyword: string, options: PlanOptions = {}): CollectorTask {
+  const searches = config.searches, settings = searches.sources[source]!, geo = settings.geos[geoId]!;
+  return { task_id: `${batchKey}:${source}:${geoId}:${slug(keyword)}`, source, search_term: keyword,
+    ...(geo.location ? { location: geo.location } : {}), ...(geo.country_indeed ? { country_indeed: geo.country_indeed } : {}),
+    results_wanted: options.resultsWanted ?? settings.results_wanted ?? searches.defaults.results_wanted,
+    hours_old: options.hoursOld ?? settings.hours_old ?? searches.defaults.hours_old,
+    distance: searches.defaults.distance, description_format: searches.defaults.description_format, fetch_description: false,
+    ...(source === 'linkedin' ? { search_request_limit: searches.linkedin_limits.max_search_requests_per_task } : {}),
+    ...(options.enrichOnly ? { enrich_only: true } : {}), is_remote: searches.defaults.is_remote,
+    ...(searches.defaults.job_type ? { job_type: searches.defaults.job_type } : {}) };
+}
+
+export function linkedinCatalogue(config: AppConfig): CollectorTask[] {
+  if (!config.searches.sources.linkedin) return [];
+  const tasks = config.searches.rotation.batches.flatMap((batch) => (batch.targets.linkedin ?? []).flatMap((geo) =>
+    batch.keywords.map((keyword) => makeTask(config, batch.key, 'linkedin', geo, keyword))));
+  return [...new Map(tasks.map((task) => [task.task_id, task])).values()];
+}
+
+/** Capacity of the actual configured sequence, before cooldowns; never a promise of complete coverage. */
+export function linkedinCoverage(config: AppConfig) {
+  const searches = config.searches;
+  const sequence = searches.rotation.sequence ?? searches.rotation.batches.map((batch) => batch.key);
+  const taskKeys = linkedinCatalogue(config).map((task) => task.task_id);
+  const limit = Math.min(18, searches.resilience.max_tasks_per_run);
+  const slotsPerSequence = sequence.reduce((slots, key) => {
+    const batch = searches.rotation.batches.find((row) => row.key === key)!;
+    const otherTasks = Object.entries(batch.targets).reduce((sum, [source, geos]) => sum +
+      (source !== 'linkedin' && searches.sources[source]?.enabled ? geos.length * batch.keywords.length : 0), 0);
+    return slots + (searches.sources.linkedin?.enabled ? Math.min(2, searches.linkedin_limits.max_search_tasks_per_run,
+      Math.max(0, limit - otherTasks)) : 0);
+  }, 0);
+  return { combinations: taskKeys.length, slotsPerSequence, sequenceHours: sequence.length * searches.rotation.interval_hours,
+    freshnessHours: searches.sources.linkedin?.hours_old ?? searches.defaults.hours_old, taskKeys };
 }

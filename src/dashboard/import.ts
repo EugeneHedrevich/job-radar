@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { loadConfig, PROJECT_ROOT } from '../config/index.js';
 import { collectorJobSchema, listingActivitySchema, type CollectorJob, type ListingActivity } from '../collector/types.js';
-import { activeCooldowns } from '../collector/health.js';
+import { claimImportSource, recordOutcomes, releaseImportSource } from '../collector/health.js';
 import { cds, db, SELECT, UPDATE } from '../db/index.js';
 import { canonicalizeUrl } from '../util/text.js';
 import { normalizeJob } from '../normalize/index.js';
@@ -18,7 +18,10 @@ import type { ImportResult } from './types.js';
 const inputSchema = z.object({ url: z.string().url().max(1000), title: z.string().trim().max(500).optional(),
   description: z.string().trim().max(60_000).optional(), company: z.string().trim().max(500).optional(),
   location: z.string().trim().max(500).optional(), detailsToken: z.string().uuid().optional() }).strict();
-const metadataSchema = z.object({ job: collectorJobSchema.nullable(), activity: listingActivitySchema.nullable(), message: z.string().max(2000) });
+const metadataSchema = z.object({ job: collectorJobSchema.nullable(), activity: listingActivitySchema.nullable(), message: z.string().max(2000),
+  requests: z.number().int().min(0).max(3).nullable().optional(),
+  failure: z.object({ kind: z.enum(['rate_limit', 'blocked', 'timeout', 'network', 'error', 'parse']),
+    message: z.string().max(2000), httpStatus: z.number().int().optional(), retryAfterSeconds: z.number().nonnegative().optional() }).nullable().optional() });
 export type ImportMetadata = z.infer<typeof metadataSchema>;
 const pendingDetails = new Map<string, { url: string; metadata: ImportMetadata; expiresAt: number }>();
 
@@ -49,7 +52,6 @@ function importUrl(value: string): { url: string; source: string } {
 async function fetchMetadata(source: string, url: string): Promise<ImportMetadata> {
   const unverified = (message: string): ImportMetadata => ({ job: null, activity: null, message });
   if (['manual', 'indeed', 'glassdoor'].includes(source)) return unverified('This URL has no supported public detail adapter. Enter the title and description.');
-  if ((await activeCooldowns()).has(source)) return unverified('This source is on cooldown. Enter the title and description or try later.');
   const config = loadConfig();
   if (!config.searches.sources[source]?.enabled) return unverified('This source is disabled. Enter the title and description.');
   return new Promise((resolve) => {
@@ -57,7 +59,8 @@ async function fetchMetadata(source: string, url: string): Promise<ImportMetadat
       { cwd: PROJECT_ROOT, shell: false, stdio: ['pipe', 'pipe', 'pipe'] });
     let output = '', finished = false;
     const done = (value: ImportMetadata) => { if (!finished) { finished = true; clearTimeout(timer); resolve(value); } };
-    const timer = setTimeout(() => { child.kill('SIGKILL'); }, 35_000);
+    let timedOut = false;
+    const timer = setTimeout(() => { timedOut = true; child.kill('SIGKILL'); }, 35_000);
     child.stdin.on('error', () => {});
     child.stdin.end(JSON.stringify({ source, url }));
     child.stdout.on('data', (chunk) => { output += String(chunk); if (output.length > 256_000) child.kill('SIGKILL'); });
@@ -65,10 +68,35 @@ async function fetchMetadata(source: string, url: string): Promise<ImportMetadat
     child.on('error', () => done(unverified('The local metadata adapter could not start. Enter the title and description.')));
     child.on('close', () => {
       try { const parsed = metadataSchema.safeParse(JSON.parse(output));
-        done(parsed.success ? parsed.data : unverified('Metadata could not be parsed. Enter the title and description.')); }
-      catch { done(unverified('The lookup timed out or could not verify the listing. Enter the title and description.')); }
+        done(parsed.success ? parsed.data : { ...unverified('Metadata could not be parsed.'),
+          failure: { kind: 'parse', message: 'Metadata could not be parsed.' } }); }
+      catch { const message = timedOut ? 'Metadata lookup timed out' : 'Metadata lookup failed';
+        done({ ...unverified(message), requests: null, failure: { kind: timedOut ? 'timeout' : 'error', message } }); }
     });
   });
+}
+
+async function lookupWithHealth(source: string, url: string, lookup: (source: string, url: string) => Promise<ImportMetadata>): Promise<ImportMetadata> {
+  const config = loadConfig();
+  if (['manual', 'indeed', 'glassdoor'].includes(source) || !config.searches.sources[source]?.enabled)
+    return { job: null, activity: null, message: 'No enabled public detail adapter. Enter the title and description.' };
+  const claim = await claimImportSource(source);
+  if (!claim.token) return { job: null, activity: null, message: claim.reason!, requests: 0 };
+  const startedAt = new Date();
+  try {
+    let metadata: ImportMetadata;
+    try { metadata = metadataSchema.parse(await lookup(source, url)); }
+    catch (error) { metadata = { job: null, activity: null, message: String(error).slice(0, 1000),
+      failure: { kind: 'error', message: String(error).slice(0, 1000) } }; }
+    if (metadata.failure || metadata.activity) {
+      await recordOutcomes(config, [{ taskId: `import:${claim.token}`, source, searchTerm: '', location: undefined,
+        countryIndeed: undefined, status: metadata.failure ? 'Failed' : 'Succeeded', resultCount: metadata.job ? 1 : 0,
+        durationMs: Date.now() - startedAt.getTime(), errorKind: metadata.failure?.kind,
+        message: metadata.failure?.message, retryAfterSeconds: metadata.failure?.retryAfterSeconds,
+        detailRequests: metadata.requests ?? undefined }], new Date(), startedAt);
+    }
+    return metadata;
+  } finally { await releaseImportSource(source, claim.token); }
 }
 
 async function canonicalMatch(urls: string[], connection: any = cds): Promise<string | undefined> {
@@ -89,10 +117,10 @@ export async function importVacancy(input: unknown,
   if (duplicate) return alreadyTracked(duplicate);
   // Explicit fallback submission makes no second network request.
   const previous = fields.detailsToken ? pendingDetails.get(fields.detailsToken) : undefined;
-  const metadata = previous && previous.expiresAt > Date.now() && previous.url === target.url ? previous.metadata
+  const metadata: ImportMetadata = previous && previous.expiresAt > Date.now() && previous.url === target.url ? previous.metadata
     : fields.title && fields.description ? { job: null, activity: null, message: 'Added with the details you supplied; availability could not be verified.' }
-      : await lookup(target.source, target.url);
-  const availability = metadata.activity?.status === 'closed' ? 'Closed'
+      : await lookupWithHealth(target.source, target.url, lookup);
+  const availability = metadata.failure ? 'Could not verify' : metadata.activity?.status === 'closed' ? 'Closed'
     : metadata.activity?.status === 'active' ? 'Active' : 'Could not verify';
   const record: CollectorJob = { ...metadata.job, job_url: metadata.job?.job_url ?? target.url,
     title: metadata.job?.title || fields.title, description: metadata.job?.description || fields.description,
@@ -102,7 +130,7 @@ export async function importVacancy(input: unknown,
     if (pendingDetails.size >= 100) pendingDetails.delete(pendingDetails.keys().next().value!);
     const detailsToken = randomUUID();
     pendingDetails.set(detailsToken, { url: target.url, metadata, expiresAt: Date.now() + 10 * 60_000 });
-    return { result: 'Needs details', availability, detailsToken,
+    return { result: 'Needs details', availability, detailsToken, failure: metadata.failure,
       job: null, message: `${metadata.message}. Enter a title and description to save this vacancy.` };
   }
   const normalized = normalizeJob(record, target.source);
@@ -117,12 +145,12 @@ export async function importVacancy(input: unknown,
     return { id, added: result.created > 0, touched: true };
   });
   if (!saved.touched) return alreadyTracked(saved.id);
-  if (metadata.activity) await applyListingActivity([metadata.activity as ListingActivity]);
+  if (metadata.activity && !metadata.failure) await applyListingActivity([metadata.activity as ListingActivity]);
   if (fields.detailsToken) pendingDetails.delete(fields.detailsToken);
   // Deterministic caching and durable eligibility queue; paid work uses the next
   // collection's shared five-call allowance, never a per-import extra allowance.
   await rank({ jobIds: [saved.id], rulesOnly: true });
-  return { result: saved.added ? 'Added' : 'Already tracked', availability,
+  return { result: saved.added ? 'Added' : 'Already tracked', availability, failure: metadata.failure,
     job: await readJob(saved.id), message: saved.added ? metadata.message : 'This vacancy is already in your radar.' };
 }
 

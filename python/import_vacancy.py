@@ -9,12 +9,13 @@ from activity import observe
 from details import hydrate_board, linkedin_job_id
 from public_sources import PUBLIC_SOURCES, safe_public_url, hydrate as hydrate_public
 from sap_sources import SOURCES, safe_url, hydrate as hydrate_agency
-from transport import LinkedInTransport, request_kwargs, safe_message, use_transport
+from transport import LinkedInTransport, SourceStopped, request_kwargs, safe_message, use_transport
+from collector import failure_info
 
 MAX_BYTES = 2_000_000
 MAX_REQUESTS = 3
 
-def lookup(source, url):
+def lookup(source, url, counts):
     def validate(value):
         if source == "linkedin":
             linkedin_job_id(value)
@@ -30,8 +31,11 @@ def lookup(source, url):
         if used >= MAX_REQUESTS:
             raise ValueError("Public detail redirect limit reached")
         used += 1
+        counts['requests'] = used
         response = requests.get(target, timeout=10, allow_redirects=False, stream=True, **request_kwargs())
         try:
+            if response.status_code in {429, 403}:
+                raise SourceStopped(f'HTTP {response.status_code}', response)
             chunks = []
             size = 0
             for chunk in response.iter_content(16_384):
@@ -64,12 +68,13 @@ def lookup(source, url):
     return hydrate(source, row, response.text, "markdown")
 
 def main():
+    counts = {'requests': 0}
     try:
         payload = json.loads(sys.stdin.read(4096))
         source = payload["source"]
         if source not in {"linkedin", *SOURCES, *PUBLIC_SOURCES}:
             raise ValueError("This source has no supported public detail adapter")
-        row = lookup(source, payload["url"])
+        row = lookup(source, payload["url"], counts)
         status = row.pop("activity_status", None)
         reason = row.pop("activity_reason", None)
         evidence = row.pop("activity_evidence", None)
@@ -78,9 +83,18 @@ def main():
         activity = {"source": source, "source_job_id": row.get("id"), "job_url": row["job_url"],
             "status": status, "evidence": evidence, "checked_at": checked, "valid_through": deadline,
             **({"reason": reason} if reason else {})} if status else None
-        print(json.dumps({"job": row, "activity": activity, "message": "Public listing checked"}))
+        print(json.dumps({"job": row, "activity": activity, "failure": None, **counts, "message": "Public listing checked"}))
     except Exception as exc:
-        print(json.dumps({"job": None, "activity": None, "message": safe_message(exc)[:1000]}))
+        kind, message, delay = failure_info(exc)
+        response = getattr(exc, 'response', None)
+        # SourceStopped carries the status in its message; do not expose response bodies.
+        status = getattr(response, 'status_code', None)
+        if status is None and str(exc) in {'HTTP 429', 'HTTP 403'}:
+            status = int(str(exc).split()[-1])
+        failure = {'kind': kind, 'message': safe_message(message)[:1000],
+            **({'httpStatus': status} if status else {}),
+            **({'retryAfterSeconds': delay} if delay is not None else {})}
+        print(json.dumps({"job": None, "activity": None, "failure": failure, **counts, "message": failure['message']}))
 
 if __name__ == "__main__":
     main()

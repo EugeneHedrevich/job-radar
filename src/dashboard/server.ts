@@ -7,6 +7,7 @@ import { startDashboardCollection } from '../pipeline/collection-operation.js';
 import { readOperation } from '../collector/lease.js';
 import { importVacancy } from './import.js';
 import { listReminders, updateReminder } from './reminders.js';
+import { requeueAssessment } from './assessment-retry.js';
 
 function json(response: ServerResponse, status: number, data: unknown): void {
   response.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
@@ -101,6 +102,10 @@ export function createDashboardServer(frontendDirectory = path.join(PROJECT_ROOT
         json(response, 200, await updateReminder(decodeURIComponent(reminder[1]!), await body(request))); return;
       }
       const match = /^\/api\/jobs\/([^/]+)(\/tracking)?$/.exec(url.pathname);
+      const retry = /^\/api\/jobs\/([^/]+)\/assessment\/retry$/.exec(url.pathname);
+      if (retry && request.method === 'POST') {
+        json(response, 200, await requeueAssessment(decodeURIComponent(retry[1]!))); return;
+      }
       if (match) {
         const id = decodeURIComponent(match[1]!);
         if (!match[2] && request.method === 'GET') {

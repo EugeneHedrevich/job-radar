@@ -129,6 +129,11 @@ Rules you must follow:
 - suggested_cv_variant must be exactly one of the allowed CV variant ids.
 - Never invent requirements, technologies, rates or CV content that are not in the inputs.`;
 
+export class LlmProviderError extends Error {
+  constructor(message: string, public readonly transient: boolean, public readonly retryAfterSeconds?: number) { super(message); }
+}
+export class LlmRejectedOutputError extends Error {}
+
 export async function assessWithLlm(config: AppConfig, job: MatchableJob): Promise<AssessmentResult> {
   if (!config.llmAvailable || !config.secrets.openaiApiKey) {
     throw new LlmUnavailableError('OPENAI_API_KEY is not configured');
@@ -183,9 +188,14 @@ export async function assessWithLlm(config: AppConfig, job: MatchableJob): Promi
       signal: controller.signal,
     });
     if (!response.ok) {
-      throw new Error(`OpenAI responded ${response.status}: ${truncate(await response.text(), 500)}`);
+      const retry = response.headers.get('Retry-After');
+      const delay = retry ? /^\d+(?:\.\d+)?$/.test(retry) ? Number(retry) : (Date.parse(retry) - Date.now()) / 1000 : NaN;
+      throw new LlmProviderError(`Provider HTTP ${response.status}: ${truncate(await response.text(), 300)}`,
+        response.status === 408 || response.status === 429 || response.status >= 500,
+        Number.isFinite(delay) ? Math.max(0, delay) : undefined);
     }
-    payload = await response.json();
+    try { payload = await response.json(); }
+    catch { throw new LlmRejectedOutputError('Provider returned an invalid JSON response'); }
   } finally {
     clearTimeout(timer);
   }

@@ -326,7 +326,8 @@ def scrape_public(kwargs: dict[str, Any]) -> tuple[list[dict[str, Any]], BaseExc
         return rows + closures, failure
     keyword = kwargs.get("search_term", "SAP")
     root = market_root(kwargs.get("location")) if source == "michaelpage" else PUBLIC_SOURCES[source][0]
-    for page in range(progress.start_page, min(100, progress.start_page + MAX_SEARCH_PAGES - 1) + 1):
+    backfill_count = 0
+    for page in progress.pages(MAX_SEARCH_PAGES):
         try:
             if source in API_SOURCES:
                 candidates, more = parse_api(source, json.loads(fetch(api_url(source, keyword, page))), keyword, fmt)
@@ -334,6 +335,7 @@ def scrape_public(kwargs: dict[str, Any]) -> tuple[list[dict[str, Any]], BaseExc
                 candidates, more = parse_search(source, fetch(search_url(source, keyword, kwargs.get("location"), page)), root)
         except Exception as exc:
             return rows + closures, exc
+        progress.checked_head(page)
         for row in progress.candidates(candidates, page):
             if row["job_url"] in seen:
                 continue
@@ -353,9 +355,11 @@ def scrape_public(kwargs: dict[str, Any]) -> tuple[list[dict[str, Any]], BaseExc
             if keep(row):
                 rows.append(row)
                 stream(row)
-            if len(rows) >= wanted:
+                if not progress.fresh:
+                    backfill_count += 1
+            if not progress.fresh and backfill_count >= wanted:
                 return rows + closures, failure
         progress.finish_page(page, more)
-        if not more:
+        if not more and not progress.fresh:
             break
     return rows + closures, failure

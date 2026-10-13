@@ -35,7 +35,8 @@ export async function reserveBatchPlan(config: AppConfig, options: PlanOptions =
         }
       }
     }
-    const plan = planBatch(config, { ...options, batchKey, descriptionRotation: previous });
+    const plan = planBatch(config, { ...options, batchKey, descriptionRotation: previous,
+      globalLinkedin: options.globalLinkedin ?? (!options.batchKey && !options.onlySources?.length) });
     for (const tasks of plan.tasksBySource.values()) for (const task of tasks) {
       if (task.enrich_only) continue;
       const saved = await tx.run(SELECT.one.from(db().SearchProgress).where({ taskKey: task.task_id }));
@@ -54,6 +55,8 @@ export async function reserveBatchPlan(config: AppConfig, options: PlanOptions =
       const cursor = JSON.parse(saved.state);
       if (['linkedin', 'indeed'].includes(task.source)) {
         if (cursor.offset > 0 && cursor.offset < (task.source === 'linkedin' ? 1000 : 300)) task.offset = cursor.offset;
+        if (task.offset && (task.search_request_limit ?? 3) === 1) task.head_only = !saved.headCheckedAt ||
+          new Date(saved.headCheckedAt).getTime() <= new Date(saved.updatedAt).getTime();
       } else task.search_cursor = cursor;
     }
     await reserveEnrichment(tx, config, plan, options.at ?? new Date());
@@ -130,8 +133,8 @@ async function reserveEnrichment(tx: any, config: AppConfig, plan: PlannedBatch,
 /** Persist completed/streamed search progress, including before a timeout. */
 export async function recordSearchProgress(outcomes: TaskOutcome[], at = new Date()): Promise<void> {
   for (const outcome of outcomes) {
-    if (!outcome.nextCursor || outcome.status === 'Skipped' ||
-      outcome.status === 'Failed' && outcome.resultCount === 0) continue;
+    if (outcome.headChecked) await cds.run(UPDATE(db().SearchProgress).set({ headCheckedAt: at.toISOString() }).where({ taskKey: outcome.taskId }));
+    if (!outcome.nextCursor || outcome.status === 'Skipped' || outcome.status === 'Failed' && outcome.resultCount === 0) continue;
     const previous: any = await cds.run(SELECT.one.from(db().SearchProgress).where({ taskKey: outcome.taskId }));
     const reset = outcome.nextCursor.offset === 0 || (outcome.nextCursor.page === 1 && !outcome.nextCursor.index);
     const values = { state: JSON.stringify(outcome.nextCursor), updatedAt: at.toISOString(),

@@ -95,7 +95,7 @@ async function collectOwned(options: CollectOptions, claim: CollectionClaim): Pr
     }),
   );
   await updateOperation(claim, { stage: 'Collecting', run_ID: runId,
-    tasksTotal: [...plan.tasksBySource.values()].flat().length });
+    tasksTotal: options.fixture ? 0 : [...plan.tasksBySource.values()].flat().length });
   const stopHeartbeat = startRunHeartbeat(runId);
   try {
     for (const skipped of plan.skipped) {
@@ -128,6 +128,13 @@ async function collectOwned(options: CollectOptions, claim: CollectionClaim): Pr
       // One subprocess per source keeps failures isolated: a blocked or hanging
       // board cannot take the other boards down with it.
       for (const [source, tasks] of plan.tasksBySource) {
+        const cooling = (await activeCooldowns()).get(source);
+        if (cooling) {
+          for (const task of tasks) outcomeByTask.set(task.task_id, { taskId: task.task_id, source,
+            searchTerm: task.search_term, location: task.location, countryIndeed: task.country_indeed,
+            status: 'Skipped', resultCount: 0, durationMs: 0, message: cooling });
+          continue;
+        }
         const sourceConfig = config.searches.sources[source];
         if (!sourceConfig) continue;
         try {
@@ -224,7 +231,7 @@ async function collectOwned(options: CollectOptions, claim: CollectionClaim): Pr
         await recordError(runId, outcome.source, outcome.errorKind ?? 'error', outcome.message ?? '', new Date());
       }
     }
-    await recordOutcomes(config, outcomes);
+    await recordOutcomes(config, outcomes, new Date(), startedAt);
 
     const outcome = collectionOutcome(outcomes, collected.length, Boolean(options.fixture));
     await cds.run(
@@ -234,11 +241,11 @@ async function collectOwned(options: CollectOptions, claim: CollectionClaim): Pr
           status: outcome,
           jobsFound: collected.length,
           jobsNew: ingest.created,
-          jobsUpdated: ingest.updated + ingest.mergedAcrossSources,
+          jobsUpdated: ingest.updatedJobIds.length,
         })
         .where({ ID: runId }),
     );
-    await updateOperation(claim, { jobsNew: ingest.created, jobsUpdated: ingest.updated + ingest.mergedAcrossSources });
+    await updateOperation(claim, { jobsNew: ingest.created, jobsUpdated: ingest.updatedJobIds.length });
 
     return {
       runId,

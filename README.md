@@ -226,6 +226,10 @@ partial failures and the remaining AI backlog after the five-call ceiling. Reloa
 the page restores progress from SQLite. A shared, renewable SQLite lease prevents
 overlap with other dashboard clicks, CLI collection and scheduled cycles; expired
 operations become errors after five minutes without a heartbeat.
+Running operations show full stages; finished operations collapse into a compact result.
+Expanded diagnostics separate unique new/updated jobs, cached assessments, new rules
+assessments, successful AI assessments and failed AI attempts. The CLI and scheduler
+use the same finalisation, including saved AI failure reasons.
 
 The compact list opens with newest saved vacancies and no score cutoff. Search covers
 title, company, location and personal notes. **My applications** includes personal
@@ -270,7 +274,10 @@ personal tracking and saved assessments.
 **Add vacancy** accepts a public HTTPS URL, checks canonical URLs across all stored
 source listings, and reuses supported public detail adapters. The lookup is bounded
 to three requests/redirects, 2 MB per response and 35 seconds overall. Source cooldowns
-and disabled sources are respected. Unsupported or failed lookups ask for a title and
+and disabled sources are respected. Lookups are serialized per source through SQLite;
+their structured 429/403 failures and Retry-After update the same circuit breaker as
+collection. A still-running earlier collection cannot clear a newer import block.
+Unsupported or failed lookups ask for a title and
 description; blocks, timeouts and parse failures report **Could not verify**. Only
 explicit closure evidence reports **Closed**. Duplicate URLs return **Already tracked**
 with existing personal notes intact. Import reuses normalization, deduplication and
@@ -281,7 +288,10 @@ When first marking a CV as sent, confirm the actual date and time (default: toda
 Europe/Sofia). This is saved separately from the application date, with a follow-up
 seven Sofia calendar days later, including across daylight-saving changes. Legacy
 CV-sent records retain an unknown send date until you supply it. Unchanged CV-sent
-saves and note edits do not reset reminders. The compact panel shows due/overdue
+saves can edit notes/status without requiring that legacy date or changing the status
+automatically. Newly marking a CV as sent requires its actual send date and time.
+Unchanged CV-sent saves and note edits do not reset reminders. An empty reminder
+panel becomes a small indicator. The compact panel emphasises due/overdue
 follow-ups and lets you complete, postpone by seven days or change the due date.
 Clearing CV-sent or marking a job Ignored/Rejected cancels pending follow-ups while
 preserving completed history. SQLite retains overdue reminders across restart.
@@ -302,6 +312,7 @@ The thin JSON API is local and intentionally limited:
 | `GET /api/jobs` | Stored jobs with `view=vacancies\|applications\|imports`, search, filters, sort and pagination |
 | `GET /api/jobs/:id` | Vacancy facts, listings, current assessment and saved history |
 | `PATCH /api/jobs/:id/tracking` | Only `status`, `personalNotes`, `applicationDate`, `cvSent`, `cvSentAt`, `sentCvLabel` |
+| `POST /api/jobs/:id/assessment/retry` | Requeue a failed AI attempt; performs no provider request |
 | `GET /api/status` | Last stored collection and source health |
 | `POST /api/collection` | Start collection; return operation ID or the already active operation |
 | `GET /api/collection` / `GET /api/collection/:id` | Latest or selected durable operation progress |
@@ -381,8 +392,12 @@ Each configured batch fits the global 18-search-task ceiling. `cap-markets`, `jo
 and `btp-markets` separately search supported non-LinkedIn markets outside the Netherlands,
 including Germany, Switzerland, the UK, Poland, Austria and Ireland. LinkedIn allows
 **two search tasks per cycle** by default; postponed keyword/location combinations rotate
-through a durable queue on subsequent available cycles, using spare task capacity instead
-of waiting for their original batch to return. The LinkedIn freshness window is 168 hours
+through a persisted catalogue cursor on subsequent available cycles, using spare task
+capacity instead of waiting for their original batch to return. The actual configuration
+has **98 combinations and at most 66 search slots per 108-hour sequence** before cooldowns:
+at least 32 combinations must wait beyond one sequence. Catalogue rotation avoids repeats
+until the sweep wraps; diagnostics report observed first-page coverage rather than promising
+complete coverage. The LinkedIn freshness window is 168 hours
 to accommodate its slower sweep; other source windows are unchanged. Larger custom batches
 also rotate their postponed tail. Collection outcomes distinguish successful empty searches,
 partial results, all executed tasks failing (even with skipped tasks), and no available sources.
@@ -509,9 +524,14 @@ and `scoring.thresholds.review`.
 
 `npm run top` only reads current saved assessments. After a content/configuration or cache
 revision change, run `npm run rank` to produce current results; old assessments remain in
-history. Completed AI attempts, including unsupported answers and provider failures,
-are cached with their rules fallback and reason. A subsequent normal run does not pay
-for the same attempt again; changed inputs or `npm run rank -- --force` permit a retry.
+history. Successful AI output is Completed; transient provider failures are Failed, and
+invalid/unsupported model output is Rejected. Failures retain a rules fallback, provenance
+and reason. A normal collection does not automatically retry them. **Queue AI retry** in
+vacancy details requeues one failed input key for a later collection, sharing its existing
+five-call allowance; repeated clicks do not duplicate work. Each unchanged input key has
+at most three paid attempts (initial plus two explicit retries), including `rank --force`.
+Provider Retry-After is respected. When retrying, earlier fallback rows remain in assessment
+history. Legacy fallback caches are recognised without invalidating successful caches.
 
 ### Expanded public SAP coverage
 
@@ -544,8 +564,12 @@ not guarantee exhaustive vacancy coverage. Public adapters save page/index progr
 LinkedIn saves bounded offsets below 1,000 and Indeed below 300 with at most three
 HTTP searches per task. Indeed's offset still refetches earlier API pages; Glassdoor's
 pinned offset implementation cannot reliably resume a later page and is left unchanged.
-Sweeps restart at exhaustion or after half the task's freshness window, leaving time for
-broad first-page discovery before the window expires. Regional location never proves cross-border
+Every resumed LinkedIn/Indeed search checks the first page using one of its existing
+three HTTP slots, then continues saved backfill with the remaining allowance. Public page
+adapters likewise reserve one of their three page slots for the head. Head observations
+do not overwrite backfill cursors; failed empty lookups retain progress. A one-request
+LinkedIn allowance alternates head/backfill visits. Sweeps restart at exhaustion or after
+at least two rotation periods without backfill progress. Regional location never proves cross-border
 eligibility, and PLN rates are never treated as EUR.
 
 `enrich` spends at most two description tasks on relevant stored listings and issues no
@@ -598,8 +622,9 @@ Every monitoring cycle ranks both collected jobs and stored candidates awaiting 
 current AI cache key. `AiAssessmentQueue` retains the rules score and original waiting
 time across restarts. Priority is rules score plus one point per three waiting hours,
 with waiting time and job ID as stable tie breakers. All candidates share the same
-five-request ceiling; saved valid answers and AI fallbacks finish that attempt. Input
-changes create a new key; `rank --force` explicitly retries. Normal cycles never force
+five-request ceiling; valid answers complete work, while failed or rejected attempts stay
+held until explicitly requeued. Input changes create a new key; `rank --force` explicitly
+requests reassessment under the same attempt limit. Normal cycles never force
 reassessment. `status` reports pending AI work and closed listings.
 
 Listing activity is separate from the user's `New`, `Interested`, `Applied` or `Ignored`

@@ -236,6 +236,19 @@ blockquote p { margin: 6px 0; }
 .stages .done { color: #516d5a; }
 .progress-counts { margin-bottom: 6px; }
 .progress-panel p + p { margin-top: 5px; }
+.terminal-result { padding: 4px 16px; }
+.terminal-result > summary { font-weight: 400; }
+.terminal-result > summary strong { color: #344a3e; font-size: 12px; font-weight: 600; }
+.terminal-diagnostics { padding: 10px 0; }
+.terminal-diagnostics .collection-card { margin: 12px 0 0; }
+.failure-reasons { padding-left: 18px; color: #9a682a; font-size: 12px; overflow-wrap: anywhere; }
+.collection-idle { margin-bottom: 12px; }
+.reminder-indicator { display: flex; flex-wrap: wrap; align-items: baseline; gap: 16px; padding: 2px 0 8px; }
+.reminder-indicator details { flex: 1; }
+.reminders-panel { border-left: 3px solid #b38045; }
+.reminders-panel .warning { font-weight: 600; }
+.retry-assessment { margin: 12px 0; }
+.retry-assessment p { margin-top: 6px; }
 .view-tabs { display: flex; gap: 5px; margin: 22px 0 12px; }
 .view-tabs button { background: transparent; border-color: transparent; padding: 9px 14px; font-size: 13px; }
 .view-tabs .selected { color: var(--accent); background: #eaf2ec; border-color: #cbddcf; }

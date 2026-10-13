@@ -8,6 +8,9 @@ import { APPLICATION_STATUSES, type Activity, type AssessmentKind, type Collecti
   type JobDetail, type JobList, type JobSummary, type SavedAssessment, type Tracking } from './types.js';
 import { ApiError } from './errors.js';
 import { listReminders, syncCvFollowUp } from './reminders.js';
+import { aiOutcomeOf, MAX_AI_ATTEMPTS, PENDING_AI_STATUSES } from '../pipeline/ai-queue.js';
+import { eligibleForAiRetry } from './assessment-retry.js';
+import { linkedinCoverage } from '../collector/plan.js';
 
 export { ApiError } from './errors.js';
 
@@ -73,15 +76,17 @@ function score(value: unknown): number | null {
 
 function savedAssessment(config: AppConfig, job: any, row: any, current: boolean): SavedAssessment {
   return { ...rowToAssessment(row), ID: row.ID, fitScore: score(row.fitScore),
-    createdAt: row.createdAt ?? null, kind: assessmentKind(config, job, row), current };
+    createdAt: row.createdAt ?? null, kind: assessmentKind(config, job, row), current,
+    aiOutcome: aiOutcomeOf(row), aiReason: row.aiReason ?? null };
 }
 
 async function summarize(config: AppConfig, job: any, listings: any[], assessments: any[], queue: any[], at: Date): Promise<JobSummary> {
   const current = await findCurrentAssessment(config, job, assessments);
   const activity = jobActivity(listings, at);
   const aiKey = assessmentCacheKey(config, job, 'llm');
-  const pending = job.status !== 'Ignored' && activity !== 'Closed' && !assessments.some((row) => row.cacheKey === aiKey) &&
-    queue.find((row) => row.status === 'Pending' && row.cacheKey === aiKey);
+  const pending = job.status !== 'Ignored' && activity !== 'Closed' && queue.find((row) =>
+    ['Pending', 'RetryPending', 'Attempting'].includes(row.status) && row.cacheKey === aiKey &&
+    (row.status !== 'Pending' || !assessments.some((saved) => saved.cacheKey === aiKey)));
   return { ID: job.ID, title: job.title, company: job.company, location: job.location,
     isRemote: job.isRemote ?? null, manuallyImportedAt: job.manuallyImportedAt ?? null, nextFollowUp: null,
     jobType: job.jobType, salaryMin: score(job.salaryMin), salaryMax: score(job.salaryMax),
@@ -121,8 +126,8 @@ export async function listJobs(params = new URLSearchParams()): Promise<JobList>
     query(SELECT.from(db().Jobs)),
     query(SELECT.from(db().SourceListings).columns('job_ID', 'source', 'activityState', 'validThrough')),
     query(SELECT.from(db().Assessments).columns('ID', 'job_ID', 'cacheKey', 'engine', 'fitScore', 'recommendation',
-      'createdAt', 'explanation', 'missingInformation')),
-    query(SELECT.from(db().AiAssessmentQueue).where({ status: 'Pending' })),
+      'createdAt', 'explanation', 'missingInformation', 'aiOutcome', 'aiReason')),
+    query(SELECT.from(db().AiAssessmentQueue).where({ status: { in: PENDING_AI_STATUSES.concat('Attempting') } })),
     listReminders(),
   ]);
   const byListing = groupByJob(listings), byAssessment = groupByJob(assessments), byQueue = groupByJob(queue);
@@ -164,16 +169,24 @@ export async function readJob(id: string): Promise<JobDetail> {
   const [listings, assessments, queue] = await Promise.all([
     query(SELECT.from(db().SourceListings).where({ job_ID: id })),
     query(SELECT.from(db().Assessments).where({ job_ID: id }).orderBy('createdAt desc')),
-    query(SELECT.from(db().AiAssessmentQueue).where({ job_ID: id, status: 'Pending' })),
+    query(SELECT.from(db().AiAssessmentQueue).where({ job_ID: id })),
   ]);
   const at = new Date();
   const current = await findCurrentAssessment(config, job, assessments);
   const validKeys = currentAssessmentKeys(config, job);
   const reminders = await listReminders(id);
   const next = reminders.find((reminder) => reminder.status === 'Pending');
+  const work = queue.find((row) => row.cacheKey === assessmentCacheKey(config, job, 'llm'));
+  const fallback = current && assessmentKind(config, job, current) === 'ai-fallback';
+  const attempts = Math.max(work?.attempts ?? 0, fallback ? 1 : 0);
+  const retryAfter = work?.retryAfter ?? null;
   return { ...await summarize(config, job, listings, assessments, queue, at),
     description: job.description, primaryUrl: job.primaryUrl, isRemote: job.isRemote, locationCountry: job.locationCountry,
     reminders, nextFollowUp: next ? { ID: next.ID, dueDate: next.dueDate } : null,
+    aiRetry: fallback || work && ['Failed', 'Rejected', 'RetryPending'].includes(work.status) ? {
+      attempts, maxAttempts: MAX_AI_ATTEMPTS, retryAfter, reason: work?.lastReason ?? current?.aiReason ?? null, queued: work?.status === 'RetryPending',
+      canRetry: Boolean(eligibleForAiRetry(config, job) && jobActivity(listings, at) !== 'Closed' &&
+        attempts < MAX_AI_ATTEMPTS && work?.status !== 'Attempting' && (!retryAfter || new Date(retryAfter) <= at)) } : null,
     listings: listings.map((row) => ({ ID: row.ID, source: row.source,
       url: row.directUrl ?? row.rawUrl ?? row.canonicalUrl, activity: listingActivity(row, at),
       activityCheckedAt: row.activityCheckedAt ?? null, validThrough: row.validThrough ?? null,
@@ -198,7 +211,7 @@ export async function updateTracking(id: string, input: unknown): Promise<Tracki
     if (patch.cvSentAt) patch.cvSentAt = new Date(patch.cvSentAt).toISOString();
     const values = { ...patch, ...(!nextSent ? { cvSentAt: null } : {}) };
     await tx.run(UPDATE(db().Jobs).set(values).where({ ID: id }));
-    if (patch.cvSent === true) {
+    if (patch.cvSent === true && !previous.cvSent) {
       await tx.run(UPDATE(db().Jobs).set({ status: 'Applied' }).where({ ID: id, status: { in: ['New', 'Interested'] } }));
     }
     if (patch.status === 'Ignored') await suppressIgnoredWork(tx, id);
@@ -216,7 +229,13 @@ export async function readCollectionStatus(): Promise<CollectionStatus> {
     latestRun ? query(SELECT.from(db().CollectionTasks).where({ run_ID: latestRun.ID })) : Promise.resolve([]),
     latestRun ? query(SELECT.from(db().CollectionErrors).where({ run_ID: latestRun.ID }).orderBy('occurredAt desc')) : Promise.resolve([]),
   ]);
-  return { latestRun: latestRun ? { ID: latestRun.ID, startedAt: latestRun.startedAt,
+  const coverage = linkedinCoverage(loadConfig());
+  const { taskKeys, ...coverageCounts } = coverage;
+  const headRows = await query(SELECT.from(db().SearchProgress).columns('taskKey', 'headCheckedAt'));
+  const cutoff = Date.now() - coverage.freshnessHours * 3_600_000;
+  return { linkedinCoverage: { ...coverageCounts, checkedWithinWindow: headRows.filter((row) =>
+    taskKeys.includes(row.taskKey) && row.headCheckedAt && new Date(row.headCheckedAt).getTime() >= cutoff).length },
+    latestRun: latestRun ? { ID: latestRun.ID, startedAt: latestRun.startedAt,
     heartbeatAt: latestRun.heartbeatAt ?? null, finishedAt: latestRun.finishedAt ?? null,
     trigger: latestRun.trigger ?? null, batchKey: latestRun.batchKey ?? null, status: latestRun.status,
     jobsFound: latestRun.jobsFound ?? 0, jobsNew: latestRun.jobsNew ?? 0, jobsUpdated: latestRun.jobsUpdated ?? 0,

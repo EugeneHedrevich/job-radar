@@ -6,12 +6,12 @@ import { promisify } from "node:util";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { activeCooldowns, recordOutcomes } from "../src/collector/health.js";
 import { recoverInterruptedRuns, startRunHeartbeat } from "../src/collector/lifecycle.js";
-import { planBatch, selectBatchIndex, type DescriptionRotation } from "../src/collector/plan.js";
+import { linkedinCoverage, planBatch, selectBatchIndex, type DescriptionRotation } from "../src/collector/plan.js";
 import { recordSearchProgress, reserveBatchPlan } from "../src/collector/rotation.js";
 import { runCollector } from "../src/collector/run.js";
 import { type CollectorTask } from "../src/collector/types.js";
 import { loadConfig, PROJECT_ROOT, resetConfigCache } from "../src/config/index.js";
-import { cds, connectDb, db, DELETE, disconnectDb, INSERT, query, SELECT } from "../src/db/index.js";
+import { cds, connectDb, db, DELETE, disconnectDb, INSERT, query, queryOne, SELECT } from "../src/db/index.js";
 import { PRIORITY_DIRECTIONS, priorityDirections } from "../src/matching/directions.js";
 import { assessWithRules, prescreen } from "../src/matching/rules.js";
 import { type MatchableJob } from "../src/matching/types.js";
@@ -46,6 +46,9 @@ afterEach(() => {
     resetConfigCache();
 });
 describe('malformed collector output', () => {
+    it('checks a changing LinkedIn head while continuing backfill within the original HTTP allowance', async () => {
+        await promisify(execFile)('python3', [path.join(here, 'helpers/freshness-regression.py')], { cwd: PROJECT_ROOT });
+    });
     it('kills an expired worker before returning, retaining records, request counts and progress', async () => {
         const output = await runCollector(configWith('fake-collector.mjs'), {
             tasks: [{ ...task('hang'), search_term: 'hang' }, task('postponed')],
@@ -202,31 +205,27 @@ describe("priority-coverage", () => {
             salaryInterval: null, salaryCurrency: null, primaryUrl: 'https://example.com/job', datePosted: null };
     }
     describe('priority search coverage within operational limits', () => {
-        it('keeps complete non-LinkedIn batches and caps LinkedIn search tasks separately', () => {
+        it('covers the actual 98-combination catalogue fairly across the configured 66-slot/108h sequence', () => {
             const config = loadConfig();
+            expect(linkedinCoverage(config)).toMatchObject({ combinations: 98, slotsPerSequence: 66, sequenceHours: 108 });
+            let state: ReturnType<typeof planBatch>['descriptionRotation'] | undefined;
             const seen = new Set<string>();
-            const count = config.searches.rotation.sequence?.length ?? config.searches.rotation.batches.length;
-            expect(count * config.searches.rotation.interval_hours).toBeLessThan(config.searches.defaults.hours_old);
-            for (let slot = 0; slot < count; slot += 1) {
+            const count = config.searches.rotation.sequence!.length;
+            for (let slot = 0; slot < count * 2; slot++) {
                 const at = new Date(slot * config.searches.rotation.interval_hours * 3600000);
-                const index = selectBatchIndex(config, at);
-                const batch = config.searches.rotation.batches[index]!;
-                const plan = planBatch(config, { at });
-                const expected = Object.entries(batch.targets).flatMap(([source, geos]) => geos.flatMap((geo) => batch.keywords.map((keyword) => `${source}:${geo}:${keyword}`)));
+                const batch = config.searches.rotation.batches[selectBatchIndex(config, at)]!;
+                const plan = planBatch(config, { at, descriptionRotation: state });
+                state = plan.descriptionRotation;
                 const tasks = [...plan.tasksBySource.values()].flat();
-                const linkedinCount = (batch.targets.linkedin?.length ?? 0) * batch.keywords.length;
-                expect(tasks).toHaveLength(expected.length - linkedinCount + Math.min(2, linkedinCount));
                 expect(tasks.length).toBeLessThanOrEqual(18);
-                expect(tasks.filter((task) => task.fetch_description).length).toBeLessThanOrEqual(2);
-                for (const [source, geos] of Object.entries(batch.targets)) {
-                    if (source === 'linkedin') continue;
+                expect(tasks.filter(task => task.fetch_description).length).toBeLessThanOrEqual(2);
+                expect(tasks.filter(task => task.source === 'linkedin').length).toBeLessThanOrEqual(2);
+                for (const [source, geos] of Object.entries(batch.targets)) if (source !== 'linkedin')
                     expect(plan.tasksBySource.get(source)).toHaveLength(geos.length * batch.keywords.length);
-                    for (const keyword of batch.keywords)
-                        expect(plan.tasksBySource.get(source)!.some((task) => task.search_term === keyword)).toBe(true);
-                }
-                seen.add(batch.key);
+                for (const task of tasks) if (task.source === 'linkedin') seen.add(task.task_id);
+                if (slot === count - 1) expect(seen.size).toBe(66);
             }
-            expect(seen.size).toBe(config.searches.rotation.batches.length);
+            expect(seen.size).toBe(98); // A second real sequence, not repeated sap-specialists cycles.
         });
         it('revisits every broad priority group and public catalogue within 36 hours', () => {
             const config = loadConfig();
@@ -344,23 +343,23 @@ describe("description-rotation", () => {
     });
     afterAll(closeTempDb);
     describe('bounded persistent description rotation', () => {
-        it('persists fair search combinations and bounded search progress across restart', async () => {
-            const config = loadConfig(), at = new Date();
+        it('retains backfill and successful head observations across restart, failure and a 108-hour revisit', async () => {
+            const config = loadConfig(), at = new Date('2026-10-01T00:00:00Z');
             const first = await reserveBatchPlan(config, { batchKey: 'cap-broad', onlySources: ['linkedin'], at });
-            const tasks = first.tasksBySource.get('linkedin')!;
-            expect(tasks).toHaveLength(2);
-            expect(tasks.reduce((sum, task) => sum + (task.detail_request_limit ?? 0), 0)).toBe(5);
-            await recordSearchProgress([{ taskId: tasks[0]!.task_id, source: 'linkedin', searchTerm: 'SAP',
-                location: undefined, countryIndeed: undefined, status: 'Succeeded', resultCount: 25,
-                durationMs: 1, nextCursor: { offset: 20 } }], at);
-            await disconnectDb();
-            await connectDb(dbPath);
-            const resumed = await reserveBatchPlan(config, { batchKey: 'cap-broad', onlySources: ['linkedin'], at });
-            expect(resumed.tasksBySource.get('linkedin')!.some((task) => !tasks.some((old) => old.task_id === task.task_id))).toBe(true);
-            expect(resumed.tasksBySource.get('linkedin')!.find((task) => task.task_id === tasks[0]!.task_id)?.offset).toBe(20);
-            const expired = await reserveBatchPlan(config, { batchKey: 'cap-broad', onlySources: ['linkedin'],
-                at: new Date(at.getTime() + 217 * 3600000) });
-            expect(expired.tasksBySource.get('linkedin')!.every((task) => task.offset === undefined)).toBe(true);
+            const task = first.tasksBySource.get('linkedin')![0]!;
+            const outcome = { taskId: task.task_id, source: task.source, searchTerm: task.search_term,
+                location: task.location, countryIndeed: task.country_indeed, status: 'Succeeded' as const,
+                resultCount: 25, durationMs: 1, nextCursor: { offset: 20 }, headChecked: true };
+            await recordSearchProgress([outcome], at);
+            await recordSearchProgress([{ ...outcome, status: 'Failed', resultCount: 0, nextCursor: { offset: 0 }, headChecked: false }], at);
+            await disconnectDb(); await connectDb(dbPath);
+            const resumed = await reserveBatchPlan(config, { batchKey: 'cap-broad', onlySources: ['linkedin'],
+                at: new Date(at.getTime() + 108 * 3600000) });
+            expect(resumed.tasksBySource.get('linkedin')!.find(row => row.task_id === task.task_id)?.offset).toBe(20);
+            const saved = await queryOne<any>(SELECT.from(db().SearchProgress).where({ taskKey: task.task_id }));
+            expect(new Date(saved.headCheckedAt).toISOString()).toBe(at.toISOString());
+            await recordSearchProgress([{ ...outcome, resultCount: 0, nextCursor: { offset: 0 } }], at);
+            expect(JSON.parse((await queryOne<any>(SELECT.from(db().SearchProgress).where({ taskKey: task.task_id })))!.state)).toEqual({ offset: 0 });
         });
         it('reserves stored descriptions without searches and keeps the two-task budget', async () => {
             const at = new Date();

@@ -11,6 +11,7 @@ export interface IngestResult {
   unusable: number;
   jobIds: string[];
   newJobIds: string[];
+  updatedJobIds: string[];
 }
 
 export interface JobRow {
@@ -66,6 +67,7 @@ async function ingestWithin(normalized: NormalizedJob[],
     unusable: 0,
     jobIds: [],
     newJobIds: [],
+    updatedJobIds: [],
   };
 
   // Guard against the same listing appearing twice inside one collection run
@@ -98,7 +100,7 @@ async function ingestWithin(normalized: NormalizedJob[],
     if (existingListing) {
       await touchListing(existingListing.ID, job, seenAt, context.runId, connection);
       const enriched = await enrichJob(existingListing.job_ID, job, seenAt, true, context.demo, connection);
-      if (enriched) result.updated += 1;
+      if (enriched) { result.updated += 1; result.updatedJobIds.push(existingListing.job_ID); }
       if (existingListing.job_ID) result.jobIds.push(existingListing.job_ID);
       continue;
     }
@@ -108,6 +110,7 @@ async function ingestWithin(normalized: NormalizedJob[],
       await insertListing(duplicate.ID, job, seenAt, context.runId, connection);
       await enrichJob(duplicate.ID, job, seenAt, false, context.demo, connection);
       result.mergedAcrossSources += 1;
+      result.updatedJobIds.push(duplicate.ID);
       result.jobIds.push(duplicate.ID);
       continue;
     }
@@ -144,6 +147,8 @@ async function ingestWithin(normalized: NormalizedJob[],
     result.newJobIds.push(jobId);
   }
 
+  result.jobIds = [...new Set(result.jobIds)];
+  result.updatedJobIds = [...new Set(result.updatedJobIds)].filter((id) => !result.newJobIds.includes(id));
   return result;
 }
 

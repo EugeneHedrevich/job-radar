@@ -1,4 +1,5 @@
-import type { AssessmentResult } from '../matching/types.js';
+import type { AssessmentResult, AiOutcome } from '../matching/types.js';
+import type { SourceFailure } from '../collector/types.js';
 
 export const APPLICATION_STATUSES = ['New', 'Interested', 'Applied', 'Ignored', 'Interview', 'Rejected'] as const;
 export type ApplicationStatus = typeof APPLICATION_STATUSES[number];
@@ -49,6 +50,8 @@ export interface SavedAssessment extends Omit<AssessmentResult, 'fitScore'> {
   createdAt: string | null;
   kind: AssessmentKind;
   current: boolean;
+  aiOutcome: AiOutcome | null;
+  aiReason: string | null;
 }
 
 export interface Listing {
@@ -73,6 +76,7 @@ export interface JobDetail extends JobSummary {
   currentAssessment: SavedAssessment | null;
   assessmentHistory: SavedAssessment[];
   reminders: FollowUpReminder[];
+  aiRetry: { attempts: number; maxAttempts: number; queued: boolean; canRetry: boolean; retryAfter: string | null; reason: string | null } | null;
 }
 
 export interface FollowUpReminder {
@@ -104,6 +108,11 @@ export interface CollectionOperation {
   jobsUpdated: number;
   jobsAssessed: number;
   aiCalls: number;
+  cachedAssessments: number | null;
+  rulesAssessments: number | null;
+  aiSucceeded: number | null;
+  aiFailures: number | null;
+  aiFailureReasons: string[];
   aiBacklog: number;
   aiBudgetExhausted: boolean;
   message: string | null;
@@ -115,6 +124,7 @@ export interface ImportResult {
   job: JobDetail | null;
   message: string;
   detailsToken?: string;
+  failure?: SourceFailure | null;
 }
 
 export interface JobList {
@@ -127,6 +137,10 @@ export interface JobList {
 }
 
 export interface CollectionStatus {
+  linkedinCoverage: {
+    combinations: number; slotsPerSequence: number; sequenceHours: number; freshnessHours: number;
+    checkedWithinWindow: number;
+  };
   latestRun: {
     ID: string;
     startedAt: string;
