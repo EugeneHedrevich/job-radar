@@ -7,6 +7,7 @@ import { claimNotification, queueNotification } from './notification-store.js';
 import type { MatchableJob } from '../matching/types.js';
 import { log, out } from '../util/log.js';
 import { closedJobIds, expireListingDeadlines, isJobClosed, listingIsClosed } from '../persist/activity.js';
+import { suppressIgnoredWork } from './ignored.js';
 
 export interface NotifyOptions {
   dryRun?: boolean;
@@ -36,6 +37,7 @@ const CHANNEL = 'telegram';
  */
 export async function notify(options: NotifyOptions = {}): Promise<NotifySummary> {
   await expireListingDeadlines();
+  await suppressIgnoredWork();
   const config = loadConfig();
   const summary: NotifySummary = {
     queued: 0,
@@ -82,7 +84,7 @@ async function queueCandidates(
   const candidates: Array<{ job: MatchableJob; assessment: any }> = [];
   const closed = await closedJobIds();
   for (const job of await query<MatchableJob>(SELECT.from(Jobs))) {
-    if (closed.has(job.ID)) continue;
+    if (job.status === 'Ignored' || closed.has(job.ID)) continue;
     if (options.jobIds?.length && !options.jobIds.includes(job.ID)) continue;
     if (job.isDemo && !options.dryRun) continue;
     const assessment = await findCurrentAssessment(config, job);
@@ -160,12 +162,12 @@ async function flushQueue(
       const job = await queryOne<MatchableJob>(SELECT.from(db().Jobs).where({ ID: row.job_ID }));
       const assessment = job && await findCurrentAssessment(config, job);
       const closed = job && await isJobClosed(job.ID);
-      if (!job || closed || (job.isDemo && !options.dryRun) ||
+      if (!job || job.status === 'Ignored' || closed || (job.isDemo && !options.dryRun) ||
         !eligible(assessment, options.minFitScore ?? config.settings.telegram.min_fit_score)) {
         await cds.run(UPDATE(Notifications).set({
           status: 'Skipped',
           claimToken: null, claimUntil: null,
-          lastError: closed ? 'All source listings are confirmed closed' : job?.isDemo && !options.dryRun
+          lastError: job?.status === 'Ignored' ? 'Job is Ignored' : closed ? 'All source listings are confirmed closed' : job?.isDemo && !options.dryRun
             ? 'Demo data cannot be delivered live'
             : 'No eligible assessment for the current job and configuration',
         }).where(owned));
@@ -181,9 +183,10 @@ async function flushQueue(
       }).where(owned));
       if (!prepared) { skipped += 1; continue; }
       // Activity can change while a payload or a retry is being prepared.
-      if (await isJobClosed(job.ID)) {
+      const latest = await queryOne<MatchableJob>(SELECT.from(db().Jobs).where({ ID: job.ID }));
+      if (latest?.status === 'Ignored' || await isJobClosed(job.ID)) {
         await cds.run(UPDATE(Notifications).set({ status: 'Skipped', claimToken: null, claimUntil: null,
-          lastError: 'All source listings are confirmed closed' }).where(owned));
+          lastError: latest?.status === 'Ignored' ? 'Job is Ignored' : 'All source listings are confirmed closed' }).where(owned));
         skipped += 1;
         continue;
       }

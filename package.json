@@ -21,7 +21,6 @@
     "cycle:demo": "tsx src/cli.ts cycle --demo --dry-run",
     "typecheck": "tsc --noEmit && tsc -p frontend/tsconfig.json --noEmit",
     "test:watch": "vitest",
-    "test:collector": "./.venv/bin/python -m unittest discover -s python -p 'test_*.py'",
     "test": "vitest run"
   },
   "keywords": [],

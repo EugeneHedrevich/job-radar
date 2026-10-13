@@ -18,6 +18,8 @@ import requests
 from bs4 import BeautifulSoup
 from markdownify import markdownify
 from activity import http_closure, observe, page_closure
+from progress import SearchProgress
+from transport import request_kwargs
 
 SOURCES = {
     "redglobal": ("https://www.redglobal.com", "RED Global"),
@@ -122,7 +124,7 @@ def search_html(source: str, keyword: str, page: int) -> str:
         # Eursap's public browser search is POST, and GET ?keywords= is ignored.
         response = requests.post(root + "/jobs/search", data={"keywords": keyword, "languages": "",
                                  "type": "", "locations": "", "sort": ""},
-                                 headers={"X-Requested-With": "XMLHttpRequest"}, timeout=REQUEST_TIMEOUT_SECONDS)
+                                 headers={"X-Requested-With": "XMLHttpRequest"}, timeout=REQUEST_TIMEOUT_SECONDS, **request_kwargs())
         response.raise_for_status()
         payload = response.json()
         if not isinstance(payload, dict) or payload.get("error") or payload.get("error_res"):
@@ -137,14 +139,14 @@ def search_html(source: str, keyword: str, page: int) -> str:
     else:
         path = "/sap-jobs/" if page == 1 else f"/sap-jobs/page/{page}/"
         url = root + path + "?" + urlencode({"search": keyword})
-    response = requests.get(url, timeout=REQUEST_TIMEOUT_SECONDS)
+    response = requests.get(url, timeout=REQUEST_TIMEOUT_SECONDS, **request_kwargs())
     response.raise_for_status()
     return response.text
 
 
 @lru_cache(maxsize=128)
 def detail_html(url: str) -> str:
-    response = requests.get(url, timeout=REQUEST_TIMEOUT_SECONDS)
+    response = requests.get(url, timeout=REQUEST_TIMEOUT_SECONDS, **request_kwargs())
     response.raise_for_status()
     return response.text
 
@@ -307,6 +309,10 @@ def hydrate_detail(source: str, row: dict[str, Any], description_format: str) ->
 
 def scrape_agency(kwargs: dict[str, Any]) -> tuple[list[dict[str, Any]], BaseException | None]:
     source = kwargs["site_name"][0]
+    progress = SearchProgress(kwargs)
+    def stream(row):
+        if kwargs.get("on_record"):
+            kwargs["on_record"](row)
     wanted = max(1, int(kwargs.get("results_wanted", 25)))
     cutoff = (datetime.now(timezone.utc) - timedelta(hours=int(kwargs.get("hours_old", 96)))).date()
     rows: list[dict[str, Any]] = []
@@ -327,26 +333,33 @@ def scrape_agency(kwargs: dict[str, Any]) -> tuple[list[dict[str, Any]], BaseExc
             seen.add(url)
             if updated.get("activity_status") == "closed":
                 closures.append(updated)
+                stream(updated)
                 continue
             if not row.get("activity_refresh") and updated.get("date_posted") and date.fromisoformat(updated["date_posted"]) < cutoff:
                 continue
             enriched.append(updated)
+            stream(updated)
     if kwargs.get("enrich_only"):
         return enriched + closures, failure
-    for page in range(1, (1 if source == "eursap" else MAX_SEARCH_PAGES) + 1):
+    start = 1 if source == "eursap" else progress.start_page
+    for page in range(start, min(100, start + (1 if source == "eursap" else MAX_SEARCH_PAGES) - 1) + 1):
         try:
             candidates, more = parse_search(source, search_html(source, kwargs.get("search_term", "SAP"), page))
         except Exception as exc:
             failure = exc
             break
-        for row in candidates:
+        for row in progress.candidates(candidates, page):
             if row["job_url"] in seen:
                 continue
             seen.add(row["job_url"])
             if row.get("date_posted") and date.fromisoformat(row["date_posted"]) < cutoff:
                 continue
+            # Keep the search identity if its detail request later hangs.
+            stream(row)
             if fetch_description:
                 if detail_requests >= MAX_DETAIL_REQUESTS_PER_TASK:
+                    rows.append(row)
+                    stream(row)
                     return enriched + rows + closures, failure
                 detail_requests += 1
                 try:
@@ -354,15 +367,21 @@ def scrape_agency(kwargs: dict[str, Any]) -> tuple[list[dict[str, Any]], BaseExc
                 except Exception as exc:
                     # Retain the identity, report the failure and stop requests.
                     rows.append(row)
+                    stream(row)
                     return enriched + rows + closures, exc
+                stream(row)
                 if row.get("activity_status") == "closed":
                     closures.append(row)
+                    stream(row)
                     continue
                 if row.get("date_posted") and date.fromisoformat(row["date_posted"]) < cutoff:
                     continue
             rows.append(row)
+            stream(row)
             if len(rows) >= wanted:
                 break
+        if len(rows) < wanted:
+            progress.finish_page(page, more)
         if len(rows) >= wanted or not more or (fetch_description and detail_requests >= MAX_DETAIL_REQUESTS_PER_TASK):
             break
     return enriched + rows + closures, failure

@@ -41,6 +41,13 @@ export type ListingActivity = z.infer<typeof listingActivitySchema>;
 
 export const collectorLineSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('meta'), jobspy_version: z.string(), tasks: z.number() }),
+  z.object({ type: z.literal('task_started'), task_id: z.string() }),
+  z.object({ type: z.literal('request_stats'), task_id: z.string(),
+    search_requests: z.number().int().nonnegative(), detail_requests: z.number().int().nonnegative() }),
+  z.object({ type: z.literal('search_progress'), task_id: z.string(), cursor: z.object({
+    offset: z.number().int().nonnegative().optional(), page: z.number().int().min(1).optional(),
+    index: z.number().int().nonnegative().optional(),
+  }) }),
   z.object({ type: z.literal('listing_activity'), task_id: z.string(), activity: listingActivitySchema }),
   z.object({
     type: z.literal('job'),
@@ -52,11 +59,14 @@ export const collectorLineSchema = z.discriminatedUnion('type', [
     type: z.literal('task_result'),
     task_id: z.string(),
     source: z.string(),
-    status: z.enum(['succeeded', 'failed']),
+    status: z.enum(['succeeded', 'failed', 'skipped']),
     error_kind: z.enum(['rate_limit', 'blocked', 'timeout', 'network', 'error', 'parse']).optional(),
     message: z.string().optional(),
     count: z.number(),
     duration_ms: z.number(),
+    search_requests: z.number().int().nonnegative().nullable().optional(),
+    detail_requests: z.number().int().nonnegative().nullable().optional(),
+    retry_after_seconds: z.number().nonnegative().optional(),
   }),
   z.object({ type: z.literal('done'), tasks: z.number() }),
 ]);
@@ -75,6 +85,10 @@ export interface CollectorTask {
   distance: number;
   description_format: 'markdown' | 'html';
   fetch_description: boolean;
+  offset?: number;
+  search_cursor?: SearchCursor;
+  detail_request_limit?: number;
+  search_request_limit?: number;
   /** Stored listings for enrichment or activity refresh within the same budget. */
   detail_jobs?: Array<CollectorJob & { activity_refresh?: boolean }>;
   enrich_only?: boolean;
@@ -93,7 +107,13 @@ export interface TaskOutcome {
   durationMs: number;
   errorKind?: ErrorKind;
   message?: string;
+  searchRequests?: number;
+  detailRequests?: number;
+  retryAfterSeconds?: number;
+  nextCursor?: SearchCursor;
 }
+
+export interface SearchCursor { offset?: number; page?: number; index?: number }
 
 export interface CollectorOutput {
   jobspyVersion: string | undefined;

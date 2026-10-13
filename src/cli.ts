@@ -113,8 +113,9 @@ async function runCollect(flags: Args['flags']) {
     out('  tasks:');
     for (const outcome of summary.outcomes) {
       const detail = outcome.status === 'Succeeded' ? `${outcome.resultCount} listings`
-        : `${outcome.resultCount} listings; ${outcome.errorKind}: ${outcome.message ?? ''}`;
-      out(`    [${outcome.status}] ${outcome.source} "${outcome.searchTerm}" @ ${outcome.location ?? outcome.countryIndeed ?? '-'} - ${detail}`);
+        : `${outcome.resultCount} listings; ${outcome.errorKind ? outcome.errorKind + ': ' : ''}${outcome.message ?? ''}`;
+      const requests = outcome.searchRequests !== undefined ? `; HTTP requests: search=${outcome.searchRequests}, detail=${outcome.detailRequests ?? 0}` : '';
+      out(`    [${outcome.status}] ${outcome.source} "${outcome.searchTerm}" @ ${outcome.location ?? outcome.countryIndeed ?? '-'} - ${detail}${requests}`);
     }
   }
   for (const skipped of summary.skipped) out(`  skipped source ${skipped.source}: ${skipped.reason}`);
@@ -229,7 +230,7 @@ async function runStatus() {
   if (!health.length) out('    (no runs recorded yet)');
   for (const row of health) {
     const cooldown = row.cooldownUntil && new Date(row.cooldownUntil) > new Date() ? ` cooldown until ${row.cooldownUntil}` : '';
-    out(`    ${row.source.padEnd(12)} ${row.lastStatus ?? 'unknown'} failures=${row.consecutiveFailures}${cooldown}`);
+    out(`    ${row.source.padEnd(12)} ${row.lastStatus ?? 'unknown'} failures=${row.consecutiveFailures} rate-limit streak=${row.rateLimitStreak ?? 0}${cooldown}`);
     if (row.lastMessage) out(`      last: ${row.lastMessage.slice(0, 160)}`);
   }
   await printDirectionCounters();

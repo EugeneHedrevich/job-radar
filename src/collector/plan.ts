@@ -14,6 +14,7 @@ export interface PlannedBatch {
 export interface DescriptionRotation {
   lastSource: string | null;
   lastTaskBySource: Record<string, string>;
+  lastSearchByScope?: Record<string, string>;
 }
 
 /**
@@ -75,7 +76,6 @@ export function planBatch(config: AppConfig, options: PlanOptions = {}): Planned
     }
   }
   const tasksBySource = new Map<string, CollectorTask[]>();
-  let planned = 0;
 
   for (const [source, geoIds] of Object.entries(batch.targets)) {
     const sourceConfig = searches.sources[source];
@@ -96,7 +96,6 @@ export function planBatch(config: AppConfig, options: PlanOptions = {}): Planned
       const geo = sourceConfig.geos[geoId];
       if (!geo) continue;
       for (const keyword of batch.keywords) {
-        if (planned >= Math.min(18, searches.resilience.max_tasks_per_run)) break;
         tasks.push({
           task_id: `${batch.key}:${source}:${geoId}:${slug(keyword)}`,
           source,
@@ -108,6 +107,7 @@ export function planBatch(config: AppConfig, options: PlanOptions = {}): Planned
           distance: searches.defaults.distance,
           description_format: searches.defaults.description_format,
           fetch_description: false,
+          ...(source === 'linkedin' ? { search_request_limit: searches.linkedin_limits.max_search_requests_per_task } : {}),
           ...(options.enrichOnly ? { enrich_only: true } : {}),
           // Remote/contract are deliberately NOT pre-filtered: most postings
           // omit those fields and would be lost. Filtering happens after
@@ -115,13 +115,21 @@ export function planBatch(config: AppConfig, options: PlanOptions = {}): Planned
           is_remote: searches.defaults.is_remote,
           ...(searches.defaults.job_type ? { job_type: searches.defaults.job_type } : {}),
         });
-        planned += 1;
       }
     }
     if (tasks.length) tasksBySource.set(source, tasks);
   }
 
+  const searchCursors = { ...options.descriptionRotation?.lastSearchByScope };
+  if (!options.enrichOnly) applySearchBudget(config, batch.key, tasksBySource, searchCursors, skipped);
   const descriptionRotation = applyDescriptionBudget(config, tasksBySource, options.descriptionRotation);
+  descriptionRotation.lastSearchByScope = searchCursors;
+  const details = (tasksBySource.get('linkedin') ?? []).filter((task) => task.fetch_description);
+  let remainingDetails = searches.linkedin_limits.max_detail_requests_per_run;
+  details.forEach((task, index) => {
+    task.detail_request_limit = Math.ceil(remainingDetails / (details.length - index));
+    remainingDetails -= task.detail_request_limit;
+  });
   if (options.enrichOnly) {
     for (const [source, tasks] of tasksBySource) {
       const selected = tasks.filter((task) => task.fetch_description);
@@ -130,6 +138,38 @@ export function planBatch(config: AppConfig, options: PlanOptions = {}): Planned
     }
   }
   return { batchKey: batch.key, keywords: batch.keywords, tasksBySource, skipped, descriptionRotation };
+}
+
+/** Rotate capped combinations, including a batch's tail, across persisted runs. */
+function applySearchBudget(config: AppConfig, batchKey: string, tasksBySource: Map<string, CollectorTask[]>,
+  cursors: Record<string, string>, skipped: PlannedBatch['skipped']): void {
+  const rotate = (tasks: CollectorTask[], key: string) => {
+    const start = tasks.findIndex((task) => task.task_id === cursors[key]);
+    return [...tasks.slice(start + 1), ...tasks.slice(0, start + 1)];
+  };
+  const linkedin = tasksBySource.get('linkedin');
+  if (linkedin) {
+    const key = `${batchKey}:linkedin`;
+    const limit = config.searches.linkedin_limits.max_search_tasks_per_run;
+    const selected = rotate(linkedin, key).slice(0, limit);
+    if (selected.length) tasksBySource.set('linkedin', selected);
+    else tasksBySource.delete('linkedin');
+    if (selected.length < linkedin.length) skipped.push({ source: 'linkedin',
+      reason: `${linkedin.length - selected.length} search combinations postponed by LinkedIn task limit` });
+  }
+  const all = [...tasksBySource.values()].flat();
+  const key = `${batchKey}:__all__`;
+  const selected = rotate(all, key).slice(0, Math.min(18, config.searches.resilience.max_tasks_per_run));
+  const ids = new Set(selected.map((task) => task.task_id));
+  for (const [source, tasks] of tasksBySource) {
+    const ready = tasks.filter((task) => ids.has(task.task_id));
+    if (ready.length) tasksBySource.set(source, ready);
+    else tasksBySource.delete(source);
+    if (ready.length < tasks.length) skipped.push({ source, reason: `${tasks.length - ready.length} search combinations postponed by global task limit` });
+  }
+  if (selected.length) cursors[key] = selected.at(-1)!.task_id;
+  const selectedLinkedin = selected.filter((task) => task.source === 'linkedin');
+  if (selectedLinkedin.length) cursors[`${batchKey}:linkedin`] = selectedLinkedin.at(-1)!.task_id;
 }
 
 /**
@@ -154,6 +194,7 @@ function applyDescriptionBudget(
     const tasks = tasksBySource.get(source);
     if (!sourceConfig || !tasks) continue;
     if (!sourceConfig.supports_description_fetch) continue;
+    if (source === 'linkedin' && config.searches.linkedin_limits.max_detail_requests_per_run === 0) continue;
     if (sourceConfig.search_results_include_description && !sourceConfig.supports_backlog_enrichment) continue;
     eligible.set(source, tasks);
   }

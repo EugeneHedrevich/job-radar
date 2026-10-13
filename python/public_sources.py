@@ -15,6 +15,8 @@ from urllib.parse import urlencode, urljoin, urlparse, urlunparse, parse_qsl
 import requests
 from markdownify import markdownify
 from activity import expired, http_closure, observe, page_closure
+from progress import SearchProgress
+from transport import request_kwargs
 
 from sap_sources import (MAX_DETAIL_REQUESTS_PER_TASK, MAX_SEARCH_PAGES, REQUEST_TIMEOUT_SECONDS,
                          applicant_location, job_posting, job_type, location, page_soup, published_date, text)
@@ -54,7 +56,7 @@ def safe_public_url(source: str, href: str, base: str | None = None) -> str:
 
 @lru_cache(maxsize=64)
 def fetch(url: str) -> str:
-    response = requests.get(url, timeout=REQUEST_TIMEOUT_SECONDS)
+    response = requests.get(url, timeout=REQUEST_TIMEOUT_SECONDS, **request_kwargs())
     response.raise_for_status()
     return response.text
 
@@ -276,6 +278,7 @@ def parse_api(source: str, payload: Any, keyword: str, description_format: str) 
 def scrape_public(kwargs: dict[str, Any]) -> tuple[list[dict[str, Any]], BaseException | None]:
     import json
     source = kwargs["site_name"][0]
+    progress = SearchProgress(kwargs)
     wanted = max(1, int(kwargs.get("results_wanted", 25)))
     cutoff = (datetime.now(timezone.utc) - timedelta(hours=int(kwargs.get("hours_old", 96)))).date().isoformat()
     fmt = kwargs.get("description_format", "markdown")
@@ -284,9 +287,13 @@ def scrape_public(kwargs: dict[str, Any]) -> tuple[list[dict[str, Any]], BaseExc
     detail_requests = 0
     failure: BaseException | None = None
     closures: list[dict[str, Any]] = []
+    def stream(row):
+        if kwargs.get("on_record"):
+            kwargs["on_record"](row)
     def keep(row: dict[str, Any]) -> bool:
         if row.get("activity_status") == "closed":
             closures.append(row)
+            stream(row)
             return False
         return row.get("activity_refresh") or not (row.get("date_posted") and row["date_posted"] < cutoff)
     def detail(row: dict[str, Any]) -> dict[str, Any]:
@@ -306,6 +313,7 @@ def scrape_public(kwargs: dict[str, Any]) -> tuple[list[dict[str, Any]], BaseExc
             seen.add(updated["job_url"])
             if keep(updated):
                 rows.append(updated)
+                stream(updated)
         except ValueError as exc:
             failure = failure or exc
         except Exception as exc:
@@ -314,7 +322,7 @@ def scrape_public(kwargs: dict[str, Any]) -> tuple[list[dict[str, Any]], BaseExc
         return rows + closures, failure
     keyword = kwargs.get("search_term", "SAP")
     root = market_root(kwargs.get("location")) if source == "michaelpage" else PUBLIC_SOURCES[source][0]
-    for page in range(1, MAX_SEARCH_PAGES + 1):
+    for page in range(progress.start_page, min(100, progress.start_page + MAX_SEARCH_PAGES - 1) + 1):
         try:
             if source in API_SOURCES:
                 candidates, more = parse_api(source, json.loads(fetch(api_url(source, keyword, page))), keyword, fmt)
@@ -322,10 +330,12 @@ def scrape_public(kwargs: dict[str, Any]) -> tuple[list[dict[str, Any]], BaseExc
                 candidates, more = parse_search(source, fetch(search_url(source, keyword, kwargs.get("location"), page)), root)
         except Exception as exc:
             return rows + closures, exc
-        for row in candidates:
+        for row in progress.candidates(candidates, page):
             if row["job_url"] in seen:
                 continue
             seen.add(row["job_url"])
+            if row.get("activity_status") != "closed" and not (row.get("date_posted") and row["date_posted"] < cutoff):
+                stream(row)
             if kwargs.get("fetch_description") and source not in API_SOURCES and detail_requests < MAX_DETAIL_REQUESTS_PER_TASK:
                 try:
                     row = detail(row)
@@ -333,11 +343,15 @@ def scrape_public(kwargs: dict[str, Any]) -> tuple[list[dict[str, Any]], BaseExc
                     failure = failure or exc
                 except Exception as exc:
                     rows.append(row)
+                    stream(row)
                     return rows + closures, exc
+                stream(row)
             if keep(row):
                 rows.append(row)
+                stream(row)
             if len(rows) >= wanted:
                 return rows + closures, failure
+        progress.finish_page(page, more)
         if not more:
             break
     return rows + closures, failure

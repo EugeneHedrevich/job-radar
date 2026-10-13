@@ -17,6 +17,12 @@ defaults:
   job_type: null # do NOT pre-filter on contract: most postings omit this field
   is_remote: false # do NOT pre-filter on remote: most postings omit this field
 
+# Task counts are not HTTP request counts: each search can paginate.
+linkedin_limits:
+  max_search_tasks_per_run: 2
+  max_detail_requests_per_run: 5 # includes redirects, across both description slots
+  max_search_requests_per_task: 3
+
 # Reference catalogue; actual execution is defined by rotation.batches below.
 keywords:
   - "SAP BTP Developer"
@@ -239,8 +245,8 @@ sources:
 # Priority batches interleave four directions across the original six sources.
 # Public catalogue scans cover six more providers, including seven Michael Page markets.
 # Each uses at most 3 queries x 6 geographies = 18 tasks, without tail truncation.
-# Broad priority and catalogue scans recur every 33h; the 33-slot sequence
-# takes 99h at the current schedule, inside the 120h board freshness window.
+# Broad priority and catalogue scans recur every 36h; the 36-slot sequence
+# takes 108h at the current schedule, inside the 120h board freshness window.
 rotation:
   interval_hours: 3
   sequence:
@@ -249,6 +255,7 @@ rotation:
     - joule-broad
     - btp-ai-broad
     - sap-public
+    - cap-markets
     - cap-roles
     - ui5-fiori
     - joule-roles
@@ -260,6 +267,7 @@ rotation:
     - joule-broad
     - btp-ai-broad
     - sap-public
+    - joule-markets
     - ui5-roles
     - joule-contracts
     - btp-ai-roles
@@ -271,6 +279,7 @@ rotation:
     - joule-broad
     - btp-ai-broad
     - sap-public
+    - btp-markets
     - btp-core
     - integration
     - frontend
@@ -333,6 +342,22 @@ rotation:
     - key: "btp-ai-contracts"
       keywords: ["SAP Business AI freelance", "SAP BTP AI contract", "SAP AI Core B2B"]
       targets: *priority_targets
+
+    # Separate market batches cover the tail within 18 tasks per cycle.
+    # Keep the original Dutch searches and public global agency catalogues.
+    - key: "cap-markets"
+      keywords: ["SAP CAP", "SAP CAPM", "SAP Cloud Application Programming Model"]
+      targets:
+        indeed: [de, ch, uk, pl, at, ie]
+    - key: "joule-markets"
+      keywords: ["SAP Joule", "Joule Studio", "SAP Joule Developer"]
+      targets:
+        indeed: [de, ch, uk]
+        glassdoor: [de, ch, uk]
+    - key: "btp-markets"
+      keywords: ["SAP BTP", "SAP Business AI", "SAP AI Core"]
+      targets:
+        indeed: [de, ch, uk, pl, at, ie]
 
     - key: "btp-core"
       keywords: ["SAP BTP Developer", "SAP CAP Developer", "SAP CAPM Developer"]
@@ -424,5 +449,8 @@ resilience:
     timeout: 30
     network: 15
     error: 30
+  # Repeated rate-limit cycles double the base delay to this cap;
+  # a longer server Retry-After still takes precedence. Recovery resets it.
+  max_rate_limit_cooldown_minutes: 2880
   # Overall wall clock budget for the collector subprocess.
   process_timeout_seconds: 1800

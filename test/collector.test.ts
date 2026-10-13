@@ -7,7 +7,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import { activeCooldowns, recordOutcomes } from "../src/collector/health.js";
 import { recoverInterruptedRuns, startRunHeartbeat } from "../src/collector/lifecycle.js";
 import { planBatch, selectBatchIndex, type DescriptionRotation } from "../src/collector/plan.js";
-import { reserveBatchPlan } from "../src/collector/rotation.js";
+import { recordSearchProgress, reserveBatchPlan } from "../src/collector/rotation.js";
 import { runCollector } from "../src/collector/run.js";
 import { type CollectorTask } from "../src/collector/types.js";
 import { loadConfig, PROJECT_ROOT, resetConfigCache } from "../src/config/index.js";
@@ -46,6 +46,17 @@ afterEach(() => {
     resetConfigCache();
 });
 describe('malformed collector output', () => {
+    it('kills an expired worker before returning, retaining records, request counts and progress', async () => {
+        const output = await runCollector(configWith('fake-collector.mjs'), {
+            tasks: [{ ...task('hang'), search_term: 'hang' }, task('postponed')],
+            taskTimeoutSeconds: 1, delayBetweenTasksSeconds: 0, processTimeoutSeconds: 5,
+        });
+        expect(output.jobs).toHaveLength(1);
+        expect(output.outcomes[0]).toMatchObject({ taskId: 'hang', errorKind: 'timeout', resultCount: 1,
+            searchRequests: 2, detailRequests: 1, nextCursor: { offset: 10 } });
+        expect(output.outcomes[1]).toMatchObject({ taskId: 'postponed', status: 'Skipped' });
+        expect(() => process.kill(Number(output.jobs[0]!.job.id), 0)).toThrow();
+    });
     it('keeps the valid records and counts the bad lines instead of throwing', async () => {
         const config = configWith('fake-collector.mjs');
         const output = await runCollector(config, {
@@ -91,6 +102,23 @@ describe('source failure isolation', () => {
         await useTempDb();
     });
     afterAll(closeTempDb);
+    it('grows rate-limit cooldowns once per cycle, honours Retry-After and resets after recovery', async () => {
+        const config = loadConfig();
+        const now = new Date('2026-10-06T12:00:00Z');
+        const outcome = { taskId: 'limited', source: 'rate-test', searchTerm: 'SAP', location: undefined,
+            countryIndeed: undefined, status: 'Failed' as const, resultCount: 1, durationMs: 1,
+            errorKind: 'rate_limit' as const };
+        await recordOutcomes(config, [outcome, { ...outcome, taskId: 'paused', status: 'Skipped' }], now);
+        expect(await query(SELECT.from(db().SourceHealth).where({ source: outcome.source })))
+            .toEqual([expect.objectContaining({ rateLimitStreak: 1, cooldownUntil: '2026-10-06T14:00:00.000Z' })]);
+        await recordOutcomes(config, [{ ...outcome, retryAfterSeconds: 36000 }], now);
+        expect(await query(SELECT.from(db().SourceHealth).where({ source: outcome.source })))
+            .toEqual([expect.objectContaining({ rateLimitStreak: 2, cooldownUntil: '2026-10-06T22:00:00.000Z' })]);
+        await recordOutcomes(config, [{ ...outcome, status: 'Succeeded', errorKind: undefined }], now);
+        await recordOutcomes(config, [outcome], now);
+        expect(await query(SELECT.from(db().SourceHealth).where({ source: outcome.source })))
+            .toEqual([expect.objectContaining({ rateLimitStreak: 1, cooldownUntil: '2026-10-06T14:00:00.000Z' })]);
+    });
     it('puts a blocked source on cooldown and leaves the others usable', async () => {
         const config = loadConfig();
         const now = new Date('2026-10-06T12:00:00Z');
@@ -174,7 +202,7 @@ describe("priority-coverage", () => {
             salaryInterval: null, salaryCurrency: null, primaryUrl: 'https://example.com/job', datePosted: null };
     }
     describe('priority search coverage within operational limits', () => {
-        it('executes every configured task, including each batch tail, in one bounded rotation', () => {
+        it('keeps complete non-LinkedIn batches and caps LinkedIn search tasks separately', () => {
             const config = loadConfig();
             const seen = new Set<string>();
             const count = config.searches.rotation.sequence?.length ?? config.searches.rotation.batches.length;
@@ -186,10 +214,12 @@ describe("priority-coverage", () => {
                 const plan = planBatch(config, { at });
                 const expected = Object.entries(batch.targets).flatMap(([source, geos]) => geos.flatMap((geo) => batch.keywords.map((keyword) => `${source}:${geo}:${keyword}`)));
                 const tasks = [...plan.tasksBySource.values()].flat();
-                expect(tasks).toHaveLength(expected.length);
+                const linkedinCount = (batch.targets.linkedin?.length ?? 0) * batch.keywords.length;
+                expect(tasks).toHaveLength(expected.length - linkedinCount + Math.min(2, linkedinCount));
                 expect(tasks.length).toBeLessThanOrEqual(18);
                 expect(tasks.filter((task) => task.fetch_description).length).toBeLessThanOrEqual(2);
                 for (const [source, geos] of Object.entries(batch.targets)) {
+                    if (source === 'linkedin') continue;
                     expect(plan.tasksBySource.get(source)).toHaveLength(geos.length * batch.keywords.length);
                     for (const keyword of batch.keywords)
                         expect(plan.tasksBySource.get(source)!.some((task) => task.search_term === keyword)).toBe(true);
@@ -198,14 +228,14 @@ describe("priority-coverage", () => {
             }
             expect(seen.size).toBe(config.searches.rotation.batches.length);
         });
-        it('revisits every broad priority group and public catalogue within 33 hours', () => {
+        it('revisits every broad priority group and public catalogue within 36 hours', () => {
             const config = loadConfig();
             const sequence = config.searches.rotation.sequence!;
             for (const key of ['cap-broad', 'ui5-broad', 'joule-broad', 'btp-ai-broad', 'sap-public']) {
                 const positions = sequence.flatMap((item, index) => item === key ? [index] : []);
                 expect(positions).toHaveLength(3);
                 const wrapped = [...positions, positions[0]! + sequence.length];
-                expect(Math.max(...positions.map((position, i) => (wrapped[i + 1]! - position) * config.searches.rotation.interval_hours))).toBe(33);
+                expect(Math.max(...positions.map((position, i) => (wrapped[i + 1]! - position) * config.searches.rotation.interval_hours))).toBe(36);
             }
         });
         it('covers broad technologies, roles and engagement variants on all six sources', () => {
@@ -214,7 +244,14 @@ describe("priority-coverage", () => {
             const required = ['SAP CAP', 'SAP CAPM', 'SAP Cloud Application Programming Model', 'SAPUI5', 'SAP UI5', 'SAP Fiori', 'Fiori Elements',
                 'SAP Joule', 'Joule Studio', 'SAP Joule Developer', 'SAP Business AI', 'SAP AI Core', 'SAP Generative AI Hub', 'SAP BTP AI'];
             for (const source of allSources) {
-                const terms = config.searches.rotation.batches.flatMap((batch) => planBatch(config, { batchKey: batch.key, onlySources: [source] }).tasksBySource.get(source)?.map((task) => task.search_term) ?? []);
+                const terms = config.searches.rotation.batches.flatMap((batch) => {
+                    let state: DescriptionRotation | undefined;
+                    return Array.from({ length: 9 }, () => {
+                        const plan = planBatch(config, { batchKey: batch.key, onlySources: [source], descriptionRotation: state });
+                        state = plan.descriptionRotation;
+                        return plan.tasksBySource.get(source)?.map((task) => task.search_term) ?? [];
+                    }).flat();
+                });
                 expect(terms).toEqual(expect.arrayContaining(required));
                 for (const prefix of ['cap-', 'ui5-', 'joule-', 'btp-ai-']) {
                     const queries = config.searches.rotation.batches.filter((batch) => batch.key.startsWith(prefix)).flatMap((batch) => batch.keywords);
@@ -245,14 +282,21 @@ describe("priority-coverage", () => {
         it('covers all three EMEA regions and uses supported UAE endpoints', () => {
             const config = loadConfig();
             const frontend = planBatch(config, { batchKey: 'emea-frontend' });
-            expect([...frontend.tasksBySource.values()].flat()).toHaveLength(18);
-            expect(frontend.tasksBySource.get('linkedin')!.map((task) => task.location))
+            expect([...frontend.tasksBySource.values()].flat()).toHaveLength(2);
+            let state = frontend.descriptionRotation;
+            const locations = frontend.tasksBySource.get('linkedin')!.map((task) => task.location);
+            for (let cycle = 0; cycle < 8; cycle++) {
+                const next = planBatch(config, { batchKey: 'emea-frontend', descriptionRotation: state });
+                state = next.descriptionRotation;
+                locations.push(...next.tasksBySource.get('linkedin')!.map((task) => task.location));
+            }
+            expect(locations)
                 .toEqual(expect.arrayContaining(['EMEA', 'Europe', 'Middle East', 'Africa', 'United Arab Emirates', 'Dubai, United Arab Emirates']));
             const core = planBatch(config, { batchKey: 'emea-core' });
             expect(core.tasksBySource.get('indeed')!.map((task) => task.country_indeed))
                 .toEqual(expect.arrayContaining(['United Arab Emirates', 'South Africa', 'Egypt']));
             const uae = planBatch(config, { batchKey: 'uae-frontend' });
-            expect([...uae.tasksBySource.values()].flat()).toHaveLength(12);
+            expect([...uae.tasksBySource.values()].flat()).toHaveLength(8);
             expect(uae.tasksBySource.get('indeed')!.every((task) => task.country_indeed === 'United Arab Emirates')).toBe(true);
             expect(planBatch(config, { batchKey: 'sap-public' }).tasksBySource.get('michaelpage')!
                 .some((task) => task.location === 'United Arab Emirates' && task.search_term === 'SAP')).toBe(true);
@@ -295,11 +339,29 @@ describe("description-rotation", () => {
     let dbPath: string;
     beforeAll(async () => { dbPath = await useTempDb(); });
     beforeEach(async () => {
-        for (const entity of [db().DescriptionRotation, db().SourceListings, db().Jobs])
+        for (const entity of [db().DescriptionRotation, db().SearchProgress, db().SourceListings, db().Jobs])
             await cds.run(DELETE.from(entity));
     });
     afterAll(closeTempDb);
     describe('bounded persistent description rotation', () => {
+        it('persists fair search combinations and bounded search progress across restart', async () => {
+            const config = loadConfig(), at = new Date();
+            const first = await reserveBatchPlan(config, { batchKey: 'cap-broad', onlySources: ['linkedin'], at });
+            const tasks = first.tasksBySource.get('linkedin')!;
+            expect(tasks).toHaveLength(2);
+            expect(tasks.reduce((sum, task) => sum + (task.detail_request_limit ?? 0), 0)).toBe(5);
+            await recordSearchProgress([{ taskId: tasks[0]!.task_id, source: 'linkedin', searchTerm: 'SAP',
+                location: undefined, countryIndeed: undefined, status: 'Succeeded', resultCount: 25,
+                durationMs: 1, nextCursor: { offset: 20 } }], at);
+            await disconnectDb();
+            await connectDb(dbPath);
+            const resumed = await reserveBatchPlan(config, { batchKey: 'cap-broad', onlySources: ['linkedin'], at });
+            expect(resumed.tasksBySource.get('linkedin')!.some((task) => !tasks.some((old) => old.task_id === task.task_id))).toBe(true);
+            expect(resumed.tasksBySource.get('linkedin')!.find((task) => task.task_id === tasks[0]!.task_id)?.offset).toBe(20);
+            const expired = await reserveBatchPlan(config, { batchKey: 'cap-broad', onlySources: ['linkedin'],
+                at: new Date(at.getTime() + 121 * 3600000) });
+            expect(expired.tasksBySource.get('linkedin')!.every((task) => task.offset === undefined)).toBe(true);
+        });
         it('reserves stored descriptions without searches and keeps the two-task budget', async () => {
             const at = new Date();
             await ingestJobs([normalizeJob({ id: '7097972', title: 'SAP BTP Developer',

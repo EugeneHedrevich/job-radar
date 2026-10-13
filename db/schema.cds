@@ -90,6 +90,8 @@ entity CollectionTasks : cuid {
   status        : String(20);                // Succeeded | Failed | Skipped
   resultCount   : Integer default 0;
   durationMs    : Integer;
+  searchRequests : Integer; // observed HTTP requests; null for uninstrumented sources
+  detailRequests : Integer;
   message       : String(2000);
 }
 
@@ -105,6 +107,7 @@ entity CollectionErrors : cuid {
 entity SourceHealth {
   key source          : String(50);
   consecutiveFailures : Integer default 0;
+  rateLimitStreak     : Integer default 0;
   cooldownUntil       : Timestamp;
   blocked             : Boolean default false;
   lastStatus          : String(50);
@@ -117,6 +120,14 @@ entity DescriptionRotation {
   key batchKey : String(200);
   state        : LargeString;
   updatedAt    : Timestamp;
+}
+
+/** Bounded search sweep cursors; never replace listing or tracking history. */
+entity SearchProgress {
+  key taskKey : String(200);
+  state : LargeString;
+  sweepStartedAt : Timestamp;
+  updatedAt : Timestamp;
 }
 
 /** Durable AI work, keyed by the same inputs as the paid attempt cache. */

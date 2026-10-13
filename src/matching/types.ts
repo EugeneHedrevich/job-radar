@@ -30,6 +30,7 @@ export interface AssessmentResult {
 export interface MatchableJob {
   ID: string;
   isDemo?: boolean;
+  status?: string;
   title: string;
   company: string | null;
   location: string | null;

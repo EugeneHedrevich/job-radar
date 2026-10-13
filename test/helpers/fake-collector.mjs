@@ -26,7 +26,7 @@ process.stdin.on('end', () => {
     task_id: task.task_id,
     source: task.source,
     job: {
-      id: 'ok-1',
+      id: task.search_term === 'hang' ? String(process.pid) : 'ok-1',
       site: task.source,
       title: 'SAP BTP Developer',
       company: 'Fixture Corp',
@@ -35,6 +35,14 @@ process.stdin.on('end', () => {
       date_posted: null,
     },
   });
+
+  if (task.search_term === 'hang') {
+    emit({ type: 'task_started', task_id: task.task_id });
+    emit({ type: 'request_stats', task_id: task.task_id, search_requests: 2, detail_requests: 1 });
+    emit({ type: 'search_progress', task_id: task.task_id, cursor: { offset: 10 } });
+    setInterval(() => {}, 1000);
+    return;
+  }
 
   process.stdout.write('this line is not JSON at all\n');
   emit({ type: 'job', task_id: task.task_id });          // missing required fields

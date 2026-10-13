@@ -13,6 +13,19 @@ beforeAll(useTempDb);
 beforeEach(async () => { vi.unstubAllGlobals(); resetConfigCache(); await resetTestDb(); });
 afterAll(async () => { vi.unstubAllGlobals(); resetConfigCache(); await closeTempDb(); });
 describe("current notification eligibility", () => {
+    it('skips queued Ignored delivery, excludes new candidates and retains sent history', async () => {
+        const result = await ingest();
+        await rank({ rulesOnly: true });
+        await notify({ dryRun: true, client: sender() });
+        await cds.run(UPDATE(db().Jobs).set({ status: 'Ignored' }).where({ ID: result.jobIds[0] }));
+        const client = sender();
+        expect(await notify({ client })).toMatchObject({ queued: 0, sent: 0 });
+        expect(client.send).not.toHaveBeenCalled();
+        expect(await queryOne(SELECT.from(db().Notifications))).toMatchObject({ status: 'Skipped' });
+        await cds.run(UPDATE(db().Notifications).set({ status: 'Sent', telegramMessageId: 123 }));
+        await notify({ client });
+        expect(await queryOne(SELECT.from(db().Notifications))).toMatchObject({ status: 'Sent', telegramMessageId: 123 });
+    });
     it('does not notify a weekly onsite schedule above the configured travel limit', async () => {
         await ingest({ description: `${strong.description}\nThree onsite days every week are required.` });
         const [result] = await rank({ rulesOnly: true });

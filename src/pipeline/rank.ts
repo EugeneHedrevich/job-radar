@@ -8,6 +8,7 @@ import { normalizeText, sha256 } from '../util/text.js';
 import { log } from '../util/log.js';
 import { closedJobIds, expireListingDeadlines, isJobClosed } from '../persist/activity.js';
 import { aiPriority, completeAiAttempt, synchronizeAiQueue } from './ai-queue.js';
+import { suppressIgnoredWork } from './ignored.js';
 
 export interface RankedJob {
   job: MatchableJob;
@@ -64,9 +65,7 @@ export function assessmentCacheKey(
 
 /** The latest assessment still valid for this job and effective configuration. */
 export function currentAssessmentKeys(config: AppConfig, job: MatchableJob): string[] {
-  const keys = [assessmentCacheKey(config, job, 'rules')];
-  if (config.llmAvailable) keys.push(assessmentCacheKey(config, job, 'llm'));
-  return keys;
+  return [assessmentCacheKey(config, job, 'llm'), assessmentCacheKey(config, job, 'rules')];
 }
 
 /** Also accepts a stored snapshot for bulk, read-only dashboard queries. */
@@ -75,13 +74,18 @@ export async function findCurrentAssessment(
 ): Promise<any | undefined> {
   const keys = currentAssessmentKeys(config, job);
   if (stored) return stored.filter((row) => row.job_ID === job.ID && keys.includes(row.cacheKey))
-    .sort((a, b) => (b.createdAt ?? '').localeCompare(a.createdAt ?? '') || a.ID.localeCompare(b.ID))[0];
-  return queryOne(SELECT.from(db().Assessments)
-    .where({ job_ID: job.ID, cacheKey: { in: keys } }).orderBy('createdAt desc'));
+    .sort((a, b) => keys.indexOf(a.cacheKey) - keys.indexOf(b.cacheKey) ||
+      (b.createdAt ?? '').localeCompare(a.createdAt ?? '') || a.ID.localeCompare(b.ID))[0];
+  for (const cacheKey of keys) {
+    const row = await queryOne(SELECT.from(db().Assessments).where({ job_ID: job.ID, cacheKey }));
+    if (row) return row;
+  }
+  return undefined;
 }
 
 export async function rank(options: RankOptions = {}): Promise<RankedJob[]> {
   await expireListingDeadlines();
+  await suppressIgnoredWork();
   if (options.jobIds && options.jobIds.length === 0 && !options.includePendingAi) return [];
   const config = loadConfig();
   const { Jobs, Assessments } = db();
@@ -96,7 +100,7 @@ export async function rank(options: RankOptions = {}): Promise<RankedJob[]> {
     if (!screen.passed) assessment = { ...assessment,
       fitScore: Math.min(assessment.fitScore, config.scoring.hard_rejects.score_cap),
       recommendation: 'Skip', explanation: `Pre-screen: ${screen.reason}.` };
-    const eligible = !job.isDemo && screen.passed && Boolean(job.description?.trim()) &&
+    const eligible = job.status !== 'Ignored' && !job.isDemo && screen.passed && Boolean(job.description?.trim()) &&
       assessment.fitScore >= config.scoring.thresholds.llm_screen_gate && !assessment.hardReject;
     return { job, assessment, eligible, llmKey: assessmentCacheKey(config, job, 'llm') };
   });
@@ -125,7 +129,7 @@ export async function rank(options: RankOptions = {}): Promise<RankedJob[]> {
 
     // Cached evaluations cost no requests, including after the request budget
     // has been spent. The budget governs calls rather than cache reads.
-    if (eligibleForLlm && !options.force) {
+    if (preparedJob.eligible && !options.rulesOnly && !options.force) {
       const cached = await queryOne<any>(SELECT.from(Assessments)
         .where({ cacheKey: assessmentCacheKey(config, job, 'llm') }));
       if (cached) {
@@ -146,6 +150,12 @@ export async function rank(options: RankOptions = {}): Promise<RankedJob[]> {
     }
 
     if (shouldUseLlm) {
+      // Tracking may have changed while cache lookups were in flight.
+      const beforeRequest = await queryOne<MatchableJob>(SELECT.from(Jobs).where({ ID: job.ID }));
+      if (!beforeRequest || beforeRequest.status === 'Ignored' || await isJobClosed(job.ID)) {
+        await suppressIgnoredWork(cds, job.ID);
+        continue;
+      }
       llmBudget -= 1;
       try {
         assessment = await assessWithLlm(config, job);

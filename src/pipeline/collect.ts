@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { loadConfig } from '../config/index.js';
 import { activeCooldowns, recordOutcomes } from '../collector/health.js';
 import { planBatch, type PlanOptions } from '../collector/plan.js';
-import { reserveBatchPlan } from '../collector/rotation.js';
+import { recordSearchProgress, reserveBatchPlan } from '../collector/rotation.js';
 import { runCollector } from '../collector/run.js';
 import type { CollectorJob, CollectorTask, ListingActivity, TaskOutcome } from '../collector/types.js';
 import { cds, db, INSERT, UPDATE } from '../db/index.js';
@@ -64,6 +64,10 @@ export async function collect(options: CollectOptions = {}): Promise<CollectSumm
     // Keyed by task id so a successful retry replaces the earlier failure.
     const outcomeByTask = new Map<string, TaskOutcome>();
     let malformedLines = 0;
+    let retrySearchSlots = Math.max(0, Math.min(18, config.searches.resilience.max_tasks_per_run) -
+      [...plan.tasksBySource.values()].flat().filter((task) => !task.enrich_only).length);
+    let retryDescriptionSlots = Math.max(0, Math.min(2, config.searches.description_budget.max_tasks_per_run) -
+      [...plan.tasksBySource.values()].flat().filter((task) => task.fetch_description).length);
 
     if (options.fixture) {
       collected.push(...options.fixture);
@@ -85,10 +89,25 @@ export async function collect(options: CollectOptions = {}): Promise<CollectSumm
           collected.push(...output.jobs);
           activities.push(...output.activities);
           for (const outcome of output.outcomes) outcomeByTask.set(outcome.taskId, outcome);
+          await recordSearchProgress(output.outcomes);
 
           const retryable = output.outcomes.filter((outcome) => outcome.status === 'Failed' && isRetryable(outcome));
-          if (retryable.length && config.searches.resilience.max_retries_per_task > 0) {
-            const retried = await retryTasks(config, source, tasks, retryable, collected, activities);
+          if (source !== 'linkedin' && !output.outcomes.some((outcome) => ['rate_limit', 'blocked'].includes(outcome.errorKind ?? '')) &&
+            retryable.length && config.searches.resilience.max_retries_per_task > 0) {
+            const retryTasksPlan: CollectorTask[] = [];
+            for (const task of tasks) {
+              if (!retryable.some((outcome) => outcome.taskId === task.task_id)) continue;
+              if (task.enrich_only ? retryDescriptionSlots <= 0 : retrySearchSlots <= 0) continue;
+              if (!task.enrich_only) retrySearchSlots -= 1;
+              const fetchDescription = task.fetch_description && retryDescriptionSlots > 0;
+              if (fetchDescription) retryDescriptionSlots -= 1;
+              const last = outcomeByTask.get(task.task_id)?.nextCursor;
+              retryTasksPlan.push({ ...task, fetch_description: fetchDescription,
+                detail_jobs: fetchDescription ? task.detail_jobs : undefined,
+                ...(last?.offset !== undefined ? { offset: last.offset } : last ? { search_cursor: last } : {}) });
+            }
+            const retried = await retryTasks(config, source, retryTasksPlan, retryable, collected, activities);
+            await recordSearchProgress(retried);
             for (const outcome of retried) outcomeByTask.set(outcome.taskId, outcome);
           }
         } catch (error) {
@@ -139,6 +158,8 @@ export async function collect(options: CollectOptions = {}): Promise<CollectSumm
           status: outcome.status,
           resultCount: outcome.resultCount,
           durationMs: outcome.durationMs,
+          searchRequests: outcome.searchRequests ?? null,
+          detailRequests: outcome.detailRequests ?? null,
           message: outcome.message?.slice(0, 1900) ?? null,
         }),
       );

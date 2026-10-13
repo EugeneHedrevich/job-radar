@@ -103,6 +103,11 @@ const sourceSchema = z.object({
 });
 
 export const searchesSchema = z.object({
+  linkedin_limits: z.object({
+    max_search_tasks_per_run: z.number().int().min(0).max(18).default(2),
+    max_detail_requests_per_run: z.number().int().nonnegative().default(5),
+    max_search_requests_per_task: z.number().int().positive().default(3),
+  }).prefault({}),
   defaults: z.object({
     hours_old: z.number().int().positive(),
     results_wanted: z.number().int().positive(),
@@ -137,6 +142,7 @@ export const searchesSchema = z.object({
     failure_threshold: z.number().int().positive(),
     cooldown_minutes: z.record(z.string(), z.number().nonnegative()),
     process_timeout_seconds: z.number().int().positive(),
+    max_rate_limit_cooldown_minutes: z.number().positive().default(2880),
   }),
 });
 export type Searches = z.infer<typeof searchesSchema>;

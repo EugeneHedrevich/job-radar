@@ -65,12 +65,22 @@ trimmed. Relative paths resolve from the project root:
 | `JOB_RADAR_PYTHON` | `collector.python` (`./.venv/bin/python`) |
 | `JOB_RADAR_COLLECTOR_SCRIPT` | `collector.script` (`./python/collector.py`) |
 
+`JOB_RADAR_PROXY` optionally supplies one proxy for searches and enrichment. Use
+`http://host:port`, `https://host:port` or `socks5://host:port`; a missing scheme
+defaults to `http`. Authentication uses `user:password@host:port` with URL-encoded
+credentials. Invalid URLs fail validation, and credentials are redacted from diagnostics.
+Keep real values in `.env`, never in committed configuration.
+
+TLS certificate verification stays enabled for every provider and proxy. If a trusted
+proxy requires its own CA, set `JOB_RADAR_CA_BUNDLE` to a readable PEM bundle containing
+the trusted roots (absolute path or relative to the project root). Searches and details
+use the same bundle; there are no provider-specific TLS exceptions or global SSL patches.
+
 Verify the installation without touching any live job board:
 
 ```bash
 npm run cycle:demo     # offline demo fixtures in separate storage, Telegram dry run
 npm test               # full test suite
-npm run test:collector  # pinned JobSpy regressions with mocked HTTP (requires .venv)
 npm run typecheck
 ```
 
@@ -166,7 +176,6 @@ machine.
 | `npm run build`              | Typecheck backend/frontend and build the dashboard                |
 | `npm start`                  | Local API serving the built dashboard                             |
 | `npm test`                   | Test suite                                                        |
-| `npm run test:collector`    | Python collector regressions against pinned JobSpy, mocked HTTP  |
 
 Flags are passed after `--`:
 
@@ -202,6 +211,8 @@ npm start
 The backend serves `dist/dashboard` and binds only to loopback. Set `JOB_RADAR_PORT`
 in `.env` or the environment to change its port; Vite uses the same setting.
 No Python environment, OpenAI key or Telegram credentials are required to view saved data.
+Disabling LLM requests or removing the key does not invalidate a saved assessment whose
+vacancy, matching configuration and model cache key still match.
 Keep the Node development dependencies installed: startup uses the existing `tsx` runner.
 
 The dashboard opens the **same persistent database** as the CLI, using
@@ -211,14 +222,20 @@ when starting it. It never seeds fixtures, collects, enriches, ranks or delivers
 notifications. Refresh only reloads stored records and status; CLI/scheduled workflows
 continue independently with their existing budgets.
 
-All deduplicated vacancies are visible by default, including low-scoring, unassessed,
-older-batch and closed roles. Search covers title, company, location and personal notes.
+The list opens with a minimum fit score of 60, sorted by current fit score descending.
+Clear the score filter to include lower scores and unassessed roles. Search covers title,
+company, location and personal notes.
 The searchable Sources picker accepts multiple sources: jobs from any selected source
 are included once, and clearing the selection includes all sources. Filter by minimum
 current fit score, application status and listing activity; sort and paginate with the
 controls above and below the list. Unknown scores use `—`,
 and a minimum-score filter excludes unknown scores even when the minimum is zero.
 Publication, first fetched and last seen dates stay separate.
+PLN salaries show an approximate EUR equivalent in parentheses, using the latest available
+[NBP average EUR rate](https://api.nbp.pl/en.html), shared across the list and vacancy details
+and cached for an hour. Hover over the conversion to see the rate and publication date.
+The source salary and pay period stay visible. If the rate cannot be loaded, PLN is shown
+with an unavailable conversion label.
 
 Open a vacancy to view saved assessment details and history. Current scores use the
 same content/configuration cache validation as CLI/Telegram. YAML changes are read
@@ -226,18 +243,24 @@ on the next dashboard request; changes to process environment/secrets require a 
 AI, deterministic rules and AI-request fallbacks have separate labels. A fallback
 retains its actual rules score. Outdated assessments appear only in history, with no
 current score. AI pending reflects the saved queue for current inputs; stale queue
-entries and closed jobs do not appear as pending.
+entries, Ignored jobs and closed jobs do not appear as pending.
 
 Personal tracking includes `New`, `Interested`, `Applied`, `Ignored`, `Interview` and
 `Rejected`, notes, application date, a separate CV-sent checkbox and an optional actual
 CV filename/version. **Suggested CV variant** comes from the read-only assessment;
-**CV actually sent** is your saved label. Setting `Applied` never checks CV sent
-automatically. Save confirmation follows the SQLite update; collection, enrichment
+**CV actually sent** is your saved label. Marking a CV as sent moves `New` or `Interested`
+to `Applied`; `Interview`, `Rejected` and `Ignored` retain their explicit status.
+Saved CV-sent vacancies are highlighted in blue in the list. Setting `Applied` alone
+does not mark a CV as sent. Save confirmation follows the SQLite update; collection, enrichment
 and ranking only update their own fields. The additive migration adds tracking columns
 without replacing stored vacancies, statuses, assessments or application notes.
 `Active` / `Unknown` / `Closed` is derived separately from stored listing observations
 and explicit expiry using the existing activity logic. Closed vacancies retain all
 personal tracking and saved assessments.
+`Ignored` excludes a job from new paid AI requests and Telegram candidates. Saving it
+supersedes pending AI work and skips queued delivery, while keeping assessment, notification
+and personal history. Delivery rechecks the status before sending; an already in-flight
+send can still complete and retains its delivery history.
 
 The collection card reports the last stored run's start/finish/heartbeat, batch, counts,
 task failures, recorded errors and source cooldowns. It does not recover stale runs
@@ -291,8 +314,9 @@ cursors are stored in SQLite and survive restarts, including manual repeats of t
 Disabled sources, cooldowns and `--source` exclusions consume no slots and retain their cursors.
 Demo collection does not advance the live cursors. A reservation is committed before collection,
 so a crash can advance a cursor but cannot leave an open transaction during HTTP requests.
-RED Global and Whitehall search pagination is capped at three pages; Eursap uses the first
-filtered result response from its public browser search. HTTP failures and access challenges
+RED Global and Whitehall read at most three search pages per task; Eursap uses one filtered
+response from its public browser search. Page and within-page cursors resume capped results
+on subsequent runs instead of repeating the first results. HTTP failures and access challenges
 are reported to the existing cooldown mechanism; they are not successful empty searches.
 Agency searches check the next candidates after details reveal an expired or old listing,
 until the requested count is reached, pages end, or **10 detail requests per task** are spent.
@@ -316,15 +340,15 @@ SAP AI Core, SAP Generative AI Hub and SAP BTP AI. Other batches add Developer,
 Consultant, Architect and separate freelance / contract / B2B queries. Broad queries
 remain in use; engagement is still evaluated after collection.
 
-Each priority batch uses two or three queries and selected source geographies, producing
-at most 18 tasks. Every configured task fits; later sources and keywords are not cut off.
-The priority, specialist, regional and public-catalogue batches use an explicit **33-cycle / 99-hour**
-`rotation.sequence` at the current three-hour schedule. The four broad priority batches
-repeat every **33 hours**; role and engagement variants remain in the sequence. Starting
-from `cap-broad`, the first four priority batches cover every direction across the six sources;
-all phrase variants are searched within one full rotation,
-when sources are enabled and not cooling down. This is a bound on searches, not on job
-availability or complete description coverage. A global, persisted source cursor gives
+Each configured batch fits the global 18-search-task ceiling. `cap-markets`, `joule-markets`
+and `btp-markets` separately search supported non-LinkedIn markets outside the Netherlands,
+including Germany, Switzerland, the UK, Poland, Austria and Ireland. LinkedIn allows
+**two search tasks per cycle** by default; postponed keyword/location combinations rotate
+fairly using persisted cursors. Larger custom batches also rotate their postponed tail.
+The explicit **36-cycle / 108-hour** sequence repeats the broad priority and public catalogue
+batches every **36 hours**, inside the 120-hour freshness window. Rate limits and small caps
+can delay individual combinations and pages; complete vacancy coverage is not guaranteed.
+A global, persisted source cursor gives
 each of the five eligible description sources a slot within three priority cycles
 (up to nine hours), when all are available. Keyword/location progress remains separate
 for each batch. Disabled sources, cooldowns and `--source` restrictions consume no slots.
@@ -334,10 +358,17 @@ allowance for stored jobs without descriptions and stale listing activity, indep
 Reservations persist before collection and rotate unsuccessful URLs to the queue tail.
 Public detail pages may be unavailable or blocked; those failures are reported through
 the normal circuit breaker, and incomplete jobs remain visible. Backlog and fresh search
-details share the same allowance: at most `results_wanted` requests on LinkedIn, and
-ten on agencies. No third description task is added. Agency searches still refill after
+details share the same allowance: **five LinkedIn detail HTTP requests per cycle**, including
+redirects, divided across selected description tasks; agencies retain ten per task.
+`searches.yaml` configures `linkedin_limits.max_search_tasks_per_run`,
+`max_detail_requests_per_run` and `max_search_requests_per_task` (initially 2 / 5 / 3).
+Search task counts are not request counts: pagination consumes additional HTTP requests.
+Observed LinkedIn search/detail request counts appear in CLI output, collection history and
+the dashboard, including failed requests. No third description task is added. Agency searches still refill after
 old/expired detail pages, within their three-page and ten-detail-request bounds.
-Glassdoor keeps JobSpy's search-session description fetch; its stored URLs are not
+Every JobSpy search uses `fetch_description=False`. Selected LinkedIn tasks pass fresh
+results and stored candidates to bounded `enrich_board()`. Glassdoor details also use
+bounded enrichment, retaining JobSpy's search-session cookies; its stored URLs are not
 replayed separately. Indeed already includes descriptions in search results.
 
 For the first manual backfill, use a **7–14 day window** (`--hours 168` or `--hours 336`)
@@ -356,7 +387,7 @@ npm run notify -- --dry-run --limit 3
 
 Use the other batch keys above for role and engagement variants. Repeating a batch advances
 its description rotation; other batches advance the shared source cursor too.
-Each invocation still allows at most **18 searches, two tasks
+Each invocation still allows at most **18 search tasks, two tasks
 with descriptions, five OpenAI requests and three Telegram notifications**. Several invocations
 multiply those budgets; `rank --limit` controls printed items, not OpenAI requests.
 `--hours` only changes that manual collection: regular `watch` keeps the **120-hour** window.
@@ -444,7 +475,7 @@ for the same attempt again; changed inputs or `npm run rank -- --force` permit a
 ### Expanded public SAP coverage
 
 The `sap-public` batch searches six additional providers with a broad `SAP` query.
-It runs every 33 hours in the rotation and uses 12 of the 18 allowed tasks.
+It runs every 36 hours in the rotation and uses 12 of the 18 allowed tasks.
 
 | Provider | Coverage | Descriptions |
 | -------- | -------- | ------------ |
@@ -468,7 +499,12 @@ explicit expiries are respected. `--hours` overrides the window for every select
 Broad collection preserves functional as well as technical SAP roles; the existing profile
 still determines ranking and Telegram eligibility. API sources retain their platform URLs
 and source attribution. Searches are bounded to three pages; feed/API availability does
-not guarantee exhaustive vacancy coverage. Regional location never proves cross-border
+not guarantee exhaustive vacancy coverage. Public adapters save page/index progress;
+LinkedIn saves bounded offsets below 1,000 and Indeed below 300 with at most three
+HTTP searches per task. Indeed's offset still refetches earlier API pages; Glassdoor's
+pinned offset implementation cannot reliably resume a later page and is left unchanged.
+Sweeps restart at exhaustion or after half the task's freshness window, leaving time for
+broad first-page discovery before the window expires. Regional location never proves cross-border
 eligibility, and PLN rates are never treated as EUR.
 
 `enrich` spends at most two description tasks on relevant stored listings and issues no
@@ -664,22 +700,28 @@ marked to prevent live delivery.
 
 ## 7. Resilience
 
-* Each source runs in its **own subprocess**, so a hanging or blocked board cannot affect the
-  others.
+* Each source runs in its **own subprocess**. Task and process deadlines terminate it with
+  SIGKILL; the parent waits for exit before retrying. Already streamed records, request
+  counts and search progress survive. Unstarted tasks are recorded as skipped.
 * Collection runs heartbeat every 30 seconds. Runs with five-minute stale heartbeats are
   recovered as failed by collection/status; legacy runs receive the full process/retry
   allowance for their recorded batch. Unexpected pipeline errors also close the run as failed.
-* Timeouts, rate limits, blocks and network errors are classified separately. Timeouts and
-  network errors get one bounded retry; **rate limits and blocks are never retried** — the
+* Timeouts, rate limits, blocks and network errors are classified separately. Other sources'
+  transient failures get one retry when global search/description slots remain. LinkedIn
+  never adds retry tasks beyond its cycle allowance. **Rate limits and blocks are never retried** — the
   source goes on cooldown (`resilience.cooldown_minutes`) and is reported in `npm run status`.
+  Rate-limit cooldowns grow 120 → 240 → 480 minutes, up to the configured 2,880-minute cap;
+  a longer `Retry-After` takes precedence. A successful recovery cycle resets the streak.
 * No account login, cookie harvesting, CAPTCHA solving or proxy rotation is implemented. If a
   board blocks you, the tool reports it and backs off.
 * Collector output is schema-validated line by line; malformed lines are counted and discarded
   rather than corrupting the database. Tasks the collector never reports on are recorded as
   failed, not silently dropped.
-* JobSpy request failures reported only through its loggers are captured as task failures,
-  including empty or partial results returned after a 429 or block. A block/rate limit stops
-  the remaining tasks for that source immediately; ordinary empty searches remain successful.
+* Task-local JobSpy session guards stop HTTP requests at the first 429/403 or access challenge,
+  preserve partial records and retain `Retry-After`; its failure logs are captured too.
+  This applies across LinkedIn, Indeed and Glassdoor. Public adapters stop at the first failed
+  request and pass its retry delay through the same circuit breaker. Other sources continue.
+  Ordinary empty searches and exhausted request allowances remain successful.
 * Concurrent notification runs insert each job's notification once and atomically claim it
   before sending. SQLite transactions are short and never span delivery; one connection per
   process and a busy timeout prevent overlapping writes from immediately failing. Claims
@@ -696,7 +738,6 @@ marked to prevent live delivery.
 
 ```bash
 npm test
-npm run test:collector
 npm run typecheck
 ```
 
@@ -707,9 +748,8 @@ budgets, notification retry/permanent-failure behaviour, and a full offline cycl
 running the same collection twice creates no duplicate jobs and sends no extra notifications.
 Regression coverage includes current-assessment notification selection and queued retries,
 authoritative vacancy updates, conservative vacancy identity, demo isolation and legacy data
-migration, negative contract statements, mandatory gaps, and LLM request budgets. Python
-tests exercise the installed JobSpy implementation with mocked HTTP responses; no live job
-boards or Telegram messages are needed.
+migration, negative contract statements, mandatory gaps, and LLM request budgets. The tests
+use offline fixtures; no live job boards or Telegram messages are needed.
 Concurrency tests hold one sender open while another independent process completes,
 checking that only the claimed notification is delivered.
 Suites group matching, AI evidence, queue/cache, collection, identity, listing activity,

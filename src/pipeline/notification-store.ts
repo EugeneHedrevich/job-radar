@@ -13,14 +13,15 @@ interface Candidate {
 export async function queueNotification(candidate: Candidate): Promise<boolean> {
   const result = await cds.run(`INSERT INTO sap_jobradar_Notifications
     (ID, job_ID, assessment_ID, channel, status, attempts, chatId, payload, createdAt)
-    VALUES (?, ?, ?, ?, 'Pending', 0, ?, ?, ?)
+    SELECT ?, ?, ?, ?, 'Pending', 0, ?, ?, ?
+    WHERE EXISTS (SELECT 1 FROM sap_jobradar_Jobs WHERE ID = ? AND COALESCE(status, 'New') != 'Ignored')
     ON CONFLICT(job_ID, channel) WHERE status != 'Superseded' DO UPDATE SET
       assessment_ID = excluded.assessment_ID, status = 'Pending', attempts = 0,
       chatId = excluded.chatId, payload = excluded.payload,
       createdAt = excluded.createdAt, lastError = NULL, claimToken = NULL, claimUntil = NULL
     WHERE sap_jobradar_Notifications.status = 'Skipped'`,
   [randomUUID(), candidate.jobId, candidate.assessmentId, candidate.channel,
-    candidate.chatId, candidate.payload, new Date().toISOString()]);
+    candidate.chatId, candidate.payload, new Date().toISOString(), candidate.jobId]);
   return Number(result.changes) === 1;
 }
 

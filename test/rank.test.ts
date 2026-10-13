@@ -24,6 +24,18 @@ async function seedJobs() {
         await seed(`budget-${index}`);
 }
 describe('durable AI work across collection cycles', () => {
+    it('excludes Ignored jobs from paid work and supersedes their queue history', async () => {
+        const result = await seed('ignored');
+        await rank({ rulesOnly: true });
+        await cds.run(UPDATE(db().Jobs).set({ status: 'Ignored' }).where({ ID: result.jobIds[0] }));
+        enableReviewAi();
+        const request = vi.fn(async () => reviewAiResponse());
+        vi.stubGlobal('fetch', request);
+        await rank({ force: true, includePendingAi: true });
+        expect(request).not.toHaveBeenCalled();
+        expect(await queryOne(SELECT.from(db().AiAssessmentQueue))).toMatchObject({ status: 'Superseded' });
+        expect(await readTop()).toHaveLength(1);
+    });
     it.each(['RAP is required.', 'German is mandatory.'])('rejects known mandatory gaps before spending an AI call: %s', async (requirement) => {
         await seed('rejected', `${reviewRecord.description}\n${requirement}`);
         enableReviewAi();

@@ -3,6 +3,7 @@ import { APPLICATION_STATUSES, type AssessmentState, type CollectionStatus, type
   type JobList, type JobSummary, type SavedAssessment, type Tracking } from '../../src/dashboard/types';
 import { request, useResource } from './api';
 import SourceFilter, { sourceLabel } from './SourceFilter';
+import { useEuroRate, type EuroConversion } from './currency';
 
 const assessmentLabels: Record<AssessmentState, string> = {
   ai: 'AI assessment', rules: 'Deterministic rules', 'ai-fallback': 'AI-request fallback (rules)',
@@ -22,12 +23,19 @@ function date(value: string | null | undefined, time = false): string {
     ...(time ? { hour: '2-digit', minute: '2-digit' } : { timeZone: 'UTC' }) });
 }
 
-function salary(job: JobSummary): string {
+function Salary({ job, conversion }: { job: JobSummary; conversion: EuroConversion }) {
   if (job.salaryMin === null && job.salaryMax === null) return 'Salary not stated';
-  const range = job.salaryMin !== null && job.salaryMax !== null ?
-    job.salaryMin === job.salaryMax ? String(job.salaryMin) : `${job.salaryMin}–${job.salaryMax}` :
-    job.salaryMin !== null ? `From ${job.salaryMin}` : `Up to ${job.salaryMax}`;
-  return `${range} ${job.salaryCurrency ?? ''} / ${job.salaryInterval ?? 'period not stated'}`;
+  const range = (format: (amount: number) => string = String) => job.salaryMin !== null && job.salaryMax !== null ?
+    job.salaryMin === job.salaryMax ? format(job.salaryMin) : `${format(job.salaryMin)}–${format(job.salaryMax)}` :
+    job.salaryMin !== null ? `From ${format(job.salaryMin)}` : `Up to ${format(job.salaryMax!)}`;
+  const rate = conversion.rate;
+  const euros = rate ? range((amount) => (amount / rate.plnPerEuro).toLocaleString(undefined,
+    { minimumFractionDigits: 2, maximumFractionDigits: 2 })) : null;
+  return <span>{range()} {job.salaryCurrency ?? ''}
+    {job.salaryCurrency?.toUpperCase() === 'PLN' && <span className="salary-euros"
+      title={rate ? `Approximate EUR equivalent · NBP ${rate.effectiveDate} · 1 EUR = ${rate.plnPerEuro} PLN${conversion.unavailable ? ' · Last available rate' : ''}` : undefined}>
+      {euros ? ` (≈ ${euros} EUR)` : conversion.unavailable ? ' (EUR unavailable)' : ' (EUR loading…)'}
+    </span>} / {job.salaryInterval ?? 'period not stated'}</span>;
 }
 
 function safeUrl(value: string): string | undefined {
@@ -84,6 +92,7 @@ function CollectionArea({ data, loading, error, retry }: {
         const tasks = run.tasks.filter((task) => task.source === source);
         return <div className="source-item" key={source}><strong>{sourceLabel(source)}</strong>
           <span>{tasks.reduce((sum, task) => sum + task.resultCount, 0)} results · {tasks.filter((task) => task.status === 'Succeeded').length} succeeded · {tasks.filter((task) => task.status === 'Failed').length} failed · {tasks.filter((task) => task.status === 'Skipped').length} skipped</span>
+          {tasks.some((task) => task.searchRequests !== null) && <span className="small">HTTP requests: {tasks.reduce((sum, task) => sum + (task.searchRequests ?? 0), 0)} search · {tasks.reduce((sum, task) => sum + (task.detailRequests ?? 0), 0)} detail</span>}
           {tasks.filter((task) => task.status !== 'Succeeded' && task.message).map((task, index) => <span className="warning small" key={index}>{task.status}: {task.message}</span>)}
         </div>;
       })}</div>}
@@ -135,7 +144,14 @@ function TrackingForm({ job, onSaved, onDirty, onBusy }: {
   const [saved, setSaved] = useState(false);
   const dirty = JSON.stringify(form) !== baseline;
   useEffect(() => { onDirty(dirty); return () => onDirty(false); }, [dirty, onDirty]);
-  function change(patch: Partial<Tracking>) { setForm((previous) => ({ ...previous, ...patch })); setSaved(false); }
+  function change(patch: Partial<Tracking>) {
+    setForm((previous) => {
+      const next = { ...previous, ...patch };
+      if (patch.cvSent === true && ['New', 'Interested'].includes(next.status)) next.status = 'Applied';
+      return next;
+    });
+    setSaved(false);
+  }
   async function save(event: FormEvent) {
     event.preventDefault(); setSaving(true); onBusy(true); setError(null); setSaved(false);
     try {
@@ -157,7 +173,7 @@ function TrackingForm({ job, onSaved, onDirty, onBusy }: {
         placeholder="e.g. BTP-CV-v3.pdf" value={form.sentCvLabel ?? ''} onChange={(event) => change({ sentCvLabel: event.target.value || null })} /></label>
       <label>Personal notes<textarea rows={5} maxLength={20_000} placeholder="Contacts, next steps, interview notes…"
         value={form.personalNotes} onChange={(event) => change({ personalNotes: event.target.value })} /></label>
-      <p className="muted small">CV sent is tracked separately from application status.</p>
+      <p className="muted small">Marking a CV as sent moves New or Interested to Applied.</p>
     </fieldset>
     <div className="save-row"><button className="primary" type="submit" disabled={saving || !dirty}>{saving ? 'Saving…' : 'Save tracking'}</button>
       <span className={saved ? 'success small' : 'muted small'} role="status">{saved ? 'Saved.' : dirty ? 'Unsaved changes' : ''}</span></div>
@@ -165,8 +181,8 @@ function TrackingForm({ job, onSaved, onDirty, onBusy }: {
   </form>;
 }
 
-function VacancyDetail({ job, onSaved, onDirty, onBusy }: {
-  job: JobDetail; onSaved: (tracking: Tracking) => void; onDirty: (dirty: boolean) => void; onBusy: (busy: boolean) => void;
+function VacancyDetail({ job, conversion, onSaved, onDirty, onBusy }: {
+  job: JobDetail; conversion: EuroConversion; onSaved: (tracking: Tracking) => void; onDirty: (dirty: boolean) => void; onBusy: (busy: boolean) => void;
 }) {
   return <>
     <div className="detail-intro"><span className="eyebrow">Vacancy details{job.isDemo ? ' · Demo data' : ''}</span>
@@ -190,7 +206,7 @@ function VacancyDetail({ job, onSaved, onDirty, onBusy }: {
       </details>}
     </section>
     <section className="detail-section"><h3>Vacancy facts</h3><dl className="facts">
-      <div><dt>Contract type</dt><dd>{job.jobType ?? 'Not stated'}</dd></div><div><dt>Salary</dt><dd>{salary(job)}</dd></div>
+      <div><dt>Contract type</dt><dd>{job.jobType ?? 'Not stated'}</dd></div><div><dt>Salary</dt><dd><Salary job={job} conversion={conversion} /></dd></div>
       <div><dt>Work format</dt><dd>{job.isRemote === null ? 'Not stated' : job.isRemote ? 'Remote' : 'Not remote'}</dd></div>
       <div><dt>Published</dt><dd>{date(job.datePosted)}</dd></div><div><dt>First fetched</dt><dd>{date(job.firstSeenAt, true)}</dd></div>
       <div><dt>Last seen</dt><dd>{date(job.lastSeenAt, true)}</dd></div>
@@ -209,12 +225,12 @@ function VacancyDetail({ job, onSaved, onDirty, onBusy }: {
   </>;
 }
 
-const defaultFilters = { q: '', sources: [] as string[], minScore: '', status: '', activity: '', sort: 'firstSeenAt', direction: 'desc', pageSize: '20' };
+const defaultFilters = { q: '', sources: [] as string[], minScore: '60', status: '', activity: '', sort: 'fitScore', direction: 'desc', pageSize: '20' };
 
 export default function App() {
   const [filters, setFilters] = useState(defaultFilters);
   const [search, setSearch] = useState('');
-  const [scoreInput, setScoreInput] = useState('');
+  const [scoreInput, setScoreInput] = useState(defaultFilters.minScore);
   const [page, setPage] = useState(1);
   const [revision, setRevision] = useState(0);
   const [listRevision, setListRevision] = useState(0);
@@ -229,6 +245,9 @@ export default function App() {
   const list = useResource<JobList>(`/api/jobs?${params}`, revision + listRevision, true);
   const collection = useResource<CollectionStatus>('/api/status', revision, true);
   const detail = useResource<JobDetail>(selected ? `/api/jobs/${encodeURIComponent(selected)}` : null, revision + detailRevision);
+  const needsEuroRate = Boolean(list.data?.items.some((job) => job.salaryCurrency?.toUpperCase() === 'PLN') ||
+    detail.data?.salaryCurrency?.toUpperCase() === 'PLN');
+  const conversion = useEuroRate(needsEuroRate, revision);
   const validScore = scoreInput === '' || /^\d+$/.test(scoreInput) && Number(scoreInput) <= 100;
 
   useEffect(() => {
@@ -261,6 +280,8 @@ export default function App() {
   }
   function saved(tracking: Tracking) {
     detail.setData((previous) => previous ? { ...previous, ...tracking } : previous);
+    list.setData((previous) => previous ? { ...previous,
+      items: previous.items.map((job) => job.ID === selected ? { ...job, ...tracking } : job) } : previous);
     setListRevision((value) => value + 1);
   }
   const data = list.data;
@@ -310,10 +331,12 @@ export default function App() {
         {data && data.total > 0 && <>
           <div className={`table-scroll ${updating ? 'is-updating' : ''}`} aria-busy={updating}><table><caption className="sr-only">Saved deduplicated vacancies</caption>
             <thead><tr><th>Vacancy</th><th>Sources</th><th title="Current saved fit score">Fit</th><th>Activity</th><th>Application</th><th>Published</th><th>First fetched</th><th>Last seen</th></tr></thead>
-            <tbody>{data.items.map((job) => <tr key={job.ID} className={job.activity === 'Closed' ? 'closed-row' : ''}>
+            <tbody>{data.items.map((job) => <tr key={job.ID} className={[
+              job.activity === 'Closed' ? 'closed-row' : '', job.cvSent ? 'cv-sent-row' : '',
+            ].filter(Boolean).join(' ')}>
               <td className="vacancy-cell"><button className="job-title" onClick={() => select(job.ID)}>{job.title}</button>
                 <div className="company">{job.company ?? 'Company not stated'}{job.isDemo && <span className="demo">Demo</span>}<span className="muted"> · {job.location ?? 'Location not stated'}</span></div>
-                <div className="vacancy-meta">{job.jobType ?? 'Contract type unknown'}{(job.salaryMin !== null || job.salaryMax !== null) && <> · {salary(job)}</>}</div></td>
+                <div className="vacancy-meta">{job.jobType ?? 'Contract type unknown'}{(job.salaryMin !== null || job.salaryMax !== null) && <> · <Salary job={job} conversion={conversion} /></>}</div></td>
               <td><div className="source-tags">{job.sources.length ? job.sources.map((source) => <span key={source}>{sourceLabel(source)}</span>) : <span>Unknown</span>}</div></td>
               <td><Fit job={job} /></td><td><Badge value={job.activity} /></td>
               <td><Badge value={job.status} /><div className="muted small tracking-indicator">{job.cvSent ? '✓ CV sent' : 'CV not sent'}</div></td>
@@ -332,7 +355,7 @@ export default function App() {
       <div className="panel-toolbar"><span className="muted small">Vacancy details</span><button onClick={() => select(null)} disabled={saving} aria-label="Close vacancy details">✕</button></div>
       {detail.loading && <div className="load-state" role="status"><h2 id="loading-detail-title" className="sr-only">Vacancy details</h2><span className="spinner" />Loading vacancy…</div>}
       {detail.error && <div className="empty-state error" role="alert"><h2 id="loading-detail-title">Couldn’t load vacancy</h2><p>{detail.error}</p><button onClick={() => setDetailRevision((value) => value + 1)}>Try again</button></div>}
-      {detail.data && <VacancyDetail job={detail.data} onSaved={saved} onDirty={setDirty} onBusy={setSaving} />}
+      {detail.data && <VacancyDetail job={detail.data} conversion={conversion} onSaved={saved} onDirty={setDirty} onBusy={setSaving} />}
     </dialog>
   </div>;
 }

@@ -3,7 +3,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vites
 import { loadConfig, resetConfigCache } from '../src/config/index.js';
 import { cds, connectDb, db, disconnectDb, INSERT, query, queryOne, SELECT, UPDATE } from '../src/db/index.js';
 import { listJobs, readCollectionStatus, readJob, updateTracking } from '../src/dashboard/store.js';
-import { assessmentCacheKey, rank } from '../src/pipeline/rank.js';
+import { assessmentCacheKey, findCurrentAssessment, rank } from '../src/pipeline/rank.js';
 import { closeTempDb, resetTestDb, useTempDb } from './helpers/db.js';
 import { ingestReview, reviewRecord } from './helpers/review.js';
 
@@ -68,6 +68,13 @@ describe('personal dashboard stored data', () => {
     await cds.run(INSERT.into(db().Assessments).entries({ ...rules, ID: aiId, engine: 'llm', model: 'offline-model',
       cacheKey: assessmentCacheKey(loadConfig(), job, 'llm'), fitScore: 91, createdAt: '2099-01-01T00:00:00.000Z' }));
     expect(await readJob(job.ID)).toMatchObject({ assessmentState: 'ai', fitScore: 91, aiPending: false });
+    vi.stubEnv('OPENAI_API_KEY', '');
+    const disabled = loadConfig();
+    disabled.settings.llm.enabled = false;
+    disabled.llmAvailable = false;
+    expect(await findCurrentAssessment(disabled, job)).toMatchObject({ ID: aiId });
+    expect(await readJob(job.ID)).toMatchObject({ assessmentState: 'ai', fitScore: 91, currentAssessment: { ID: aiId } });
+    expect((await listJobs()).items[0]).toMatchObject({ assessmentState: 'ai', fitScore: 91 });
     await cds.run(UPDATE(db().Assessments).set({ engine: 'rules', model: null, explanation: 'AI request failed; rules fallback used.' }).where({ ID: aiId }));
     expect(await readJob(job.ID)).toMatchObject({ assessmentState: 'ai-fallback', currentAssessment: { engine: 'rules' }, aiPending: false });
     await cds.run(UPDATE(db().Jobs).set({ description: `${job.description}\nChanged requirements.` }).where({ ID: job.ID }));
@@ -77,6 +84,18 @@ describe('personal dashboard stored data', () => {
     expect(outdated.assessmentHistory.every((row) => !row.current)).toBe(true);
     expect((await listJobs(new URLSearchParams({ minScore: '0' }))).total).toBe(0);
     expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('supersedes pending work when Ignored is saved without removing assessments or tracking', async () => {
+    const job = await storedJob();
+    await rank({ rulesOnly: true });
+    await cds.run(INSERT.into(db().Notifications).entries({ ID: randomUUID(), job_ID: job.ID,
+      channel: 'telegram', status: 'Pending', attempts: 0 }));
+    await updateTracking(job.ID, { status: 'Ignored', personalNotes: 'Keep this history', cvSent: true });
+    expect(await queryOne(SELECT.from(db().AiAssessmentQueue).where({ job_ID: job.ID }))).toMatchObject({ status: 'Superseded' });
+    expect(await queryOne(SELECT.from(db().Notifications).where({ job_ID: job.ID }))).toMatchObject({ status: 'Skipped' });
+    expect(await readJob(job.ID)).toMatchObject({ status: 'Ignored', personalNotes: 'Keep this history', cvSent: true,
+      aiPending: false, currentAssessment: { engine: 'rules' } });
   });
 
   it('invalidates AI assessments when effective model configuration changes on the running dashboard', async () => {

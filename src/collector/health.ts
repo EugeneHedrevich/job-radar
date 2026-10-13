@@ -6,6 +6,7 @@ import type { ErrorKind, TaskOutcome } from './types.js';
 export interface SourceHealthRow {
   source: string;
   consecutiveFailures: number;
+  rateLimitStreak: number;
   cooldownUntil: string | null;
   blocked: boolean;
   lastStatus: string | null;
@@ -40,6 +41,7 @@ export async function recordOutcomes(config: AppConfig, outcomes: TaskOutcome[],
   const { failure_threshold, cooldown_minutes } = config.searches.resilience;
   const bySource = new Map<string, TaskOutcome[]>();
   for (const outcome of outcomes) {
+    if (outcome.status === 'Skipped') continue;
     const list = bySource.get(outcome.source) ?? [];
     list.push(outcome);
     bySource.set(outcome.source, list);
@@ -51,11 +53,16 @@ export async function recordOutcomes(config: AppConfig, outcomes: TaskOutcome[],
     const previous = existing.get(source);
     const failures = sourceOutcomes.filter((outcome) => outcome.status === 'Failed');
     const succeeded = sourceOutcomes.some((outcome) => outcome.status === 'Succeeded');
+    const recovered = succeeded && !failures.length;
+    const limited = failures.some((outcome) => outcome.errorKind === 'rate_limit');
+    const rateLimitStreak = limited ? Math.max(previous?.rateLimitStreak ?? 0,
+      previous?.lastStatus === 'rate_limit' ? 1 : 0) + 1
+      : recovered ? 0 : previous?.rateLimitStreak ?? 0;
 
-    let consecutiveFailures = succeeded ? 0 : (previous?.consecutiveFailures ?? 0) + failures.length;
-    let cooldownUntil: string | null = succeeded ? null : (previous?.cooldownUntil ?? null);
+    let consecutiveFailures = recovered ? 0 : (previous?.consecutiveFailures ?? 0) + failures.length;
+    let cooldownUntil: string | null = recovered ? null : (previous?.cooldownUntil ?? null);
     let blocked = false;
-    let lastStatus = succeeded ? 'ok' : 'failed';
+    let lastStatus = recovered ? 'ok' : 'failed';
     let lastMessage = failures[0]?.message ?? null;
 
     const worstKind = pickWorstKind(failures.map((outcome) => outcome.errorKind));
@@ -63,11 +70,16 @@ export async function recordOutcomes(config: AppConfig, outcomes: TaskOutcome[],
       // Blocking is not transient: stop retrying immediately, do not wait for
       // the failure threshold, and never attempt to work around the block.
       blocked = worstKind === 'blocked';
-      cooldownUntil = addMinutes(now, cooldown_minutes[worstKind] ?? 60).toISOString();
+      const base = cooldown_minutes[worstKind] ?? 60;
+      const minutes = worstKind === 'rate_limit' ? Math.min(config.searches.resilience.max_rate_limit_cooldown_minutes,
+        base * 2 ** Math.min(10, Math.max(0, rateLimitStreak - 1))) : base;
+      const retryAfterMinutes = Math.max(0, ...failures.map((outcome) => (outcome.retryAfterSeconds ?? 0) / 60));
+      cooldownUntil = new Date(Math.max(addMinutes(now, Math.max(minutes, retryAfterMinutes)).getTime(),
+        new Date(previous?.cooldownUntil ?? 0).getTime())).toISOString();
       lastStatus = worstKind;
       consecutiveFailures = Math.max(consecutiveFailures, failure_threshold);
       log.warn(`Source "${source}" reported ${worstKind}; pausing it until ${cooldownUntil}`);
-    } else if (!succeeded && worstKind && consecutiveFailures >= failure_threshold) {
+    } else if (!recovered && worstKind && consecutiveFailures >= failure_threshold) {
       cooldownUntil = addMinutes(now, cooldown_minutes[worstKind] ?? 30).toISOString();
       lastStatus = worstKind;
       log.warn(`Source "${source}" failed ${consecutiveFailures}x; cooling down until ${cooldownUntil}`);
@@ -76,6 +88,7 @@ export async function recordOutcomes(config: AppConfig, outcomes: TaskOutcome[],
     const row = {
       source,
       consecutiveFailures,
+      rateLimitStreak,
       cooldownUntil,
       blocked,
       lastStatus,

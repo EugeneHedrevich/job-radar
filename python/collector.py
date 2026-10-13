@@ -29,10 +29,14 @@ import logging
 import math
 import sys
 import time
-import traceback
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
+from threading import Lock
+from contextlib import contextmanager
+from unittest.mock import patch
 from datetime import date, datetime
 from typing import Any
+from transport import LinkedInTransport, network_config, retry_after, safe_message, use_transport
+
+EMIT_LOCK = Lock()
 
 # Columns we forward to Node. Anything else from JobSpy is dropped on purpose:
 # Node must not depend on board-specific extras.
@@ -78,15 +82,19 @@ ALLOWED_TASK_PARAMS = {
     "fetch_description",
     "enforce_annual_salary",
     "enrich_only",
+    "detail_request_limit", "search_request_limit", "search_cursor",
 }
 
 
 def log(message: str) -> None:
-    print(message, file=sys.stderr, flush=True)
+    print(safe_message(message), file=sys.stderr, flush=True)
 
 
 def emit(record: dict[str, Any]) -> None:
-    print(json.dumps(record, ensure_ascii=False, default=str), flush=True)
+    # Glassdoor parses cards in parallel. print() writes text and its newline
+    # separately, so serialize complete protocol records from all threads.
+    with EMIT_LOCK:
+        print(json.dumps(record, ensure_ascii=False, default=str), flush=True)
 
 
 def clean_value(value: Any) -> Any:
@@ -149,6 +157,85 @@ def build_kwargs(task: dict[str, Any]) -> dict[str, Any]:
     return kwargs
 
 
+def failure_info(exc):
+    return (classify_error(exc), safe_message(f"{type(exc).__name__}: {exc}"),
+            getattr(exc, "retry_after_seconds", None) or retry_after(getattr(exc, "response", None))) if exc else None
+
+
+@contextmanager
+def jobspy_search(source, transport, kwargs):
+    """Scope guards to this board's sessions, never to global requests/SSL.
+
+    1.2.0 catches request errors; the latch still prevents any subsequent I/O.
+    Stream each parsed card so killing a later page preserves earlier records.
+    """
+    from importlib import import_module
+    module = import_module(f"jobspy.{source}")
+    scraper_class = getattr(module, {"linkedin": "LinkedIn", "indeed": "Indeed", "glassdoor": "Glassdoor"}[source])
+    create_session = module.create_session
+    original_process = scraper_class._process_job
+    scrapers = {}
+    processed_count = 0
+
+    def session_factory(**kwargs):
+        session = create_session(**kwargs)
+        request = session.request
+        def guarded(method, url, **options):
+            if transport.failure:
+                raise transport.failure
+            if source in {"linkedin", "indeed"}:
+                transport.before("search")
+            options["allow_redirects"] = False
+            response = request(method, url, **options)
+            transport.check(response)
+            if response.status_code >= 400:
+                response.raise_for_status()
+            return response
+        session.request = guarded
+        return session
+
+    def process(scraper, *args, **options):
+        nonlocal processed_count
+        job = original_process(scraper, *args, **options)
+        if job:
+            index = processed_count
+            processed_count += 1
+            scrapers[job.job_url] = scraper
+            row = job.model_dump()
+            row.update(company=row.get("company_name"), site=source,
+                       job_type=", ".join(kind.value[0] for kind in job.job_type) if job.job_type else None,
+                       location=job.location.display_location() if job.location else None)
+            if job.compensation:
+                pay = job.compensation
+                row.update(min_amount=pay.min_amount, max_amount=pay.max_amount,
+                           interval=pay.interval.value if pay.interval else None,
+                           currency=pay.currency, salary_source="direct_data")
+            in_window = source != "indeed" or int(kwargs.get("offset", 0)) <= index < int(kwargs.get("offset", 0)) + int(kwargs.get("results_wanted", 25))
+            if in_window and kwargs.get("on_record"):
+                kwargs["on_record"](row)
+            if source == "linkedin" and kwargs.get("on_progress"):
+                offset = int(kwargs.get("offset", 0)) // 10 * 10
+                kwargs["next_cursor"] = {"offset": min(990, offset + len(scrapers) // 10 * 10)}
+                kwargs["on_progress"](kwargs["next_cursor"])
+        return job
+
+    def glassdoor_detail(_source, row, _format):
+        scraper = scrapers.get(row["job_url"])
+        if scraper is None:
+            raise ValueError("Glassdoor details require the current search session")
+        from urllib.parse import parse_qs, urlparse
+        identity = int(parse_qs(urlparse(row["job_url"]).query)["jl"][0])
+        description = scraper._fetch_job_description(identity)
+        if not description:
+            raise ValueError("Glassdoor search-session detail has no description")
+        return {**row, "description": description}
+    if source == "glassdoor":
+        kwargs["hydrate_row"] = glassdoor_detail
+        kwargs["detail_request_limit"] = min(10, int(kwargs.get("results_wanted", 25)))
+    with patch.object(module, "create_session", session_factory), patch.object(scraper_class, "_process_job", process):
+        yield
+
+
 class UpstreamFailures(logging.Handler):
     """JobSpy sometimes logs a failed request and returns an empty/partial frame.
 
@@ -163,6 +250,8 @@ class UpstreamFailures(logging.Handler):
 
     def emit(self, record: logging.LogRecord) -> None:
         message = record.getMessage()
+        if "request allowance exhausted" in message:
+            return
         kind = classify_error(RuntimeError(message))
         if record.levelno >= logging.ERROR or kind != "error":
             self.failures.append((kind, message))
@@ -172,20 +261,27 @@ class UpstreamFailures(logging.Handler):
         return max(self.failures, key=lambda failure: severity[failure[0]], default=None)
 
 
-def scrape_with_failures(kwargs: dict[str, Any]) -> tuple[Any, tuple[str, str] | None]:
+class RedactProxy(logging.Filter):
+    def filter(self, record):
+        record.msg = safe_message(record.getMessage())
+        record.args = ()
+        return True
+
+
+def scrape_with_failures(kwargs: dict[str, Any]) -> tuple[Any, tuple[str, str, float | None] | None]:
     from sap_sources import SOURCES, scrape_agency
     from public_sources import PUBLIC_SOURCES, scrape_public
 
     if kwargs["site_name"][0] in PUBLIC_SOURCES:
         import pandas as pd
         records, failure = scrape_public(kwargs)
-        return pd.DataFrame(records), ((classify_error(failure), f"{type(failure).__name__}: {failure}") if failure else None)
+        return pd.DataFrame(records), failure_info(failure)
 
     if kwargs["site_name"][0] in SOURCES:
         import pandas as pd
 
         records, failure = scrape_agency(kwargs)
-        return pd.DataFrame(records), ((classify_error(failure), f"{type(failure).__name__}: {failure}") if failure else None)
+        return pd.DataFrame(records), failure_info(failure)
 
     from jobspy import scrape_jobs
 
@@ -193,55 +289,59 @@ def scrape_with_failures(kwargs: dict[str, Any]) -> tuple[Any, tuple[str, str] |
         import pandas as pd
         from details import enrich_board
         records, failure = enrich_board(kwargs["site_name"][0], [], kwargs)
-        return pd.DataFrame(records), ((classify_error(failure), f"{type(failure).__name__}: {failure}") if failure else None)
+        return pd.DataFrame(records), failure_info(failure)
 
     capture = UpstreamFailures()
+    redaction = RedactProxy()
     loggers = [logging.getLogger(name) for name in list(logging.root.manager.loggerDict)
                if name.startswith("JobSpy:")]
     levels = [logger.level for logger in loggers]
     for logger in loggers:
+        logger.addFilter(redaction)
         logger.addHandler(capture)
     try:
         # A backlog reuses this task's description request allowance rather
         # than requesting full search details plus a second set of URLs.
-        backlog = kwargs.get("detail_jobs")
-        search_kwargs = {key: value for key, value in kwargs.items() if key not in {"detail_jobs", "enrich_only"}}
-        if backlog:
-            search_kwargs["fetch_description"] = False
-        import os
-        proxy = os.environ.get("JOB_RADAR_PROXY")
+        search_kwargs = {key: value for key, value in kwargs.items() if key in ALLOWED_TASK_PARAMS or key in {"site_name", "verbose"}}
+        for key in {"enrich_only", "detail_request_limit", "search_request_limit", "search_cursor"}:
+            search_kwargs.pop(key, None)
+        # All JobSpy searches disable its silently failing internal enrichment.
+        search_kwargs["fetch_description"] = False
+        proxy, verify = network_config()
         if proxy:
             search_kwargs["proxies"] = [proxy]
-            if "scrapfly" in proxy:
-                import ssl, urllib3, requests
-                urllib3.disable_warnings()
-                ssl._create_default_https_context = ssl._create_unverified_context
-                orig_init = requests.Session.__init__
-                if not getattr(orig_init, "_scrapfly_patched", False):
-                    def _insecure_init(self, *args, **kwargs):
-                        orig_init(self, *args, **kwargs)
-                        self.verify = False
-                    _insecure_init._scrapfly_patched = True
-                    requests.Session.__init__ = _insecure_init
-                import jobspy.util
-                jobspy.util.RotatingProxySession.request_timeout = 60
-        frame = scrape_jobs(**search_kwargs)
-        failure = capture.worst()
-        if backlog and not failure:
-            import pandas as pd
-            from details import enrich_board
-
-            columns = [column for column in FORWARDED_COLUMNS if column in frame.columns]
-            rows = [{key: clean_value(value) for key, value in row.items()}
-                    for row in frame[columns].to_dict(orient="records")]
-            records, detail_failure = enrich_board(kwargs["site_name"][0], rows, kwargs)
-            frame = pd.DataFrame(records)
-            if detail_failure:
-                failure = (classify_error(detail_failure), f"{type(detail_failure).__name__}: {detail_failure}")
+        if isinstance(verify, str):
+            search_kwargs["ca_cert"] = verify
+        source = kwargs["site_name"][0]
+        transport = kwargs.get("transport") or LinkedInTransport()
+        with jobspy_search(source, transport, kwargs):
+            frame = scrape_jobs(**search_kwargs)
+            if source in {"linkedin", "indeed"}:
+                # Overlap a rounded page boundary rather than skipping cards.
+                offset = int(kwargs.get("offset", 0))
+                count = len(frame)
+                next_offset = offset + (max(10, (count // 10) * 10) if source == "linkedin" else count)
+                cap = 1000 if source == "linkedin" else 300
+                kwargs["next_cursor"] = {"offset": next_offset if count and next_offset < cap else 0}
+                if kwargs.get("on_progress"):
+                    kwargs["on_progress"](kwargs["next_cursor"])
+            failure = failure_info(transport.failure) or capture.worst()
+            if failure and len(failure) == 2:
+                failure = (*failure, None)
+            if source in {"linkedin", "glassdoor"} and kwargs.get("fetch_description") and not failure:
+                import pandas as pd
+                from details import enrich_board
+                columns = [column for column in FORWARDED_COLUMNS if column in frame.columns]
+                rows = [{key: clean_value(value) for key, value in row.items()}
+                        for row in frame[columns].to_dict(orient="records")]
+                records, detail_failure = enrich_board(source, rows, kwargs)
+                frame = pd.DataFrame(records)
+                failure = failure_info(detail_failure)
         return frame, failure
     finally:
         for logger, level in zip(loggers, levels):
             logger.removeHandler(capture)
+            logger.removeFilter(redaction)
             logger.setLevel(level)
         capture.close()
 
@@ -253,76 +353,71 @@ def run_task(task: dict[str, Any], timeout_seconds: int) -> dict[str, Any]:
     kwargs = build_kwargs(task)
     log(f"[task {task_id}] {source} :: {kwargs.get('search_term')!r} @ {kwargs.get('location')!r}")
 
-    # The Node parent enforces the subprocess wall-clock timeout as well.
-    executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"task-{task_id}")
-    future = executor.submit(scrape_with_failures, kwargs)
-    try:
-        frame, upstream_failure = future.result(timeout=timeout_seconds)
-    except FutureTimeout:
-        executor.shutdown(wait=False, cancel_futures=True)
-        return {
-            "type": "task_result",
-            "task_id": task_id,
-            "source": source,
-            "status": "failed",
-            "error_kind": "timeout",
-            "message": f"task exceeded {timeout_seconds}s",
-            "count": 0,
-            "duration_ms": int((time.monotonic() - started) * 1000),
-        }
-    except Exception as exc:  # noqa: BLE001 - reported in-band, never fatal
-        executor.shutdown(wait=False)
-        log(f"[task {task_id}] failed: {traceback.format_exc()}")
-        return {
-            "type": "task_result",
-            "task_id": task_id,
-            "source": source,
-            "status": "failed",
-            "error_kind": classify_error(exc),
-            "message": f"{type(exc).__name__}: {exc}"[:1900],
-            "count": 0,
-            "duration_ms": int((time.monotonic() - started) * 1000),
-        }
-    executor.shutdown(wait=False)
+    collected_urls = set()
+    emitted = set()
+    def stream(row):
+        row = {key: value for key, value in row.items() if key in FORWARDED_COLUMNS}
+        row = {key: clean_value(value) for key, value in row.items()}
+        signature = json.dumps(row, sort_keys=True, default=str)
+        if signature in emitted:
+            return
+        emitted.add(signature)
+        status = row.pop("activity_status", None)
+        reason = row.pop("activity_reason", None)
+        evidence = row.pop("activity_evidence", None)
+        checked_at = row.pop("activity_checked_at", None)
+        valid_through = row.pop("valid_through", None)
+        if status in {"active", "closed"}:
+            emit({"type": "listing_activity", "task_id": task_id, "activity": {
+                "source": source, "source_job_id": row.get("id"), "job_url": row.get("job_url"),
+                "status": status, "evidence": evidence, "checked_at": checked_at,
+                **({"valid_through": valid_through} if valid_through else {}),
+                **({"reason": reason} if reason else {}),
+            }})
+        if status == "closed":
+            return
+        emit(
+            {
+                "type": "job",
+                "task_id": task_id,
+                "source": source,
+                "job": row,
+            }
+        )
+        collected_urls.add(row.get("job_url") or row.get("id"))
 
-    count = 0
-    if frame is not None and not frame.empty:
-        columns = [c for c in FORWARDED_COLUMNS if c in frame.columns]
-        for row in frame[columns].to_dict(orient="records"):
-            row = {key: clean_value(value) for key, value in row.items()}
-            status = row.pop("activity_status", None)
-            reason = row.pop("activity_reason", None)
-            evidence = row.pop("activity_evidence", None)
-            checked_at = row.pop("activity_checked_at", None)
-            valid_through = row.pop("valid_through", None)
-            if status in {"active", "closed"}:
-                emit({"type": "listing_activity", "task_id": task_id, "activity": {
-                    "source": source, "source_job_id": row.get("id"), "job_url": row.get("job_url"),
-                    "status": status, "evidence": evidence, "checked_at": checked_at,
-                    **({"valid_through": valid_through} if valid_through else {}),
-                    **({"reason": reason} if reason else {}),
-                }})
-            if status == "closed":
-                continue
-            emit(
-                {
-                    "type": "job",
-                    "task_id": task_id,
-                    "source": source,
-                    "job": row,
-                }
-            )
-            count += 1
+    def stats(search, detail):
+        emit({"type": "request_stats", "task_id": task_id, "search_requests": search, "detail_requests": detail})
+    kwargs["on_record"] = stream
+    kwargs["on_progress"] = lambda cursor: emit({"type": "search_progress", "task_id": task_id, "cursor": cursor})
+    transport = LinkedInTransport(int(kwargs.get("detail_request_limit", 5)), int(kwargs.get("search_request_limit", 3)), stats)
+    kwargs["transport"] = transport
+    # Synchronous source work: the Node parent kills this entire process at
+    # the task deadline and waits for close before starting any retry.
+    emit({"type": "task_started", "task_id": task_id})
+    try:
+        with use_transport(transport if source == "linkedin" else None):
+            frame, upstream_failure = scrape_with_failures(kwargs)
+        if frame is not None and not frame.empty:
+            for row in frame.to_dict(orient="records"):
+                stream(row)
+    except Exception as exc:
+        upstream_failure = failure_info(exc)
+    if kwargs.get("next_cursor"):
+        kwargs["on_progress"](kwargs["next_cursor"])
 
     return {
         "type": "task_result",
         "task_id": task_id,
         "source": source,
         "status": "failed" if upstream_failure else "succeeded",
-        **({"error_kind": upstream_failure[0], "message": upstream_failure[1][:1900]}
+        **({"error_kind": upstream_failure[0], "message": upstream_failure[1][:1900],
+            **({"retry_after_seconds": upstream_failure[2]} if len(upstream_failure) > 2 and upstream_failure[2] is not None else {})}
            if upstream_failure else {}),
-        "count": count,
+        "count": len(collected_urls),
         "duration_ms": int((time.monotonic() - started) * 1000),
+        "search_requests": transport.search_requests if source == "linkedin" else None,
+        "detail_requests": transport.detail_requests if source == "linkedin" else None,
     }
 
 
@@ -367,7 +462,7 @@ def main() -> int:
         if task["source"] in paused_sources:
             failure = paused_sources[task["source"]]
             emit({"type": "task_result", "task_id": task["task_id"], "source": task["source"],
-                  "status": "failed", "error_kind": failure["error_kind"], "count": 0,
+                  "status": "skipped", "count": 0,
                   "duration_ms": 0, "message": f"source paused after {failure['message']}"[:1900]})
             continue
         if index > 0 and delay_seconds > 0:

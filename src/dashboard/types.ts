@@ -91,7 +91,8 @@ export interface CollectionStatus {
     jobsFound: number;
     jobsNew: number;
     jobsUpdated: number;
-    tasks: { source: string; status: string; resultCount: number; message: string | null }[];
+    tasks: { source: string; status: string; resultCount: number; message: string | null;
+      searchRequests: number | null; detailRequests: number | null }[];
     errors: { source: string | null; kind: string; message: string; occurredAt: string | null }[];
   } | null;
   sources: {

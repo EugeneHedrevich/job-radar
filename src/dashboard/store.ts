@@ -3,6 +3,7 @@ import { loadConfig, resetConfigCache, type AppConfig } from '../config/index.js
 import { cds, db, SELECT, UPDATE, query, queryOne } from '../db/index.js';
 import { listingIsClosed } from '../persist/activity.js';
 import { assessmentCacheKey, currentAssessmentKeys, findCurrentAssessment, rowToAssessment } from '../pipeline/rank.js';
+import { suppressIgnoredWork } from '../pipeline/ignored.js';
 import { APPLICATION_STATUSES, type Activity, type AssessmentKind, type CollectionStatus,
   type JobDetail, type JobList, type JobSummary, type SavedAssessment, type Tracking } from './types.js';
 
@@ -76,7 +77,7 @@ async function summarize(config: AppConfig, job: any, listings: any[], assessmen
   const current = await findCurrentAssessment(config, job, assessments);
   const activity = jobActivity(listings, at);
   const aiKey = assessmentCacheKey(config, job, 'llm');
-  const pending = activity !== 'Closed' && !assessments.some((row) => row.cacheKey === aiKey) &&
+  const pending = job.status !== 'Ignored' && activity !== 'Closed' && !assessments.some((row) => row.cacheKey === aiKey) &&
     queue.find((row) => row.status === 'Pending' && row.cacheKey === aiKey);
   return { ID: job.ID, title: job.title, company: job.company, location: job.location,
     jobType: job.jobType, salaryMin: score(job.salaryMin), salaryMax: score(job.salaryMax),
@@ -174,6 +175,10 @@ export async function updateTracking(id: string, input: unknown): Promise<Tracki
   return cds.tx(async (tx: any) => {
     const affected = await tx.run(UPDATE(db().Jobs).set(patch).where({ ID: id }));
     if (!affected) throw new ApiError(404, 'Vacancy not found');
+    if (patch.cvSent === true) {
+      await tx.run(UPDATE(db().Jobs).set({ status: 'Applied' }).where({ ID: id, status: { in: ['New', 'Interested'] } }));
+    }
+    if (patch.status === 'Ignored') await suppressIgnoredWork(tx, id);
     const row = await tx.run(SELECT.one.from(db().Jobs).where({ ID: id }));
     return tracking(row);
   });
@@ -191,7 +196,8 @@ export async function readCollectionStatus(): Promise<CollectionStatus> {
     heartbeatAt: latestRun.heartbeatAt ?? null, finishedAt: latestRun.finishedAt ?? null,
     trigger: latestRun.trigger ?? null, batchKey: latestRun.batchKey ?? null, status: latestRun.status,
     jobsFound: latestRun.jobsFound ?? 0, jobsNew: latestRun.jobsNew ?? 0, jobsUpdated: latestRun.jobsUpdated ?? 0,
-    tasks: tasks.map((row) => ({ source: row.source, status: row.status, resultCount: row.resultCount, message: row.message ?? null })),
+    tasks: tasks.map((row) => ({ source: row.source, status: row.status, resultCount: row.resultCount, message: row.message ?? null,
+      searchRequests: row.searchRequests ?? null, detailRequests: row.detailRequests ?? null })),
     errors: errors.map((row) => ({ source: row.source ?? null, kind: row.kind, message: row.message, occurredAt: row.occurredAt ?? null })) } : null,
     sources: sources.map((row) => ({ source: row.source, consecutiveFailures: row.consecutiveFailures ?? 0,
       cooldownUntil: row.cooldownUntil ?? null, blocked: Boolean(row.blocked), lastStatus: row.lastStatus ?? null,

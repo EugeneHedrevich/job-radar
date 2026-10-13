@@ -16,6 +16,7 @@ export interface Entities {
   CollectionErrors: any;
   SourceHealth: any;
   DescriptionRotation: any;
+  SearchProgress: any;
   AiAssessmentQueue: any;
   ListingActivityEvents: any;
   Assessments: any;
@@ -90,6 +91,16 @@ async function ensurePersonalTracking(connection: any): Promise<void> {
 }
 
 async function ensureMatchingState(connection: any): Promise<void> {
+  await connection.run(`CREATE TABLE IF NOT EXISTS sap_jobradar_SearchProgress
+    (taskKey VARCHAR(200) PRIMARY KEY NOT NULL, state TEXT, sweepStartedAt TIMESTAMP, updatedAt TIMESTAMP)`);
+  for (const [table, fields] of [
+    ['CollectionTasks', [['searchRequests', 'INTEGER'], ['detailRequests', 'INTEGER']]],
+    ['SourceHealth', [['rateLimitStreak', 'INTEGER DEFAULT 0']]],
+  ] as const) {
+    const existing: Array<{ name: string }> = await connection.run(`PRAGMA table_info(sap_jobradar_${table})`);
+    for (const [field, type] of fields) if (!existing.some((column) => column.name === field))
+      await connection.run(`ALTER TABLE sap_jobradar_${table} ADD COLUMN ${field} ${type}`);
+  }
   const runColumns: Array<{ name: string }> = await connection.run('PRAGMA table_info(sap_jobradar_CollectionRuns)');
   if (!runColumns.some((column) => column.name === 'heartbeatAt')) {
     await connection.run('ALTER TABLE sap_jobradar_CollectionRuns ADD COLUMN heartbeatAt TIMESTAMP');

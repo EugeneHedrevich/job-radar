@@ -13,6 +13,7 @@ from typing import Any
 from urllib.parse import urljoin, urlparse
 
 import requests
+from transport import active_transport, LinkedInTransport, RequestBudgetExhausted, request_kwargs
 from markdownify import markdownify
 from activity import observe, page_closure
 
@@ -36,12 +37,11 @@ def hydrate_board(source: str, row: dict[str, Any], description_format: str) -> 
     if source != "linkedin":
         raise ValueError(f"Unexpected {source} detail URL")
     identity = linkedin_job_id(url)
-    import os
-    proxy = os.environ.get("JOB_RADAR_PROXY")
-    proxies = {"http": proxy, "https": proxy} if proxy else None
-    verify = False if (proxy and "scrapfly" in proxy) else True
+    transport = active_transport.get() or LinkedInTransport()
     for hop in range(4):
-        response = requests.get(url, timeout=60 if proxy else REQUEST_TIMEOUT_SECONDS, allow_redirects=False, proxies=proxies, verify=verify)
+        transport.before("detail")
+        response = requests.get(url, timeout=REQUEST_TIMEOUT_SECONDS, allow_redirects=False, **request_kwargs())
+        transport.check(response)
         if response.status_code in {404, 410}:
             return observe(row, "closed", f"HTTP {response.status_code} for listing detail", f"http_{response.status_code}")
         response.raise_for_status()
@@ -96,7 +96,7 @@ def hydrate_board(source: str, row: dict[str, Any], description_format: str) -> 
 def enrich_board(source: str, rows: list[dict[str, Any]], kwargs: dict[str, Any]) -> tuple[list[dict[str, Any]], BaseException | None]:
     # Existing jobs get a share of the selected task's original request budget.
     # New search results remain visible even when that budget is exhausted.
-    limit = max(1, int(kwargs.get("results_wanted", 25)))
+    limit = max(0, min(int(kwargs.get("detail_request_limit", 5)), int(kwargs.get("results_wanted", 25))))
     cutoff = (datetime.now(timezone.utc) - timedelta(hours=int(kwargs.get("hours_old", 96)))).date()
     result = [dict(row) for row in rows]
     positions = {row.get("job_url"): index for index, row in enumerate(result)}
@@ -115,12 +115,17 @@ def enrich_board(source: str, rows: list[dict[str, Any]], kwargs: dict[str, Any]
             time.sleep(3)
         requests_used += 1
         try:
-            updated = hydrate_board(source, row, kwargs.get("description_format", "markdown"))
+            hydrate = kwargs.get("hydrate_row", hydrate_board)
+            updated = hydrate(source, row, kwargs.get("description_format", "markdown"))
+        except RequestBudgetExhausted:
+            break
         except Exception as exc:
             if isinstance(exc, ValueError):
                 failure = failure or exc
                 continue
             return [item for item in result if item is not None], exc
+        if kwargs.get("on_record"):
+            kwargs["on_record"](updated)
         if not row.get("activity_refresh") and updated.get("activity_status") != "closed" and (updated.get("date_posted") and date.fromisoformat(str(updated["date_posted"])[:10]) < cutoff):
             # Old datePosted only filters freshness; it never closes a listing.
             if url in positions:

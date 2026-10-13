@@ -47,7 +47,7 @@ export async function directionCounters(runId?: string) {
       (['Pending', 'Failed'].includes(pending.status) ||
         pending.status === 'Sending' && pending.claimUntil && new Date(pending.claimUntil) <= new Date());
     entries.push({ job, ...(row ? { assessment: rowToAssessment(row) } : {}),
-      deliveryAvailable: Boolean(!closed.has(job.ID) && !job.isDemo && row && row.fitScore >= config.settings.telegram.min_fit_score &&
+      deliveryAvailable: Boolean(job.status !== 'Ignored' && !closed.has(job.ID) && !job.isDemo && row && row.fitScore >= config.settings.telegram.min_fit_score &&
         row.recommendation !== 'Skip' && !row.hardReject && canClaim) });
   }
   return summarizeDirections(config, entries);

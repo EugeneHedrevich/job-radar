@@ -22,6 +22,12 @@ export async function synchronizeAiQueue(candidates: AiCandidate[], scope: strin
     // from deciding the paid-call order among equally scored new candidates.
     const arrivedAt = new Date().toISOString();
     for (const candidate of candidates) {
+      const job = await tx.run(SELECT.one.from(db().Jobs).columns('status').where({ ID: candidate.jobId }));
+      if (!job || job.status === 'Ignored') {
+        await tx.run(UPDATE(db().AiAssessmentQueue).set({ status: 'Superseded' })
+          .where({ job_ID: candidate.jobId, status: 'Pending' }));
+        continue;
+      }
       const cached = await tx.run(SELECT.one.from(db().Assessments).where({ cacheKey: candidate.cacheKey }));
       const previous = byKey.get(candidate.cacheKey);
       const queuedAt = previous?.queuedAt ?? arrivedAt;

@@ -128,6 +128,11 @@ tbody tr:hover { background: #fafcf8; }
 .date-cell { min-width: 100px; color: #687e5b; font-size: 11px; white-space: nowrap; }
 .demo { margin-left: 6px; color: #938bb1; font-size: 9px; }
 .closed-row { background: #fcfcfa; }
+tbody tr.cv-sent-row { background: #eaf3fb; }
+tbody tr.cv-sent-row:hover { background: #dfedf8; }
+.cv-sent-row td:first-child { box-shadow: inset 3px 0 #6d92b4; }
+.cv-sent-row .tracking-indicator { color: #316b93; font-weight: 600; }
+.salary-euros { white-space: nowrap; }
 .pagination { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 13px 16px; border-top: 1px solid var(--border); }
 .pagination > div { display: flex; align-items: center; gap: 8px; }
 .pagination .small { font-size: 11px; }
