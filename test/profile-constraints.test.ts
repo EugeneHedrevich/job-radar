@@ -3,6 +3,7 @@ import { loadConfig, resetConfigCache, type AppConfig } from '../src/config/inde
 import { validateGapEvidence } from '../src/matching/evidence.js';
 import { assessWithLlm } from '../src/matching/llm.js';
 import { assessWithRules } from '../src/matching/rules.js';
+import { analyzeVacancy } from '../src/matching/analysis.js';
 import { detectEngagement, detectWorkMode, jobText } from '../src/matching/signals.js';
 import { enableReviewAi, reviewAiResponse, reviewJob } from './helpers/review.js';
 let config: AppConfig;
@@ -50,6 +51,12 @@ describe('language obligations use the actual profile and local context', () => 
     });
 });
 describe('employment and limited remote work use description evidence', () => {
+    it('does not restore a negated permanent offer from coarse source metadata', () => {
+        const job = reviewJob('', { jobType: 'permanent', description: 'SAP CAP and Node.js. Fully remote. No permanent employment.' });
+        const analysis = analyzeVacancy(config, job);
+        expect(analysis.engagement).toBe('unknown');
+        expect(assessWithRules(config, job, analysis)).toMatchObject({ hardReject: false, recommendation: 'Review' });
+    });
     it.each(['B2B integrations and EDI experience.', 'A2A/B2B/B2G integration experience.',
         'Customer/supplier B2B integration experience.'])('does not interpret technical terms as an employment offer: %s', (technical) => {
         const job = reviewJob('', { jobType: null, description: `SAP BTP and SAP Integration Suite. ${technical}` });
@@ -82,7 +89,8 @@ describe('employment and limited remote work use description evidence', () => {
         expect(rules).toMatchObject({ recommendation: 'Skip', hardReject: true, fitScore: config.scoring.hard_rejects.score_cap });
         expect(rules.hardRejectReason).toMatch(/Permanent/);
         expect(rules.hardRejectReason).toMatch(/German/);
-        expect(rules.hardRejectReason).toMatch(/12\.0 days\/month/);
+        expect(rules.hardRejectReason).not.toMatch(/days\/month/);
+        expect(rules.missingInformation).toContain('onsite attendance frequency is not stated or unclear');
         for (const skill of ['Commerce Cloud', 'Salesforce', 'EDI']) {
             expect(rules.missingInformation.join(' ')).toContain(`required capability "${skill}"`);
             expect(rules.mandatoryGaps.join(' ')).not.toContain(skill);
@@ -95,9 +103,10 @@ describe('employment and limited remote work use description evidence', () => {
         const fallback = await assessWithLlm(config, job);
         expect(fallback).toMatchObject({ engine: 'rules', recommendation: 'Skip', hardReject: true, mandatoryGaps: rules.mandatoryGaps });
     });
-    it('treats a capped Homeoffice schedule as attendance evidence despite a fully-remote source flag', () => {
+    it('keeps a capped Homeoffice schedule uncertain without assuming a five-day working week', () => {
         const job = reviewJob('Homeoffice (max. 2 Tage pro Woche).');
-        expect(assessWithRules(config, job)).toMatchObject({ recommendation: 'Skip', hardReject: true });
+        expect(assessWithRules(config, job)).toMatchObject({ recommendation: 'Review', hardReject: false });
+        expect(analyzeVacancy(config, job).attendance.mandatory).toBeNull();
         expect(detectWorkMode(config, job, jobText(job))).toBe('hybrid');
     });
     it('evaluates each named experience requirement and keeps preferred uncertainty separate', () => {
@@ -227,24 +236,72 @@ describe('availability and remote eligibility', () => {
     });
 });
 describe('deterministic constraints survive a positive AI answer', () => {
-    it.each(['German optional. French is mandatory.', 'Basic ABAP reading is mandatory.', 'English C1 is required.',
-        'Workload: 50 hours per week is mandatory.', 'Remote, UK residents only.',
-        'Candidates must reside within the EU, excluding Bulgaria.', 'UK right to work is mandatory.'])('preserves %s', async (condition) => {
+    // One matrix verifies the final policy for both engines. Model output is
+    // deliberately optimistic and includes a capability with no profile fact.
+    it.each([
+        ['German optional. French is mandatory.', 'Skip'],
+        ['Basic ABAP reading is mandatory.', 'Review'], ['English C1 is required.', 'Review'],
+        ['Workload: 50 hours per week is mandatory.', 'Skip'], ['Remote, UK residents only.', 'Skip'],
+        ['Candidates must reside within the EU, excluding Bulgaria.', 'Skip'], ['UK right to work is mandatory.', 'Review'],
+        ['Must have SAP CAP / Kafka.', 'Review'], ['SAP CAP + Kafka are mandatory.', 'Review'],
+        ['Requirements:\n- SAP CAP/Kafka', 'Review'], ['Required: Kafka + SAP CAP.', 'Review'],
+        ['SAP CAP + Kafka are not optional.', 'Review'],
+        ['SAP CAP is required and Kafka or RabbitMQ is required.', 'Review'],
+        ['SAP CAP or Kafka is required.', 'Apply'], ['SAP CAP is required; Kafka is optional.', 'Apply'],
+        ['Expert SAPUI5 or Kafka is required.', 'Review'],
+        ['Fully remote; hybrid attendance is optional.', 'Apply'], ['No permanent employment.', 'Apply'],
+        ['Fully remote; optional hybrid attendance with Homeoffice (max. 2 Tage pro Woche).', 'Apply'],
+        ['Homeoffice (max. 2 Tage pro Woche).', 'Review'],
+        ['Optional: five onsite days per month.', 'Apply'], ['Five onsite days per month are not required.', 'Apply'],
+        ['Onsite attendance is optional, at least three days per week.', 'Apply'],
+        ['Five onsite days per month.', 'Review'], ['Hybrid: three onsite days per week.', 'Review'],
+        ['Onsite attendance is required, at least several days per week.', 'Review'],
+        ['Onsite attendance is required, three days per week.', 'Skip'], ['Three days per week onsite, required.', 'Skip'],
+        ['Fully onsite, SAPUI5 is optional.', 'Skip'], ['No remote work allowed. Optional onsite visits.', 'Skip'],
+        ['Expert SAPUI5 knowledge is mandatory.', 'Skip'],
+    ])('preserves %s', async (condition, recommendation) => {
         enableReviewAi(config);
-        vi.stubGlobal('fetch', vi.fn(async () => reviewAiResponse()));
-        const job = reviewJob(condition), rules = assessWithRules(config, job), ai = await assessWithLlm(config, job);
+        vi.stubGlobal('fetch', vi.fn(async () => reviewAiResponse('Apply', 99, { strong_matches: ['CAP', 'Kafka'] })));
+        const job = reviewJob(condition), analysis = analyzeVacancy(config, job);
+        const rules = assessWithRules(config, job, analysis), ai = await assessWithLlm(config, job, analysis);
+        expect(rules.recommendation).toBe(recommendation);
+        expect(ai.recommendation).toBe(recommendation);
         expect(ai.hardReject).toBe(rules.hardReject);
+        expect(ai.strongMatches).not.toContain('Kafka');
+        expect(ai.mandatoryGapEvidence).toEqual(rules.mandatoryGapEvidence);
         for (const missing of rules.missingInformation)
             expect(ai.missingInformation).toContain(missing);
         if (rules.hardReject) {
             expect(ai.recommendation).toBe('Skip');
             expect(ai.fitScore).toBeLessThanOrEqual(30);
         }
-        else {
-            expect(ai.recommendation).toBe('Review');
+        else if (recommendation === 'Review') {
             expect(ai.fitScore).toBeLessThan(75);
+            expect(rules.fitScore).toBeLessThan(75);
+        } else {
+            expect(ai.fitScore).toBeGreaterThanOrEqual(75);
+            expect(analysis.attendance.mandatory).toBeNull();
+        }
+        if (condition.includes('Kafka') && recommendation === 'Review') {
+            expect(analysis.requirements).toContainEqual(expect.objectContaining({ name: 'kafka', profileEvidence: 'unknown' }));
+            expect(ai.mandatoryGaps.join(' ')).not.toMatch(/Kafka/i);
+            expect(ai.missingInformation.join(' ')).toMatch(/required capability "kafka"/);
         }
         const request = vi.mocked(fetch).mock.calls[0];
         expect(JSON.parse(String(request?.[1]?.body)).messages[1].content).toContain('Availability:');
+    });
+    it.each([
+        ['CAP Developer', 'SAP BTP applications with CAP and Node.js.', true],
+        ['CAP Developer', 'Common Agricultural Policy tooling, including SAP BTP reporting.', false],
+        ['CAP Developer', 'Capital allocation tooling with Node.js.', false],
+        ['SAP CAP Internship', 'SAP BTP applications with CAP and Node.js.', false],
+    ])('checks relevance before a direct paid assessment: %s / %s', async (title, description, accepted) => {
+        enableReviewAi(config);
+        vi.stubGlobal('fetch', vi.fn(async () => reviewAiResponse()));
+        const job = reviewJob('', { title, description });
+        expect(analyzeVacancy(config, job).relevance.accepted).toBe(accepted);
+        if (accepted) await assessWithLlm(config, job);
+        else await expect(assessWithLlm(config, job)).rejects.toThrow();
+        expect(fetch).toHaveBeenCalledTimes(accepted ? 1 : 0);
     });
 });

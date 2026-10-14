@@ -3,11 +3,9 @@ import type { AppConfig } from '../config/index.js';
 import { normalizeText, truncate } from '../util/text.js';
 import { log } from '../util/log.js';
 import { assessWithRules, suggestCvVariant } from './rules.js';
-import { jobText } from './signals.js';
-import { unresolvedMandatoryEducation, validateGapEvidence } from './evidence.js';
+import { validateGapEvidence } from './evidence.js';
 import type { AssessmentResult, MatchableJob } from './types.js';
-import { matchingConstraints } from './constraints.js';
-import { abapUncertainty } from './capabilities.js';
+import { analyzeVacancy, finalAssessmentPolicy, type VacancyAnalysis } from './analysis.js';
 
 const llmResponseSchema = z.object({
   fit_score: z.number().min(0).max(100),
@@ -127,6 +125,8 @@ Rules you must follow:
 - Use the actual languages list. Preferred languages never prove mandatory gaps. Professional proficiency does not establish a CEFR level. Preserve independent mandatory language requirements despite optional languages elsewhere.
 - B2B integrations, EDI, A2A/B2B/B2G and customer/supplier integrations are technical experience, not employment contracts. Explicit permanent employment takes precedence over unrelated technical terminology. Real permanent/contract alternatives require review.
 - A source remote flag is coarse metadata, not proof of fully remote work. Follow explicit attendance wording, including German Homeoffice/mobile working capped at a number of days per week.
+- Optional hybrid attendance does not override fully remote work. Never assume a five-day workweek to infer mandatory monthly attendance. Negated permanent employment is not an employment offer.
+- Use the verified vacancy analysis. Evaluate compound requirements individually; a declared CAP capability does not establish Kafka. An explicit choice can be satisfied by one evidenced alternative.
 - Evaluate each required capability separately; a known CPI skill does not establish Commerce Cloud, Salesforce or EDI experience. Undocumented mandatory experience prevents an Apply-level score.
 - Evaluate a focused SAPUI5/Fiori frontend role against the candidate's frontend skills. Do not penalize it for lacking CAP, Node.js or BTP requirements that the vacancy does not ask for. Explicit mandatory ABAP requirements still take precedence.
 - suggested_cv_variant must be exactly one of the allowed CV variant ids.
@@ -137,7 +137,8 @@ export class LlmProviderError extends Error {
 }
 export class LlmRejectedOutputError extends Error {}
 
-export async function assessWithLlm(config: AppConfig, job: MatchableJob): Promise<AssessmentResult> {
+export async function assessWithLlm(config: AppConfig, job: MatchableJob, analysis = analyzeVacancy(config, job)): Promise<AssessmentResult> {
+  if (!analysis.relevance.accepted) throw new LlmUnavailableError(analysis.relevance.reason ?? 'vacancy is outside the configured roles');
   if (!config.llmAvailable || !config.secrets.openaiApiKey) {
     throw new LlmUnavailableError('OPENAI_API_KEY is not configured');
   }
@@ -167,7 +168,11 @@ export async function assessWithLlm(config: AppConfig, job: MatchableJob): Promi
     response_format: { type: 'json_schema', json_schema: JSON_SCHEMA },
     messages: [
       { role: 'system', content: SYSTEM_PROMPT },
-      { role: 'user', content: `CANDIDATE PROFILE\n${profileBrief(config)}` },
+      { role: 'user', content: `CANDIDATE PROFILE\n${profileBrief(config)}\n\nVERIFIED VACANCY ANALYSIS\n${JSON.stringify({
+        engagement: analysis.engagement, workMode: analysis.workMode, attendance: analysis.attendance,
+        requirements: analysis.requirements.map(({ name, kind, profileEvidence }) => ({ name, kind, profileEvidence })),
+        blockers: analysis.hardRejects, missingInformation: analysis.missingInformation,
+      })}` },
       {
         role: 'user',
         content:
@@ -204,28 +209,28 @@ export async function assessWithLlm(config: AppConfig, job: MatchableJob): Promi
   }
 
   const content = (payload as any)?.choices?.[0]?.message?.content;
-  if (typeof content !== 'string') return uncertainFallback(config, job, ['OpenAI response contained no message content']);
+  if (typeof content !== 'string') return uncertainFallback(config, job, analysis, ['OpenAI response contained no message content']);
 
   let parsedJson: unknown;
   try {
     parsedJson = JSON.parse(content);
   } catch {
-    return uncertainFallback(config, job, ['OpenAI response was not valid JSON']);
+    return uncertainFallback(config, job, analysis, ['OpenAI response was not valid JSON']);
   }
   const parsed = llmResponseSchema.safeParse(parsedJson);
   if (!parsed.success) {
-    return uncertainFallback(config, job, ['OpenAI response lacks valid structured requirement evidence or assessment fields']);
+    return uncertainFallback(config, job, analysis, ['OpenAI response lacks valid structured requirement evidence or assessment fields']);
   }
   const data = parsed.data;
   const modelEvidence = data.mandatory_gaps.map((gap) => ({
     requirement: gap.requirement, vacancyQuote: gap.vacancy_quote,
     profilePath: gap.profile_path, profileValue: gap.profile_value,
   }));
-  const unsupported = modelEvidence.map((gap) => validateGapEvidence(config, job, gap))
+  const unsupported = modelEvidence.map((gap) => validateGapEvidence(config, job, gap, analysis))
     .filter((reason): reason is string => reason !== null);
-  if (unsupported.length) return uncertainFallback(config, job, unsupported);
+  if (unsupported.length) return uncertainFallback(config, job, analysis, unsupported);
 
-  const text = jobText(job);
+  const text = analysis.text;
   const allowedVariant = config.cvVariants.variants.some((variant) => variant.id === data.suggested_cv_variant)
     ? data.suggested_cv_variant
     : suggestCvVariant(config, text);
@@ -234,67 +239,47 @@ export async function assessWithLlm(config: AppConfig, job: MatchableJob): Promi
   }
 
   // Deterministic mandatory incompatibilities always win over the model.
-  const deterministic = assessWithRules(config, job);
-  const constraints = matchingConstraints(config, job);
-  const abap = abapUncertainty(config, text.all);
-  let fitScore = Math.round(data.fit_score);
-  let recommendation = data.recommendation;
-  const mandatoryGaps = [...new Set([...deterministic.mandatoryGaps, ...modelEvidence.map((gap) => gap.requirement)])];
-  const mandatoryTerms = config.profile.not_claimed
-    .filter((claim) => deterministic.mandatoryGaps.some((gap) => gap.includes(claim)))
-    .flatMap((claim) => [claim, ...(config.profile.not_claimed_aliases[claim] ?? [])]).map(normalizeText);
+  const deterministic = assessWithRules(config, job, analysis);
+  const policy = finalAssessmentPolicy(config, analysis, data.fit_score, data.recommendation, modelEvidence);
+  const mandatoryGaps = [...new Set([...analysis.mandatoryGaps, ...modelEvidence.map((gap) => gap.requirement)])];
+  const absent = analysis.requirements.filter((item) => item.profileEvidence === 'not_claimed');
+  const matchesRequirement = (gap: string, name: string) => {
+    const terms = [name, ...(config.profile.not_claimed_aliases[name] ?? [])];
+    return terms.some((term) => normalizeText(gap).includes(normalizeText(term)));
+  };
   const preferredGaps = [...new Set([...deterministic.preferredGaps, ...data.preferred_gaps])]
-    .filter((gap) => !mandatoryTerms.some((term) => normalizeText(gap).includes(term)));
-  const knownAbsent = config.profile.not_claimed.flatMap((claim) =>
-    [claim, ...(config.profile.not_claimed_aliases[claim] ?? [])]).map(normalizeText);
+    .filter((gap) => !absent.some((item) => item.kind === 'mandatory' && matchesRequirement(gap, item.name)));
   const uncertainPreferred = data.preferred_gaps.filter((gap) =>
-    !knownAbsent.some((term) => normalizeText(gap).includes(term)));
-  const hardRejectReason = deterministic.hardRejectReason;
-  if (deterministic.hardReject) {
-    fitScore = Math.min(fitScore, config.scoring.hard_rejects.score_cap);
-    recommendation = 'Skip';
-  } else if (mandatoryGaps.length > 0 || constraints.requiresReview || abap.requiresReview || unresolvedMandatoryEducation(config, job) || deterministic.missingInformation.some((item) =>
-    /onsite attendance.*(?:unclear|not stated)|unclear whether onsite attendance/.test(item) ||
-    item.startsWith('unclear whether "') && item.endsWith('" is mandatory') ||
-    item.startsWith('profile evidence for required capability "') && item.endsWith('" is not stated'))) {
-    fitScore = Math.min(fitScore, config.scoring.thresholds.apply - 1);
-    if (recommendation === 'Apply') recommendation = 'Review';
-  } else if (recommendation === 'Apply' && fitScore < config.scoring.thresholds.apply) {
-    // Keep "Apply" honest: it must clear the configured threshold and have no
-    // open mandatory gap.
-    recommendation = 'Review';
-  }
+    !absent.some((item) => matchesRequirement(gap, item.name)));
 
   return {
     engine: 'llm',
     model: llm.model,
     profileVersion: config.profile.version,
-    fitScore,
-    recommendation,
+    ...policy,
     technicalFit: Math.round(data.technical_fit),
     commercialFit: deterministic.hardReject ? Math.min(deterministic.commercialFit, Math.round(data.commercial_fit)) : Math.round(data.commercial_fit),
     locationFit: deterministic.hardReject ? Math.min(deterministic.locationFit, Math.round(data.location_fit)) : Math.round(data.location_fit),
-    strongMatches: data.strong_matches.slice(0, 12),
+    // Confirmed matches require both a vacancy mention and a declared fact.
+    strongMatches: deterministic.strongMatches,
     mandatoryGaps,
     mandatoryGapEvidence: [...deterministic.mandatoryGapEvidence, ...modelEvidence]
       .filter((gap, index, all) => all.findIndex((item) => item.requirement === gap.requirement && item.profilePath === gap.profilePath) === index),
     preferredGaps: preferredGaps.filter((gap) => !uncertainPreferred.includes(gap)),
     missingInformation: [...new Set([...deterministic.missingInformation, ...data.missing_information,
       ...uncertainPreferred.map((gap) => `preferred capability needs profile confirmation: ${gap}`)])],
-    explanation: deterministic.hardReject ? deterministic.explanation : data.explanation,
+    explanation: policy.hardReject ? `Rejected: ${policy.hardRejectReason}` :
+      analysis.requiresReview ? deterministic.explanation : data.explanation,
     suggestedCvVariant: allowedVariant,
-    hardReject: deterministic.hardReject,
-    hardRejectReason,
   };
 }
 
-function uncertainFallback(config: AppConfig, job: MatchableJob, reasons: string[]): AssessmentResult {
-  const result = assessWithRules(config, job);
+function uncertainFallback(config: AppConfig, job: MatchableJob, analysis: VacancyAnalysis, reasons: string[]): AssessmentResult {
+  const result = assessWithRules(config, job, analysis);
   log.warn('Unsupported AI assessment; using rules with uncertainty', { reasons });
   return {
     ...result,
-    fitScore: result.hardReject ? result.fitScore : Math.min(result.fitScore, config.scoring.thresholds.apply - 1),
-    recommendation: result.recommendation === 'Apply' ? 'Review' : result.recommendation,
+    ...finalAssessmentPolicy(config, analysis, result.fitScore, result.recommendation, [], true),
     missingInformation: [...new Set([...result.missingInformation, ...reasons.map((reason) => `AI assessment uncertainty: ${reason}`)])],
     explanation: `${result.explanation} AI assessment could not confirm requirement evidence; rules fallback used.`,
   };

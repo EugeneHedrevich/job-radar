@@ -3,6 +3,7 @@ import { loadConfig, type AppConfig } from '../config/index.js';
 import { cds, db, SELECT, INSERT, UPDATE, query, queryOne } from '../db/index.js';
 import { assessWithLlm, LlmProviderError, LlmRejectedOutputError } from '../matching/llm.js';
 import { assessWithRules, prescreen } from '../matching/rules.js';
+import { analyzeVacancy } from '../matching/analysis.js';
 import type { AssessmentResult, MatchableJob } from '../matching/types.js';
 import { normalizeText, sha256 } from '../util/text.js';
 import { log } from '../util/log.js';
@@ -54,7 +55,7 @@ export function assessmentCacheKey(
   engine: 'rules' | 'llm',
 ): string {
   return sha256(JSON.stringify({
-    revision: 15,
+    revision: 16,
     job: {
       ID: job.ID, title: job.title, company: job.company,
       location: job.location, locationCountry: job.locationCountry,
@@ -110,14 +111,15 @@ export async function rank(options: RankOptions = {}): Promise<RankedJob[]> {
   const stored = await query<MatchableJob>(queryBuilder);
   const closed = await closedJobIds();
   const prepared = stored.filter((job) => !closed.has(job.ID)).map((job) => {
-    const screen = prescreen(config, job);
-    let assessment = assessWithRules(config, job);
+    const analysis = analyzeVacancy(config, job);
+    const screen = prescreen(config, job, analysis);
+    let assessment = assessWithRules(config, job, analysis);
     if (!screen.passed) assessment = { ...assessment,
       fitScore: Math.min(assessment.fitScore, config.scoring.hard_rejects.score_cap),
       recommendation: 'Skip', explanation: `Pre-screen: ${screen.reason}.` };
     const eligible = job.status !== 'Ignored' && !job.isDemo && screen.passed && Boolean(job.description?.trim()) &&
       assessment.fitScore >= config.scoring.thresholds.llm_screen_gate && !assessment.hardReject;
-    return { job, assessment, eligible, llmKey: assessmentCacheKey(config, job, 'llm') };
+    return { job, analysis, assessment, eligible, llmKey: assessmentCacheKey(config, job, 'llm') };
   });
   const queue = await synchronizeAiQueue(prepared.filter((row) => row.eligible).map((row) => ({
     jobId: row.job.ID, cacheKey: row.llmKey, rulesScore: row.assessment.fitScore,
@@ -192,7 +194,7 @@ export async function rank(options: RankOptions = {}): Promise<RankedJob[]> {
       progress.aiCalls += 1;
       await report();
       try {
-        assessment = await assessWithLlm(config, job);
+        assessment = await assessWithLlm(config, job, preparedJob.analysis);
         engine = assessment.engine;
         aiOutcome = engine === 'llm' ? 'Succeeded' : 'RejectedOutput';
         if (aiOutcome === 'RejectedOutput') aiReason = assessment.missingInformation

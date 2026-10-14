@@ -536,7 +536,9 @@ Key behaviours driven by configuration:
   `hard_title_exclusions` cannot be rescued by technical words. Internship/student roles
   and unrelated finance/admin titles are rejected before a new automatic job is inserted.
   Finance process descriptions do not exclude SAP developers. Plausible SAP technical
-  titles without descriptions remain available for bounded enrichment. Duplicate checks
+  titles without descriptions remain available for bounded enrichment. “CAP Developer”
+  is accepted when the description establishes SAP context; unrelated CAP meanings
+  remain excluded. Duplicate checks
   precede this filter so existing listings, notes, applications and reminders can be updated.
   Manual additions remain allowed with a relevance warning. Runs record received,
   accepted and filtered records, with exclusion reasons; duplicate records are counted as
@@ -561,11 +563,18 @@ Key behaviours driven by configuration:
   those slots. Existing incomplete listings share the selected slots for enrichment.
 * **Scoring** — `weights` must sum to 1.0. Bumping `profile.version` or `scoring.version`
   invalidates every cached assessment.
-  Matching revision 15 separates technical B2B/EDI integrations from employment offers;
+  Matching revision 16 shares one vacancy analysis and final policy between rules and
+  AI validation. Confirmed mandatory mismatches override keyword bonuses; unverified
+  requirements remain unknown and cannot become confirmed matches. Compound requirements
+  such as “SAP CAP / Kafka” and “SAP CAP + Kafka” are checked separately, while an
+  explicit “CAP or Kafka” choice can be satisfied by a declared alternative.
+  Technical B2B/EDI integrations are separate from employment offers;
   explicit permanent employment wins over unrelated technical wording, while genuine
   alternatives require review. Source remote flags do not prove fully remote work.
-  Limited Homeoffice/mobile-working wording (including “max. 2 Tage pro Woche”) establishes
-  attendance constraints. Requirements under “Das bringst du mit” include combined German
+  Optional hybrid attendance does not override fully remote work, and negated permanent
+  employment is not an offer. A Homeoffice/mobile-working cap (including “max. 2 Tage pro
+  Woche”) leaves monthly attendance unknown unless the working schedule is stated;
+  it never assumes a five-day week. Requirements under “Das bringst du mit” include combined German
   and English language requirements and use the actual profile language policy.
   `requirement_capabilities` lists technology aliases whose individual requirements need
   checking, including Commerce Cloud, Salesforce and EDI. Undocumented experience is

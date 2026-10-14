@@ -193,6 +193,10 @@ describe('local dashboard controls', () => {
     const id = (await ingestReview(original)).jobIds[0]!;
     await updateTracking(id, { personalNotes: 'Deliberately tracked', cvSent: true, cvSentAt: '2026-10-01T10:00:00Z' });
     const fixture = [original,
+      { ...reviewRecord, id: 'context-cap', title: 'CAP Developer', company: 'SAP Context',
+        description: 'Develop SAP applications using CAP and Node.js.', job_url: 'https://www.linkedin.com/jobs/view/991200' },
+      { ...reviewRecord, id: 'unrelated-cap', title: 'CAP Developer', company: 'Other Context',
+        description: 'Common Agricultural Policy tooling, including SAP BTP reporting.', job_url: 'https://www.linkedin.com/jobs/view/991300' },
       ...['SAP BTP Internship', 'Werkstudent SAP Fiori', 'Finance Administrator SAP CAP'].map((title, index) => ({
         ...reviewRecord, id: `exclude-${index}`, company: `Excluded ${index}`, title,
         job_url: `https://www.linkedin.com/jobs/view/${990000 + index}`,
@@ -201,13 +205,17 @@ describe('local dashboard controls', () => {
         description: null, job_url: 'https://www.linkedin.com/jobs/view/991100' },
     ].map((job) => ({ job, taskId: 'offline', source: 'linkedin' }));
     const collected = await collect({ fixture });
-    expect(collected.ingest).toMatchObject({ created: 1, accepted: 2, filtered: 3 });
+    expect(collected.ingest).toMatchObject({ created: 2, accepted: 3, filtered: 4 });
     await rank({ rulesOnly: true });
     expect(await readJob(id)).toMatchObject({ personalNotes: 'Deliberately tracked', cvSent: true });
     expect(await listReminders(id)).toHaveLength(1);
-    expect(await query(SELECT.from(db().Jobs))).toHaveLength(2);
-    expect(await query(SELECT.from(db().AiAssessmentQueue))).toHaveLength(0);
-    expect((await listJobs()).total).toBe(2); // The personally tracked legacy record remains accessible.
+    expect(await query(SELECT.from(db().Jobs))).toHaveLength(3);
+    // Only the accepted SAP-context CAP role may enter the AI queue; the
+    // personally tracked internship still never becomes a paid candidate.
+    const queued = await query<any>(SELECT.from(db().AiAssessmentQueue));
+    expect(queued).toHaveLength(1);
+    expect(await queryOne(SELECT.from(db().Jobs).where({ ID: queued[0]!.job_ID }))).toMatchObject({ title: 'CAP Developer', company: 'SAP Context' });
+    expect((await listJobs()).total).toBe(3); // The personally tracked legacy record remains accessible.
     const deliberate = await importVacancy({ url: 'https://example.com/student-role', title: 'SAP BTP Internship', description: 'SAP BTP and CAP internship.' });
     expect(deliberate).toMatchObject({ result: 'Added', message: expect.stringContaining('Relevance warning') });
   });

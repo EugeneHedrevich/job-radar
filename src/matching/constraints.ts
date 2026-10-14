@@ -1,7 +1,7 @@
 import type { AppConfig } from '../config/index.js';
 import { extractCountry } from '../normalize/index.js';
 import { normalizeText } from '../util/text.js';
-import { detectEngagement, detectWorkMode, jobText, requirementMentions, requirementSource, sentences } from './signals.js';
+import { detectEngagement, detectWorkMode, jobText, positiveEmploymentMatches, requirementMentions, requirementSource, sentences, type Engagement, type WorkMode } from './signals.js';
 import type { MandatoryGapEvidence, MatchableJob } from './types.js';
 
 export interface MatchingConstraints {
@@ -103,7 +103,7 @@ export function nonSkillConstraintClause(clause: string): boolean {
 
 /** Only explicit requirements can demonstrate a contradiction. Unknown facts
  * and proficiency levels are retained independently of a model's answer. */
-export function matchingConstraints(config: AppConfig, job: MatchableJob): MatchingConstraints {
+export function matchingConstraints(config: AppConfig, job: MatchableJob, context?: { engagement: Engagement; workMode: WorkMode }): MatchingConstraints {
   const result: MatchingConstraints = { hardRejectReasons: [], evidence: [], preferredGaps: [], missing: [], requiresReview: false };
   const source = requirementSource(job);
   const mentionFor = (block: string, term: string) => requirementMentions(config, source, term)
@@ -115,10 +115,9 @@ export function matchingConstraints(config: AppConfig, job: MatchableJob): Match
   };
 
   const engagementText = jobText(job);
-  const offer = detectEngagement(config, job, engagementText);
+  const offer = context?.engagement ?? detectEngagement(config, job, engagementText);
   if (offer === 'permanent' && config.profile.engagement.rejected_types.includes('permanent_only')) {
-    const quote = sentences(source).find((block) => (config.scoring.signals.permanent ?? [])
-      .some((pattern) => new RegExp(pattern, 'i').test(normalizeText(block))));
+    const quote = sentences(source).find((block) => positiveEmploymentMatches(normalizeText(block), config.scoring.signals.permanent ?? []));
     // A coarse jobType alone does not establish a permanent-only offer.
     if (quote) reject('Permanent employment conflicts with the profile’s accepted contract engagements.',
       'permanent employment', quote, 'engagement.rejected_types', config.profile.engagement.rejected_types);
@@ -126,7 +125,7 @@ export function matchingConstraints(config: AppConfig, job: MatchableJob): Match
   else if (offer === 'unknown' && config.profile.engagement.rejected_types.includes('permanent_only')) {
     addMissing('Employment format is not established; confirm compatibility with the accepted contract engagements');
   }
-  if (detectWorkMode(config, job, engagementText) === 'unknown' &&
+  if ((context?.workMode ?? detectWorkMode(config, job, engagementText)) === 'unknown' &&
     config.profile.engagement.acceptable_work_modes.length && !config.profile.engagement.acceptable_work_modes.includes('unknown')) {
     addMissing('Work mode and attendance are not verified; confirm compatibility with the profile');
   }
@@ -240,8 +239,8 @@ export function matchingConstraints(config: AppConfig, job: MatchableJob): Match
 
   const baseCountry = extractCountry(config.profile.identity.base_location);
   const text = jobText(job);
-  const remote = detectWorkMode(config, job, text) === 'fully_remote';
-  const engagement = detectEngagement(config, job, text);
+  const remote = (context?.workMode ?? detectWorkMode(config, job, text)) === 'fully_remote';
+  const engagement = offer;
   const auth = config.profile.work_authorization ?? {};
   let residencyFound = false;
   let authFound = false;

@@ -133,9 +133,10 @@ describe("AI evidence and deterministic safeguards", () => {
                     requirement: 'expert ABAP', vacancy_quote: quote, profile_path: 'skills.limited.0.proficiency', profile_value: 'basic',
                 }] })));
         const [result] = await rank();
-        expect(result!.assessment.engine).toBe('llm');
-        expect(result!.assessment.mandatoryGaps).toContain('expert ABAP');
-        expect(result!.assessment.recommendation).toBe('Review');
+        expect(result!.assessment.engine).toBe('rules');
+        expect(fetch).not.toHaveBeenCalled();
+        expect(result!.assessment.mandatoryGapEvidence).toContainEqual(expect.objectContaining({ requirement: 'expert ABAP' }));
+        expect(result!.assessment.recommendation).toBe('Skip');
         expect(result!.assessment.fitScore).toBeLessThan(loadConfig().scoring.thresholds.apply);
     });
     it('accepts a known insufficient qualification level with verified evidence', async () => {
@@ -147,9 +148,10 @@ describe("AI evidence and deterministic safeguards", () => {
                     requirement: 'master degree', vacancy_quote: quote, profile_path: 'education.0.qualification', profile_value: 'Bachelor',
                 }] })));
         const [result] = await rank();
-        expect(result!.assessment.engine).toBe('llm');
-        expect(result!.assessment.mandatoryGaps).toContain('master degree');
-        expect(result!.assessment.recommendation).toBe('Review');
+        expect(result!.assessment.engine).toBe('rules');
+        expect(fetch).not.toHaveBeenCalled();
+        expect(result!.assessment.mandatoryGapEvidence).toContainEqual(expect.objectContaining({ requirement: 'master degree' }));
+        expect(result!.assessment.recommendation).toBe('Skip');
     });
     it('falls back once for the old unstructured mandatory-gap response format', async () => {
         await ingest();
@@ -189,64 +191,5 @@ describe("AI evidence and deterministic safeguards", () => {
         expect(result.fitScore).toBe(loadConfig().scoring.hard_rejects.score_cap);
         expect(result.mandatoryGaps.join(' ')).toMatch(/ABAP OO development/);
         expect(result.recommendation).toBe('Skip');
-    });
-    it.each([
-        ['Optional: five onsite days per month.', false],
-        ['Five onsite days per month are not required.', false],
-        ['Onsite attendance is optional, at least three days per week.', false],
-        ['Onsite attendance is not required, at least three days per week.', false],
-        ['Five onsite days per month.', true],
-        ['Fully remote. Five days per week onsite are not required.', false],
-        ['Hybrid: three onsite days per week.', true],
-        ['SAPUI5 is required, three onsite days per week.', true],
-    ])('keeps travel obligation semantics after a mocked model assessment: %s', async (attendance, unclear) => {
-        await ingest({ description: `${strong.description}\n${attendance}` });
-        enableLlm(1);
-        const request = vi.fn(async () => llmResponse());
-        vi.stubGlobal('fetch', request);
-        const [result] = await rank();
-        expect(request).toHaveBeenCalledTimes(1);
-        expect(result!.assessment.engine).toBe('llm');
-        expect(result!.assessment.hardReject).toBe(false);
-        expect(result!.assessment.missingInformation.some((item) => /unclear whether onsite attendance/.test(item))).toBe(unclear);
-    });
-    it('preserves an unknown onsite frequency when the model omits missing information', async () => {
-        await ingest({ description: `${strong.description}\nOnsite attendance is required, at least several days per week.` });
-        enableLlm(1);
-        const request = vi.fn(async () => llmResponse());
-        vi.stubGlobal('fetch', request);
-        const [result] = await rank();
-        expect(request).toHaveBeenCalledTimes(1);
-        expect(result!.assessment.hardReject).toBe(false);
-        expect(result!.assessment.missingInformation).toContain('onsite attendance frequency is not stated or unclear');
-    });
-    it.each([
-        'Three onsite days every week are required.',
-        'Onsite attendance is required, three days per week.',
-        'Onsite attendance is required, at least three days per week.',
-        'Three days per week onsite, required.',
-        'SAPUI5 is optional, three onsite days every week are required.',
-    ])('enforces travel limits even for a directly requested model assessment: %s', async (attendance) => {
-        await ingest({ description: `${strong.description}\n${attendance}` });
-        enableLlm(1);
-        vi.stubGlobal('fetch', vi.fn(async () => llmResponse()));
-        const job = await queryOne<any>(SELECT.from(db().Jobs));
-        const result = await assessWithLlm(loadConfig(), job);
-        expect(result.hardReject).toBe(true);
-        expect(result.recommendation).toBe('Skip');
-        expect(result.fitScore).toBeLessThanOrEqual(loadConfig().scoring.hard_rejects.score_cap);
-        expect(result.hardRejectReason).toMatch(/Required onsite attendance \(12\.0 days\/month\)/);
-        expect(result.mandatoryGaps.join(' ')).toMatch(/onsite attendance/);
-    });
-    it.each(['Fully onsite, SAPUI5 is optional.', 'No remote work allowed. Optional onsite visits.'])('preserves a mandatory work-mode rejection after a mocked model response: %s', async (attendance) => {
-        await ingest({ description: `${strong.description}\n${attendance}` });
-        enableLlm(1);
-        vi.stubGlobal('fetch', vi.fn(async () => llmResponse()));
-        const job = await queryOne<any>(SELECT.from(db().Jobs));
-        const result = await assessWithLlm(loadConfig(), job);
-        expect(result.hardReject).toBe(true);
-        expect(result.recommendation).toBe('Skip');
-        expect(result.fitScore).toBeLessThanOrEqual(loadConfig().scoring.hard_rejects.score_cap);
-        expect(result.hardRejectReason).toMatch(/Heavily onsite/);
     });
 });

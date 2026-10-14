@@ -1,23 +1,8 @@
 import type { AppConfig } from '../config/index.js';
 import { normalizeText } from '../util/text.js';
-import { capabilityUncertainty, deterministicGapEvidence, educationUncertainty, unresolvedMandatoryEducation } from './evidence.js';
-import { vacancyRelevance } from './relevance.js';
-import {
-  detectEngagement,
-  detectWorkMode,
-  employmentRuleMatches,
-  hasMandatoryOnsiteCondition,
-  hasUnclearOnsiteFrequency,
-  hourlyRate,
-  jobText,
-  matchesAny,
-  onsiteDaysPerMonth,
-  pattern,
-  type JobText,
-} from './signals.js';
-import type { AssessmentResult, MatchableJob, Recommendation } from './types.js';
-import { abapUncertainty, unclaimedMentions } from './capabilities.js';
-import { matchingConstraints } from './constraints.js';
+import { analyzeVacancy, finalAssessmentPolicy, type VacancyAnalysis } from './analysis.js';
+import { matchesAny, pattern, type JobText } from './signals.js';
+import type { AssessmentResult, MatchableJob } from './types.js';
 
 export interface PrescreenResult {
   passed: boolean;
@@ -25,9 +10,8 @@ export interface PrescreenResult {
 }
 
 /** Stage 1: cheap keyword screening. Nothing here costs an API call. */
-export function prescreen(config: AppConfig, job: MatchableJob): PrescreenResult {
-  const text = jobText(job);
-  const relevant = vacancyRelevance(config, job);
+export function prescreen(config: AppConfig, job: MatchableJob, analysis = analyzeVacancy(config, job)): PrescreenResult {
+  const { text, relevance: relevant } = analysis;
   if (!relevant.accepted) return { passed: false, reason: relevant.reason };
   const { require_any, drop_title_terms, rescue_terms } = config.scoring.prescreen;
 
@@ -41,44 +25,6 @@ export function prescreen(config: AppConfig, job: MatchableJob): PrescreenResult
   return { passed: true, reason: null };
 }
 
-interface HardRejectHit {
-  id: string;
-  reason: string;
-}
-
-export function findHardRejects(config: AppConfig, text: JobText): HardRejectHit[] {
-  const hits: HardRejectHit[] = [];
-  const limit = config.profile.travel?.max_onsite_days_per_month;
-  const requiredDays = onsiteDaysPerMonth(config, text.all).mandatory;
-  if (typeof limit === 'number' && Number.isFinite(limit) && limit >= 0 && requiredDays !== null && requiredDays > limit) {
-    hits.push({ id: 'travel_limit', reason: `Required onsite attendance (${requiredDays.toFixed(1)} days/month) exceeds the profile limit (${limit} days/month).` });
-  }
-  for (const rule of config.scoring.hard_rejects.rules) {
-    // Language checks use actual profile.languages and local obligations.
-    if (rule.id === 'language_barrier') continue;
-    if (rule.id === 'contract_excluded' || rule.id === 'permanent_only') {
-      if (employmentRuleMatches(config, text.all, rule.any)) hits.push({ id: rule.id, reason: rule.reason });
-      continue;
-    }
-    if (rule.id === 'onsite_heavy') {
-      if (hasMandatoryOnsiteCondition(config, text.all)) hits.push({ id: rule.id, reason: rule.reason });
-      continue;
-    }
-    if (rule.id === 'abap_only') {
-      if (/\babap\s+(?:developer|programmer)\b|\brap\s+(?:developer|expert|specialist)\b/.test(text.title) &&
-        !matchesAny(text.all, rule.none)) hits.push({ id: rule.id, reason: rule.reason });
-      continue;
-    }
-    if (!matchesAny(text.all, rule.any)) continue;
-    if (rule.none.length && matchesAny(text.all, rule.none)) continue;
-    hits.push({ id: rule.id, reason: rule.reason });
-  }
-  for (const gap of collectGaps(config, text).mandatoryGaps) {
-    hits.push({ id: 'unclaimed_mandatory_skill', reason: `Required capability is explicitly not claimed in the profile: ${gap}.` });
-  }
-  return hits;
-}
-
 function clamp(value: number, max: number): number {
   return Math.max(0, Math.min(max, Math.round(value)));
 }
@@ -89,25 +35,18 @@ interface TechnicalResult {
   focus: string | null;
 }
 
-function scoreTechnical(config: AppConfig, text: JobText): TechnicalResult {
+function scoreTechnical(config: AppConfig, analysis: VacancyAnalysis): TechnicalResult {
+  const { text } = analysis;
   const groups = config.scoring.technical.groups;
   const matches: string[] = [];
   let total = 0;
 
-  for (const [groupName, skills] of Object.entries(config.profile.skills)) {
-    const weights = groups[groupName];
-    if (!weights) continue; // groups absent from scoring.yaml (e.g. "limited") never add points
-    let groupScore = 0;
-    for (const skill of skills) {
-      const terms = [skill.name, ...(skill.aliases ?? [])];
-      const inTitle = terms.some((term) => pattern(`\\b${escapeRegex(normalizeText(term))}\\b`).test(text.title));
-      const inBody = terms.some((term) => pattern(`\\b${escapeRegex(normalizeText(term))}\\b`).test(text.body));
-      if (!inTitle && !inBody) continue;
-      matches.push(skill.name);
-      groupScore += inTitle
-        ? weights.points_per_hit * config.scoring.technical.title_multiplier
-        : weights.points_per_hit;
-    }
+  for (const [groupName, weights] of Object.entries(groups)) {
+    const evidence = analysis.profileEvidence.filter((item) => item.group === groupName &&
+      !analysis.mandatoryGapEvidence.some((gap) => gap.profilePath === item.profilePath));
+    matches.push(...evidence.map((item) => item.name));
+    const groupScore = evidence.reduce((sum, item) => sum + weights.points_per_hit *
+      (item.inTitle ? config.scoring.technical.title_multiplier : 1), 0);
     total += Math.min(groupScore, weights.cap);
   }
 
@@ -138,13 +77,13 @@ interface DimensionResult {
   missing: string[];
 }
 
-function scoreCommercial(config: AppConfig, job: MatchableJob, text: JobText): DimensionResult {
+function scoreCommercial(config: AppConfig, analysis: VacancyAnalysis): DimensionResult {
   const rules = config.scoring.commercial;
   const notes: string[] = [];
   const missing: string[] = [];
   let score = rules.base;
 
-  const engagement = detectEngagement(config, job, text);
+  const engagement = analysis.engagement;
   if (engagement === 'contract') {
     score += rules.contract_signals_bonus;
     notes.push('contract/freelance engagement indicated');
@@ -157,7 +96,7 @@ function scoreCommercial(config: AppConfig, job: MatchableJob, text: JobText): D
     missing.push('contract type not stated');
   }
 
-  const rate = hourlyRate(config, job);
+  const rate = analysis.rate;
   if (rate.value === null || !rate.comparable) {
     missing.push(rate.note ?? 'rate not stated');
   } else if (rate.value >= config.profile.compensation.target_hourly_rate) {
@@ -171,18 +110,13 @@ function scoreCommercial(config: AppConfig, job: MatchableJob, text: JobText): D
   return { score: clamp(score, rules.max), notes, missing };
 }
 
-function scoreLocation(config: AppConfig, job: MatchableJob, text: JobText): DimensionResult {
+function scoreLocation(config: AppConfig, job: MatchableJob, analysis: VacancyAnalysis): DimensionResult {
   const rules = config.scoring.location;
   const notes: string[] = [];
   const missing: string[] = [];
   let score = rules.base;
 
-  const attendance = onsiteDaysPerMonth(config, text.all);
-  if (attendance.unclear !== null) {
-    missing.push(`unclear whether onsite attendance (${attendance.unclear.toFixed(1)} days/month) is mandatory`);
-  }
-  if (hasUnclearOnsiteFrequency(config, text.all)) missing.push('onsite attendance frequency is not stated or unclear');
-  const mode = detectWorkMode(config, job, text);
+  const mode = analysis.workMode;
   const country = job.locationCountry;
   const preferred = country
     ? config.scoring.preferred_countries.some((name) => name.toLowerCase() === country.toLowerCase())
@@ -222,21 +156,6 @@ function scoreLocation(config: AppConfig, job: MatchableJob, text: JobText): Dim
   return { score: clamp(score, rules.max), notes, missing };
 }
 
-function collectGaps(config: AppConfig, text: JobText) {
-  const mandatoryGaps: string[] = [];
-  const preferredGaps: string[] = [];
-  const unclear: string[] = [];
-  for (const claim of config.profile.not_claimed) {
-    const kinds = unclaimedMentions(config, text.all, claim).map((mention) => mention.kind);
-    const kind = kinds.includes('mandatory') ? 'mandatory' : kinds.includes('preferred') ? 'preferred' : kinds.includes('unclear') ? 'unclear' : null;
-    if (!kind) continue;
-    if (kind === 'mandatory') mandatoryGaps.push(`${claim} appears to be mandatory`);
-    else if (kind === 'preferred') preferredGaps.push(`${claim} is listed as preferred`);
-    else unclear.push(`unclear whether "${claim}" is mandatory`);
-  }
-  return { mandatoryGaps, preferredGaps, unclear };
-}
-
 /** Pick the best configured CV variant. Never invents a variant. */
 export function suggestCvVariant(config: AppConfig, text: JobText): string {
   let best = config.cvVariants.default;
@@ -257,103 +176,35 @@ export function suggestCvVariant(config: AppConfig, text: JobText): string {
   return bestScore <= 0 ? config.cvVariants.default : best;
 }
 
-export function recommendationFor(config: AppConfig, score: number): Recommendation {
-  if (score >= config.scoring.thresholds.apply) return 'Apply';
-  if (score >= config.scoring.thresholds.review) return 'Review';
-  return 'Skip';
-}
-
 /**
  * Stage 2a: deterministic assessment. Always available, even without an LLM key.
  * Unknown facts move a dimension towards the neutral score and are reported in
  * `missingInformation` rather than causing an automatic accept or reject.
  */
-export function assessWithRules(config: AppConfig, job: MatchableJob): AssessmentResult {
-  const text = jobText(job);
-  const hardRejects = findHardRejects(config, text);
-  const relevance = vacancyRelevance(config, job);
-  if (!relevance.accepted) hardRejects.push({ id: 'role_relevance', reason: relevance.reason! });
-  const technical = scoreTechnical(config, text);
-  const commercial = scoreCommercial(config, job, text);
-  const location = scoreLocation(config, job, text);
-  const gaps = collectGaps(config, text);
-  const constraints = matchingConstraints(config, job);
-  const abap = abapUncertainty(config, text.all);
-  for (const reason of constraints.hardRejectReasons) hardRejects.push({ id: 'profile_constraint', reason });
-
+export function assessWithRules(config: AppConfig, job: MatchableJob, analysis = analyzeVacancy(config, job)): AssessmentResult {
+  const technical = scoreTechnical(config, analysis);
+  const commercial = scoreCommercial(config, analysis);
+  const location = scoreLocation(config, job, analysis);
   const weights = config.scoring.weights;
-  let fitScore = Math.round(
-    technical.score * weights.technical + commercial.score * weights.commercial + location.score * weights.location,
-  );
-
-  const capabilityUnknown = capabilityUncertainty(config, job);
-  const undocumentedRequirements = capabilityUnknown.mandatory;
-  const missingInformation = [...commercial.missing, ...location.missing, ...gaps.unclear,
-    ...educationUncertainty(config, job), ...undocumentedRequirements, ...capabilityUnknown.preferred, ...constraints.missing, ...abap.missing];
-  if (!text.hasDescription) {
-    missingInformation.unshift('full description was not retrieved - assessment is based on the title only');
-    fitScore = Math.min(fitScore, config.scoring.uncertainty.cap_without_description);
-  }
-  // A known missing skill with an unresolved obligation needs review before
-  // it can qualify for an application or a high-score notification.
-  const needsReview = Boolean(gaps.unclear.length || undocumentedRequirements.length || constraints.requiresReview || abap.requiresReview ||
-    unresolvedMandatoryEducation(config, job) ||
-    location.missing.some((message) => /onsite attendance/.test(message)));
-  if (needsReview) {
-    fitScore = Math.min(fitScore, config.scoring.thresholds.apply - 1);
-  }
-
-  const mandatoryGaps = [...gaps.mandatoryGaps];
-  let hardRejectReason: string | null = null;
-  if (hardRejects.length) {
-    hardRejectReason = hardRejects.map((hit) => hit.reason).join(' ');
-    for (const hit of hardRejects) {
-      if (hit.id !== 'unclaimed_mandatory_skill') mandatoryGaps.push(hit.reason);
-    }
-    fitScore = Math.min(fitScore, config.scoring.hard_rejects.score_cap);
-  }
-
-  let recommendation: Recommendation = hardRejects.length ? 'Skip' : recommendationFor(config, fitScore);
-  // Never recommend applying to a vacancy whose text we have not read.
-  if (!text.hasDescription && recommendation === 'Apply') recommendation = 'Review';
-  if (mandatoryGaps.length > 0 && recommendation === 'Apply') recommendation = 'Review';
-
+  const policy = finalAssessmentPolicy(config, analysis,
+    technical.score * weights.technical + commercial.score * weights.commercial + location.score * weights.location);
+  const missingInformation = [...new Set([...analysis.missingInformation, ...commercial.missing, ...location.missing])];
   const explanation = buildExplanation({
-    hardRejectReason,
-    needsReview,
-    technicalMatches: technical.matches,
-    technicalFocus: technical.focus,
-    commercialNotes: commercial.notes,
-    locationNotes: location.notes,
-    missing: missingInformation,
+    hardRejectReason: policy.hardRejectReason, needsReview: analysis.requiresReview,
+    commercialNotes: commercial.notes, locationNotes: location.notes, missing: missingInformation,
   });
-
   return {
-    engine: 'rules',
-    model: null,
-    profileVersion: config.profile.version,
-    fitScore,
-    recommendation,
-    technicalFit: technical.score,
-    commercialFit: commercial.score,
-    locationFit: location.score,
-    strongMatches: technical.matches.slice(0, 12),
-    mandatoryGaps,
-    mandatoryGapEvidence: [...deterministicGapEvidence(config, job), ...constraints.evidence],
-    preferredGaps: [...gaps.preferredGaps, ...constraints.preferredGaps],
-    missingInformation,
-    explanation,
-    suggestedCvVariant: suggestCvVariant(config, text),
-    hardReject: hardRejects.length > 0,
-    hardRejectReason,
+    engine: 'rules', model: null, profileVersion: config.profile.version, ...policy,
+    technicalFit: technical.score, commercialFit: commercial.score, locationFit: location.score,
+    strongMatches: technical.matches.slice(0, 12), mandatoryGaps: analysis.mandatoryGaps,
+    mandatoryGapEvidence: analysis.mandatoryGapEvidence, preferredGaps: analysis.preferredGaps,
+    missingInformation, explanation, suggestedCvVariant: suggestCvVariant(config, analysis.text),
   };
 }
 
 function buildExplanation(input: {
   hardRejectReason: string | null;
   needsReview: boolean;
-  technicalMatches: string[];
-  technicalFocus: string | null;
   commercialNotes: string[];
   locationNotes: string[];
   missing: string[];
@@ -363,7 +214,7 @@ function buildExplanation(input: {
   if (input.needsReview) parts.push('Suitability requires review of the unresolved requirements.');
   parts.push(...input.commercialNotes.map(capitalise));
   parts.push(...input.locationNotes.map(capitalise));
-  if (input.missing.length) parts.push(`Unknown: ${input.missing.filter((item) => /required|mandatory|unclear|needs confirmation|not stated/.test(item)).slice(0, 3).join('; ')}.`);
+  if (input.missing.length) parts.push(`Unknown: ${input.missing.slice(0, 3).join('; ')}.`);
   if (!parts.length) parts.push('Suitability is based on the stated employment and working conditions.');
   return parts.join(' ');
 }

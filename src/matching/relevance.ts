@@ -9,9 +9,19 @@ export function vacancyRelevance(config: AppConfig, job: { title: string; descri
   const settings = config.scoring.relevance;
   const excluded = Object.entries(settings.hard_title_exclusions).find(([, patterns]) => matchesAny(text.title, patterns));
   if (excluded) return { accepted: false, reason: excluded[0], family: null };
+  const capTitle = /\bcapm?\s+(?:developer|engineer|architect|development)\b/.test(text.title);
+  if (capTitle && /\b(?:common agricultural policy|community action program|college of american pathologists|capital allocation|corrective action (?:plan|process))\b/.test(text.all)) {
+    return { accepted: false, reason: 'Unrelated CAP meaning', family: null };
+  }
   // A target title can be enriched later, without treating generic CAP/AI/cloud as SAP evidence.
   for (const [family, patterns] of Object.entries(settings.target_role_families)) {
     if (matchesAny(text.title, patterns)) return { accepted: true, reason: null, family };
+  }
+
+  // CAP alone is ambiguous. A technical CAP title plus independently stated
+  // SAP context establishes the intended role, unless it names another CAP.
+  if (capTitle && /\b(?:sap|sapui5|s\/4hana)\b/.test(text.body)) {
+    return { accepted: true, reason: null, family: 'cap' };
   }
   // General SAP technical titles need specific target technology in the description.
   if (/\bsap\b/.test(text.all) && /\b(?:develop\w*|architect\w*|technical|technisch\w*|integration|engineer\w*)\b/.test(text.title)) {

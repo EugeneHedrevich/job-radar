@@ -47,48 +47,66 @@ export function detectEngagement(config: AppConfig, job: MatchableJob, text: Job
     rule.id === 'contract_excluded' || rule.id === 'permanent_only',
   );
   if (exclusions.some((rule) => employmentRuleMatches(config, text.all, rule.any))) return 'permanent';
-  if (matchesAny(text.all, signals.employment_alternatives ?? [])) return 'alternatives';
   const clauses = sentences(text.all);
-  const permanent = clauses.some((clause) => matchesAny(clause, signals.permanent ?? []));
+  const permanent = clauses.some((clause) => positiveEmploymentMatches(clause, signals.permanent ?? []));
   const contract = clauses.some((clause) => {
     // Match each occurrence locally. Technical B2B/contract terminology is not an offer.
     return (signals.contract ?? []).some((source) => [...clause.matchAll(new RegExp(source, 'gi'))].some((match) => {
+      if (negatedOffer(clause, match.index, match[0].length)) return false;
       const local = clause.slice(Math.max(0, match.index - 45), match.index + match[0].length + 65);
       if (/b2b|contract/i.test(match[0]) && matchesAny(local, signals.technical_contract_context ?? []) &&
         !matchesAny(local, signals.employment_context ?? [])) return false;
-      if (/^contract$/i.test(match[0]) && matchesAny(clause, signals.permanent ?? []) &&
+      if (/^contract$/i.test(match[0]) && positiveEmploymentMatches(clause, signals.permanent ?? []) &&
         !/\b(?:or|oder|alternatively|either)\b|\s\/\s/.test(clause)) return false;
       return true;
     }));
   });
+  if (clauses.some((clause) => positiveEmploymentMatches(clause, signals.employment_alternatives ?? [])) && permanent) return 'alternatives';
   if (contract && !permanent) return 'contract';
   if (permanent && !contract) return 'permanent';
   if (contract && permanent) return 'alternatives';
+  const permanentNegated = clauses.some((clause) => matchesAny(clause, signals.permanent ?? []) &&
+    !positiveEmploymentMatches(clause, signals.permanent ?? []));
   const jobType = normalizeText(job.jobType ?? '');
-  if (/\bcontract\b/.test(jobType) && /\b(?:permanent|fulltime)\b/.test(jobType)) return 'alternatives';
+  if (/\bcontract\b/.test(jobType) && /\b(?:permanent|fulltime)\b/.test(jobType) && !permanentNegated) return 'alternatives';
   if (/\bcontract\b/.test(jobType)) return 'contract';
-  if (/\bpermanent\b/.test(jobType)) return 'permanent';
+  if (/\bpermanent\b/.test(jobType) && !permanentNegated) return 'permanent';
   return 'unknown';
 }
 
 /** Negative technical B2B wording is not an exclusion of contractors either. */
 export function employmentRuleMatches(config: AppConfig, text: string, patterns: readonly string[]): boolean {
   return sentences(text).some((clause) => patterns.some((source) => [...clause.matchAll(new RegExp(source, 'gi'))].some((match) => {
+    // Exclusions like "no contractors" are themselves negative offers. Only
+    // negate a positive permanent-only assertion here.
+    if (/permanent|festanstellung|unbefristet/i.test(match[0]) && negatedOffer(clause, match.index, match[0].length)) return false;
     const local = clause.slice(Math.max(0, match.index - 45), match.index + match[0].length + 65);
     return !/b2b|c2c/i.test(match[0]) || !matchesAny(local, config.scoring.signals.technical_contract_context ?? []) ||
       matchesAny(local, config.scoring.signals.employment_context ?? []);
   })));
 }
 
+function negatedOffer(clause: string, start: number, length: number): boolean {
+  return /\b(?:no|not|never|without|kein\w*|nicht)\s+(?:(?:a|an|any|offering|offer|only)\s+){0,2}$/.test(clause.slice(0, start)) ||
+    /^\s+(?:(?:is|are)\s+)?(?:not\s+(?:offered|available|possible)|excluded)\b/.test(clause.slice(start + length));
+}
+
+export function positiveEmploymentMatches(clause: string, sources: readonly string[]): boolean {
+  return sources.some((source) => [...clause.matchAll(pattern(source, 'gi'))]
+    .some((match) => !negatedOffer(clause, match.index, match[0].length)));
+}
+
 export function detectWorkMode(config: AppConfig, job: MatchableJob, text: JobText): WorkMode {
   const signals = config.scoring.signals;
   const attendance = onsiteDaysPerMonth(config, text.all);
   if (Math.max(attendance.mandatory ?? 0, attendance.unclear ?? 0) > 0) return 'hybrid';
-  if (matchesAny(text.all, signals.hybrid ?? [])) return 'hybrid';
-  if (limitedHomeoffice(config, text.all).length) return 'hybrid';
   if (hasMandatoryOnsiteCondition(config, text.all)) return 'onsite';
+  const nonOptional = (sources: readonly string[]) => attendanceClauses(config, text.all).some((clause) =>
+    sources.some((source) => [...clause.matchAll(pattern(source, 'gi'))].some((match) =>
+      attendanceRequirement(config, clause, match.index, match.index + match[0].length) !== 'optional')));
+  if (nonOptional(signals.hybrid ?? []) || limitedHomeoffice(config, text.all).length) return 'hybrid';
   if (matchesAny(text.all, signals.fully_remote ?? [])) return 'fully_remote';
-  if (matchesAny(text.all, signals.onsite ?? [])) return 'onsite';
+  if (nonOptional(signals.onsite ?? [])) return 'onsite';
   // Source flags also cover hybrid work and never establish an attendance schedule.
   return 'unknown';
 }
@@ -140,16 +158,19 @@ export function sentences(text: string): string[] {
     .filter(Boolean);
 }
 
-/** A cap on mobile/home working implies the remaining working days are onsite. */
-export function limitedHomeoffice(config: AppConfig, text: string): Array<{ quote: string; onsiteDays: number }> {
-  return sentences(text).flatMap((quote) => {
-    const clause = normalizeText(quote);
+/** A remote cap establishes limited remote work, not an unstated five-day week. */
+export function limitedHomeoffice(config: AppConfig, text: string): Array<{ quote: string; onsiteDays: number | null }> {
+  return attendanceClauses(config, text).flatMap((clause) => {
     if (!matchesAny(clause, config.scoring.signals.homeoffice ?? [])) return [];
     return (config.scoring.signals.remote_weekly_limits ?? []).flatMap((source) => {
       const match = new RegExp(source, 'i').exec(clause);
       const amount = match ? Number(match[1]) : NaN;
-      if (!Number.isFinite(amount) || amount < 0 || amount > 5) return [];
-      return [{ quote, onsiteDays: (5 - amount) * config.profile.compensation.working_days_per_month / 5 }];
+      if (!match || !Number.isFinite(amount) || amount < 0 ||
+        attendanceRequirement(config, clause, match.index, match.index + match[0].length) === 'optional') return [];
+      const week = /\b(\d+)\s*[- ]day\s+(?:work(?:ing)?\s*)?week\b|\bwork(?:ing)?\s+(\d+)\s+days?\s+per\s+week\b/.exec(clause);
+      const workingDays = week ? Number(week[1] ?? week[2]) : null;
+      return [{ quote: clause, onsiteDays: workingDays !== null && workingDays > amount
+        ? (workingDays - amount) * config.profile.compensation.working_days_per_month / workingDays : null }];
     });
   });
 }
@@ -162,6 +183,7 @@ export interface RequirementMention {
   quote: string;
   start: number;
   end: number;
+  alternativeGroup?: string;
 }
 
 /** Original wording and list boundaries for evidence shared by both engines. */
@@ -179,6 +201,15 @@ function markers<T>(text: string, sources: readonly string[], kind: T): Marker<T
 function nearestMarker<T>(found: Marker<T>[], start: number, end: number): Marker<T> | undefined {
   const distance = (marker: Marker<T>) => Math.max(start - marker.end, marker.start - end, 0);
   return [...found].sort((a, b) => distance(a) - distance(b) || b.start - a.start)[0];
+}
+
+/** Keep an explicit choice separate from neighboring independent conditions. */
+function alternativeGroup(clause: string, position: number): string | null {
+  const boundaries = [...clause.matchAll(/,|\s+(?:and|und|sowie|with)\s+|\s*[+&]\s*/g)];
+  const start = boundaries.filter((match) => match.index + match[0].length <= position).at(-1);
+  const end = boundaries.find((match) => match.index > position);
+  const group = clause.slice(start ? start.index + start[0].length : 0, end?.index ?? clause.length);
+  return /\b(?:or|oder)\b/.test(group) ? group : null;
 }
 
 /** Decide whether a term appears as a must-have or a nice-to-have. */
@@ -235,11 +266,14 @@ export function requirementMentions(config: AppConfig, text: string, term: strin
         '\\bnon\\s+(?:requis|obligatoire)\\b',
         '\\bniet\\s+vereist\\b',
       ], 'preferred' as const);
+      const compulsory = markers(clause, ['\\bnot\\s+optional\\b'], 'mandatory' as const);
       const foundMarkers = [
+        ...compulsory,
         ...markers(clause, mandatoryMarkers, 'mandatory' as const)
           .filter((marker) => !negated.some((negative) => marker.start >= negative.start && marker.end <= negative.end)),
         ...markers(clause, preferredMarkers, 'preferred' as const),
-        ...markers(clause, ['\\b(?:optional|voluntary)\\b'], 'preferred' as const),
+        ...markers(clause, ['\\b(?:optional|voluntary)\\b'], 'preferred' as const)
+          .filter((marker) => !compulsory.some((other) => marker.start < other.end && other.start < marker.end)),
         ...negated,
       ];
       // A marker-only heading applies to subsequent list entries. Ordinary
@@ -264,8 +298,10 @@ export function requirementMentions(config: AppConfig, text: string, term: strin
       }
       for (const occurrence of clause.matchAll(pattern(occurrenceSource, 'g'))) {
         const local = nearestMarker(foundMarkers, occurrence.index, occurrence.index + needle.length);
-        const kind = local?.kind ?? listKind ?? 'unclear';
+        const kind: Requirement = local?.kind ?? listKind ?? 'unclear';
+        const choice = alternativeGroup(clause, occurrence.index);
         mentions.push({ kind, clause, start: occurrence.index, end: occurrence.index + needle.length,
+          ...(choice ? { alternativeGroup: choice } : {}),
           quote: !local && section ? blocks.slice(sectionStart, blockIndex + 1).join('\n') : block });
       }
       if (foundMarkers.length && !attendancePart) listKind = [...foundMarkers].sort((a, b) => b.start - a.start)[0]!.kind;
@@ -340,6 +376,10 @@ function onlyAttendanceDetails(config: AppConfig, fragment: string): boolean {
 }
 
 function relatedAttendanceFragment(config: AppConfig, context: string, fragment: string): boolean {
+  // A Homeoffice cap can describe the same optional hybrid arrangement.
+  // Unrelated optional skills never pass onlyAttendanceDetails.
+  if (/\bhybrid\b/.test(context) && onlyAttendanceDetails(config, context) &&
+    matchesAny(fragment, config.scoring.signals.homeoffice ?? [])) return true;
   if (!onlyAttendanceDetails(config, fragment)) return false;
   const contextMode = pattern(WORK_MODE).test(context);
   const contextSchedule = pattern(SCHEDULE).test(context);
@@ -402,15 +442,17 @@ function onsiteSchedules(clause: string): RegExpExecArray[] {
 
 /** Surface onsite mentions without a reliable, non-optional schedule. */
 export function hasUnclearOnsiteFrequency(config: AppConfig, text: string): boolean {
-  return attendanceClauses(config, text).some((clause) =>
-    onsiteSchedules(clause).length === 0 && markers(clause, [ONSITE], 'onsite').some((marker) =>
+  return limitedHomeoffice(config, text).some((limit) => limit.onsiteDays === null) || attendanceClauses(config, text).some((clause) =>
+    onsiteSchedules(clause).length === 0 && markers(clause, [ONSITE, '\\bhybrid\\b'], 'onsite').some((marker) =>
       attendanceRequirement(config, clause, marker.start, marker.end) !== 'optional'));
 }
 
 /** Keep explicit frequency separate from whether that attendance is required. */
 export function onsiteDaysPerMonth(config: AppConfig, text: string): OnsiteDays {
   const days: OnsiteDays = { mandatory: null, optional: null, unclear: null };
-  for (const limit of limitedHomeoffice(config, text)) days.mandatory = Math.max(days.mandatory ?? 0, limit.onsiteDays);
+  for (const limit of limitedHomeoffice(config, text)) {
+    if (limit.onsiteDays !== null) days.mandatory = Math.max(days.mandatory ?? 0, limit.onsiteDays);
+  }
   for (const clause of attendanceClauses(config, text)) {
     for (const match of onsiteSchedules(clause)) {
       const amount = NUMBER_WORDS[match[2] ?? match[1]!] ?? Number(match[2] ?? match[1]);
