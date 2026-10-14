@@ -13,6 +13,11 @@ export interface RunCollectorOptions {
   onProgress?: (progress: { jobsFound: number; outcomes: TaskOutcome[] }) => Promise<void>;
 }
 
+/** Proof that this attempt could not start a worker or make upstream requests. */
+export class CollectorStartupError extends Error {
+  override readonly name = 'CollectorStartupError';
+}
+
 /**
  * Run the Python collector as a subprocess.
  *
@@ -21,13 +26,13 @@ export interface RunCollectorOptions {
  */
 export async function runCollector(config: AppConfig, options: RunCollectorOptions): Promise<CollectorOutput> {
   if (!existsSync(config.pythonPath)) {
-    throw new Error(
+    throw new CollectorStartupError(
       `Python interpreter not found at ${config.pythonPath}. ` +
         `Create the venv (see README) or set JOB_RADAR_PYTHON.`,
     );
   }
   if (!existsSync(config.collectorScript)) {
-    throw new Error(`Collector script not found at ${config.collectorScript}`);
+    throw new CollectorStartupError(`Collector script not found at ${config.collectorScript}`);
   }
 
   const output: CollectorOutput = { jobspyVersion: undefined, jobs: [], activities: [], outcomes: [], malformedLines: 0 };
@@ -73,6 +78,7 @@ export async function runCollector(config: AppConfig, options: RunCollectorOptio
   };
   armTaskTimer();
 
+  child.stdin.on('error', () => {}); // Failed spawn may also close stdin with EPIPE.
   child.stdin.end(
     JSON.stringify({
       tasks: options.tasks,
@@ -171,8 +177,14 @@ export async function runCollector(config: AppConfig, options: RunCollectorOptio
     // close means the terminated worker and its pipes have stopped. A caller
     // cannot start a retry while the old source is still making requests.
     exitCode = await new Promise<number>((resolve, reject) => {
-      child.on('error', reject);
-      child.on('close', (code) => resolve(code ?? -1));
+      let failure: Error | undefined;
+      child.on('error', (error) => {
+        if (failure) return;
+        // An absent PID proves spawn failed; a worker with a PID may have done I/O.
+        failure = child.pid === undefined ? new CollectorStartupError(`Collector could not start: ${error.message}`, { cause: error }) : error;
+        if (child.pid !== undefined) child.kill('SIGKILL');
+      });
+      child.on('close', (code) => failure ? reject(failure) : resolve(code ?? -1));
     });
   } finally {
     clearTimeout(killTimer);

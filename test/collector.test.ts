@@ -8,7 +8,7 @@ import { activeCooldowns, recordOutcomes } from "../src/collector/health.js";
 import { recoverInterruptedRuns, startRunHeartbeat } from "../src/collector/lifecycle.js";
 import { linkedinCoverage, planBatch, selectBatchIndex, type DescriptionRotation } from "../src/collector/plan.js";
 import { recordQueryRotation, recordSearchProgress, reserveBatchPlan } from "../src/collector/rotation.js";
-import { runCollector } from "../src/collector/run.js";
+import { CollectorStartupError, runCollector } from "../src/collector/run.js";
 import { type CollectorTask } from "../src/collector/types.js";
 import { loadConfig, PROJECT_ROOT, resetConfigCache } from "../src/config/index.js";
 import { cds, connectDb, db, DELETE, disconnectDb, INSERT, query, queryOne, SELECT } from "../src/db/index.js";
@@ -47,7 +47,7 @@ afterEach(() => {
 });
 describe('malformed collector output', () => {
     it('checks fresh heads, avoids repeated Indeed pages and shares canonical LinkedIn details offline', async () => {
-        await promisify(execFile)('python3', [path.join(here, 'helpers/freshness-regression.py')], { cwd: PROJECT_ROOT });
+        await promisify(execFile)(loadConfig().pythonPath, [path.join(here, 'helpers/freshness-regression.py')], { cwd: PROJECT_ROOT });
     });
     it('kills an expired worker before returning, retaining records, request counts and progress', async () => {
         const output = await runCollector(configWith('fake-collector.mjs'), {
@@ -90,14 +90,15 @@ describe('malformed collector output', () => {
         expect(output.outcomes.find((outcome) => outcome.taskId === 'a')!.errorKind).toBe('blocked');
         expect(output.outcomes.find((outcome) => outcome.taskId === 'b')!.errorKind).toBe('parse');
     });
-    it('fails loudly when the interpreter does not exist', async () => {
-        const config = loadConfig();
-        await expect(runCollector({ ...config, pythonPath: '/nonexistent/python' }, {
+    it.each(['pythonPath', 'collectorScript', 'spawn'] as const)('identifies a guaranteed pre-start failure (%s)', async (failure) => {
+        const config = configWith('fake-collector.mjs');
+        const overrides = failure === 'spawn' ? { pythonPath: PROJECT_ROOT } : { [failure]: '/nonexistent/collector-file' };
+        await expect(runCollector({ ...config, ...overrides }, {
             tasks: [task('x')],
             taskTimeoutSeconds: 5,
             delayBetweenTasksSeconds: 0,
             processTimeoutSeconds: 10,
-        })).rejects.toThrow(/not found/i);
+        })).rejects.toBeInstanceOf(CollectorStartupError);
     });
 });
 describe('source failure isolation', () => {
@@ -357,7 +358,7 @@ describe("description-rotation", () => {
             await recordQueryRotation(first, outcomes);
             expect((await reserveBatchPlan(config, options)).tasksBySource.get('linkedin')![0]!.task_id).toBe(tasks[1]!.task_id);
         });
-        it('retains backfill and successful head observations across restart, failure and a 108-hour revisit', async () => {
+        it('retains backfill across head-only revisits and expires only after verified activity becomes idle', async () => {
             const config = loadConfig(), at = new Date('2026-10-01T00:00:00Z');
             const first = await reserveBatchPlan(config, { batchKey: 'cap-broad', onlySources: ['linkedin'], at });
             const task = first.tasksBySource.get('linkedin')![0]!;
@@ -372,7 +373,21 @@ describe("description-rotation", () => {
             expect(resumed.tasksBySource.get('linkedin')!.find(row => row.task_id === task.task_id)?.offset).toBe(20);
             const saved = await queryOne<any>(SELECT.from(db().SearchProgress).where({ taskKey: task.task_id }));
             expect(new Date(saved.headCheckedAt).toISOString()).toBe(at.toISOString());
-            await recordSearchProgress([{ ...outcome, resultCount: 0, nextCursor: { offset: 0 } }], at);
+            const headAt = new Date(at.getTime() + 108 * 3600000);
+            await recordSearchProgress([{ ...outcome, resultCount: 0, nextCursor: undefined }], headAt);
+            const active = await reserveBatchPlan(config, { batchKey: 'cap-broad', onlySources: ['linkedin'],
+                at: new Date(at.getTime() + 216 * 3600000) });
+            expect(active.tasksBySource.get('linkedin')!.find(row => row.task_id === task.task_id))
+                .toMatchObject({ offset: 20, head_only: false });
+            const separate = await queryOne<any>(SELECT.from(db().SearchProgress).where({ taskKey: task.task_id }));
+            expect(new Date(separate.updatedAt).toISOString()).toBe(at.toISOString());
+            expect(new Date(separate.headCheckedAt).toISOString()).toBe(headAt.toISOString());
+            await recordSearchProgress([{ ...outcome, status: 'Failed', resultCount: 0, nextCursor: undefined, headChecked: false }],
+                new Date(at.getTime() + 300 * 3600000));
+            const idleAt = new Date(at.getTime() + 324 * 3600000);
+            const expired = await reserveBatchPlan(config, { batchKey: 'cap-broad', onlySources: ['linkedin'], at: idleAt });
+            expect(expired.tasksBySource.get('linkedin')!.find(row => row.task_id === task.task_id)?.offset).toBeUndefined();
+            await recordSearchProgress([{ ...outcome, resultCount: 0, nextCursor: { offset: 0 } }], idleAt);
             expect(JSON.parse((await queryOne<any>(SELECT.from(db().SearchProgress).where({ taskKey: task.task_id })))!.state)).toEqual({ offset: 0 });
         });
         it('reserves stored descriptions without searches and keeps the two-task budget', async () => {

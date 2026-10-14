@@ -64,7 +64,7 @@ export async function recordOutcomes(config: AppConfig, outcomes: TaskOutcome[],
   const { failure_threshold, cooldown_minutes } = config.searches.resilience;
   const bySource = new Map<string, TaskOutcome[]>();
   for (const outcome of outcomes) {
-    if (outcome.status === 'Skipped') continue;
+    if (outcome.status === 'Skipped' || outcome.errorKind === 'local_startup') continue;
     const list = bySource.get(outcome.source) ?? [];
     list.push(outcome);
     bySource.set(outcome.source, list);

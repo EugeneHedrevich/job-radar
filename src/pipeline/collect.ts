@@ -3,7 +3,7 @@ import { loadConfig } from '../config/index.js';
 import { activeCooldowns, claimSourceRequests, recordOutcomes, settleSourceRequests } from '../collector/health.js';
 import { planBatch, type PlanOptions } from '../collector/plan.js';
 import { recordQueryRotation, recordSearchProgress, reserveBatchPlan } from '../collector/rotation.js';
-import { runCollector } from '../collector/run.js';
+import { CollectorStartupError, runCollector } from '../collector/run.js';
 import type { CollectorJob, CollectorTask, ListingActivity, TaskOutcome } from '../collector/types.js';
 import { cds, db, INSERT, UPDATE } from '../db/index.js';
 import { normalizeJob, type NormalizedJob } from '../normalize/index.js';
@@ -209,7 +209,9 @@ async function collectOwned(options: CollectOptions, claim: CollectionClaim): Pr
           }
           await recordOutcomes(config, tasks.map((task) => outcomeByTask.get(task.task_id)!), new Date(), startedAt);
         } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
+          // A startup error from a retry cannot prove the earlier worker used zero requests.
+          const localStartup = error instanceof CollectorStartupError && sourceOutcomes === undefined;
+          const message = `${localStartup ? 'Local collector startup failed: ' : ''}${error instanceof Error ? error.message : String(error)}`;
           log.error(`Collector failed for source "${source}"`, { message });
           for (const task of tasks) {
             outcomeByTask.set(task.task_id, {
@@ -222,7 +224,8 @@ async function collectOwned(options: CollectOptions, claim: CollectionClaim): Pr
               executed: sourceOutcomes?.some((row) => row.taskId === task.task_id && row.status !== 'Skipped' && row.executed !== false) ?? false,
               resultCount: 0,
               durationMs: 0,
-              errorKind: 'error',
+              errorKind: localStartup ? 'local_startup' : 'error',
+              ...(localStartup ? { searchRequests: 0, detailRequests: 0 } : {}),
               message,
             });
           }

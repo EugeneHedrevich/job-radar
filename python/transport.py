@@ -2,14 +2,16 @@
 from __future__ import annotations
 
 import os
+import atexit
 import re
 import math
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from contextvars import ContextVar
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from functools import lru_cache
 from pathlib import Path
+from types import SimpleNamespace
 from urllib.parse import urlsplit, urlunsplit
 
 
@@ -101,7 +103,7 @@ class LinkedInTransport:
         headers = getattr(response, "headers", None) or {}
         target = str(headers.get("Location", "")) + " " + str(getattr(response, "url", ""))
         body = str(getattr(response, "text", ""))
-        challenge = (re.search(r"/(authwall|login|checkpoint|signup)(?:[/?]|$)", target, re.I) or
+        challenge = (re.search(r"/(authwall|login|checkpoint|signup)(?:[/?\s]|$)", target, re.I) or
                      re.search(r"<title[^>]*>[^<]*(captcha|access denied|just a moment|security verification|log[ -]?in|sign[ -]?in|verify (?:your identity|you are human))", body, re.I) or
                      re.search(r'id=[\"\'](?:challenge-form|captcha)', body, re.I))
         if status in {429, 403} or challenge:
@@ -111,6 +113,66 @@ class LinkedInTransport:
 
 
 active_transport: ContextVar[LinkedInTransport | None] = ContextVar("linkedin_transport", default=None)
+
+
+class LinkedInHttpClient:
+    """One reusable browser session; accounting remains with each task's transport."""
+
+    FINGERPRINT = "chrome120"  # Native fingerprint in pinned curl_cffi 0.16.3.
+
+    def __init__(self):
+        from curl_cffi import requests as curl_requests
+        self._network = request_kwargs()
+        self.session = curl_requests.Session(impersonate=self.FINGERPRINT, default_headers=True,
+            timeout=15, allow_redirects=False, **self._network)
+        self.failure = None
+        self._guard = LinkedInTransport()
+        atexit.register(self.session.close)
+
+    def ensure_allowed(self, transport=None):
+        guard = transport or active_transport.get() or self._guard
+        if self.failure:
+            guard.failure = self.failure
+        if guard.failure:
+            self.failure = guard.failure
+            raise self.failure
+
+    def check(self, response, transport=None, *, headers_only=False):
+        guard = transport or active_transport.get() or self._guard
+        if headers_only:
+            # curl_cffi caches .text; do not read an unfinished streaming body.
+            response = SimpleNamespace(status_code=response.status_code, headers=response.headers,
+                url=response.url, text='')
+        try:
+            guard.check(response)
+        except SourceStopped as exc:
+            self.failure = exc
+            raise
+
+    def request(self, method, url, *, transport=None, **options):
+        self.ensure_allowed(transport)
+        # Let the fingerprint provide its matching UA/client hints and authority.
+        options['headers'] = {key: value for key, value in (options.get('headers') or {}).items()
+            if key.lower() not in {'user-agent', 'authority', 'host'} and not key.lower().startswith('sec-ch-ua')}
+        options.setdefault('timeout', 15)
+        options.update(self._network, impersonate=self.FINGERPRINT, default_headers=True, allow_redirects=False)
+        response = self.session.request(method, url, **options)
+        try:
+            self.check(response, transport, headers_only=bool(options.get('stream')))
+        except SourceStopped:
+            with suppress(Exception):
+                response.close()  # Cleanup must not replace the 429/403/challenge failure.
+            raise
+        return response
+
+    def get(self, url, **options):
+        return self.request('GET', url, **options)
+
+
+@lru_cache(maxsize=1)
+def linkedin_client() -> LinkedInHttpClient:
+    # The source worker is a process boundary; never replace a blocked client.
+    return LinkedInHttpClient()
 
 
 @contextmanager

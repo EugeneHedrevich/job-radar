@@ -74,7 +74,7 @@ export const collectorLineSchema = z.discriminatedUnion('type', [
 ]);
 export type CollectorLine = z.infer<typeof collectorLineSchema>;
 
-export type ErrorKind = 'rate_limit' | 'blocked' | 'timeout' | 'network' | 'error' | 'parse';
+export type ErrorKind = 'rate_limit' | 'blocked' | 'timeout' | 'network' | 'error' | 'parse' | 'local_startup';
 export interface SourceFailure { kind: ErrorKind; message: string; httpStatus?: number; retryAfterSeconds?: number }
 
 export interface CollectorTask {

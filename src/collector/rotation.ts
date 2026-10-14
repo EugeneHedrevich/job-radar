@@ -42,11 +42,13 @@ export async function reserveBatchPlan(config: AppConfig, options: PlanOptions =
       const saved = await tx.run(SELECT.one.from(db().SearchProgress).where({ taskKey: task.task_id }));
       const at = options.at ?? new Date();
       // Expire abandoned cursors, not ongoing sweeps. A normal visit can be
-      // 108 hours apart; allow two full rotations without observed progress.
+      // 108 hours apart; successful head-only visits also verify activity.
       const rotationHours = config.searches.rotation.interval_hours *
         (config.searches.rotation.sequence ?? config.searches.rotation.batches).length;
       const idleHours = Math.max(task.hours_old, rotationHours * 2);
-      if (!saved || at.getTime() - new Date(saved.updatedAt).getTime() >= idleHours * 3_600_000) {
+      const lastActivity = saved ? Math.max(new Date(saved.updatedAt).getTime(),
+        saved.headCheckedAt ? new Date(saved.headCheckedAt).getTime() : 0) : 0;
+      if (!saved || at.getTime() - lastActivity >= idleHours * 3_600_000) {
         const values = { state: '{}', sweepStartedAt: at.toISOString(), updatedAt: at.toISOString() };
         await tx.run(saved ? UPDATE(db().SearchProgress).set(values).where({ taskKey: task.task_id })
           : INSERT.into(db().SearchProgress).entries({ taskKey: task.task_id, ...values }));

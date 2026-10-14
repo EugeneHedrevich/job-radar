@@ -9,7 +9,7 @@ from activity import observe
 from details import hydrate_board, linkedin_job_id
 from public_sources import PUBLIC_SOURCES, safe_public_url, hydrate as hydrate_public
 from sap_sources import SOURCES, safe_url, hydrate as hydrate_agency
-from transport import LinkedInTransport, SourceStopped, request_kwargs, safe_message, use_transport
+from transport import LinkedInTransport, SourceStopped, linkedin_client, request_kwargs, safe_message, use_transport
 from collector import failure_info
 
 MAX_BYTES = 2_000_000
@@ -32,19 +32,24 @@ def lookup(source, url, counts, request_limit=MAX_REQUESTS):
             raise ValueError("Public detail redirect limit reached")
         used += 1
         counts['requests'] = used
-        response = requests.get(target, timeout=10, allow_redirects=False, stream=True, **request_kwargs())
+        fetch = linkedin_client().get if source == 'linkedin' else requests.get
+        response = fetch(target, timeout=10, allow_redirects=False, stream=True, **request_kwargs())
         try:
             if response.status_code in {429, 403}:
                 raise SourceStopped(f'HTTP {response.status_code}', response)
             chunks = []
             size = 0
-            for chunk in response.iter_content(16_384):
+            for chunk in response.iter_content(None if source == 'linkedin' else 16_384):
                 size += len(chunk)
                 if size > MAX_BYTES:
                     raise ValueError("Public detail page is too large")
                 chunks.append(chunk)
-            response._content = b"".join(chunks)
-            response._content_consumed = True
+            if source == 'linkedin':
+                response.content = b"".join(chunks)
+                linkedin_client().check(response)
+            else:
+                response._content = b"".join(chunks)
+                response._content_consumed = True
             return response
         finally:
             response.close()

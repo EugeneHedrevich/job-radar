@@ -12,8 +12,7 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import urljoin, urlparse
 
-import requests
-from transport import active_transport, LinkedInTransport, RequestBudgetExhausted, request_kwargs
+from transport import active_transport, LinkedInTransport, RequestBudgetExhausted, linkedin_client, request_kwargs
 from markdownify import markdownify
 from activity import observe, page_closure
 
@@ -38,10 +37,12 @@ def hydrate_board(source: str, row: dict[str, Any], description_format: str, fet
         raise ValueError(f"Unexpected {source} detail URL")
     identity = linkedin_job_id(url)
     transport = active_transport.get() or LinkedInTransport()
+    client = linkedin_client()
     for hop in range(4):
+        client.ensure_allowed(transport)
         transport.before("detail")
-        response = (fetch_response or requests.get)(url, timeout=REQUEST_TIMEOUT_SECONDS, allow_redirects=False, **request_kwargs())
-        transport.check(response)
+        response = (fetch_response or client.get)(url, timeout=REQUEST_TIMEOUT_SECONDS, allow_redirects=False, **request_kwargs())
+        client.check(response, transport)
         if response.status_code in {404, 410}:
             return observe(row, "closed", f"HTTP {response.status_code} for listing detail", f"http_{response.status_code}")
         response.raise_for_status()

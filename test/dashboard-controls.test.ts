@@ -18,7 +18,9 @@ import { closeTempDb, resetTestDb, useTempDb } from './helpers/db.js';
 import { enableReviewAi, ingestReview, reviewRecord } from './helpers/review.js';
 import { startTestWorker, type TestWorker } from './helpers/worker.js';
 
-vi.mock('../src/collector/run.js', () => ({ runCollector: vi.fn() }));
+vi.mock('../src/collector/run.js', async (original) => ({
+  ...await original<typeof import('../src/collector/run.js')>(), runCollector: vi.fn(),
+}));
 let file: string;
 const workers: TestWorker<{ type: string; acquired?: boolean; operationId?: string; message?: string }>[] = [];
 beforeAll(async () => { file = await useTempDb(); });
@@ -158,6 +160,32 @@ describe('local dashboard controls', () => {
     await collect({ batchKey, onlySources: [source] });
     expect(runCollector).toHaveBeenCalled();
     expect((await queryOne<any>(SELECT.from(db().SourceHealth).where({ source }))).importToken).toBeNull();
+  });
+
+  it.each(['pythonPath', 'collectorScript', 'spawn', 'after-start'] as const)('settles only proven pre-start failures with zero requests (%s)', async (failure) => {
+    const actual = await vi.importActual<typeof import('../src/collector/run.js')>('../src/collector/run.js');
+    const localStartup = failure !== 'after-start';
+    const overrides = failure === 'spawn' ? { pythonPath: PROJECT_ROOT } : failure === 'after-start'
+      ? { pythonPath: process.execPath, collectorScript: `${PROJECT_ROOT}/test/helpers/fake-collector.mjs` }
+      : { [failure]: '/nonexistent/collector-file' };
+    vi.mocked(runCollector).mockImplementation((config, options) => actual.runCollector({ ...config, ...overrides }, {
+      ...options, ...(!localStartup ? { onProgress: async () => { throw new Error('Progress failed after worker startup'); } } : {}),
+    }));
+    const result = await collect({ batchKey: 'cap-broad', onlySources: ['linkedin'] });
+    expect(result.outcome).toBe('Failed');
+    expect(result.outcomes.every(row => row.executed === false)).toBe(true); // Alone this does not prove zero usage.
+    const tasks = vi.mocked(runCollector).mock.calls[0]![1].tasks;
+    const health = await queryOne<any>(SELECT.from(db().SourceHealth).where({ source: 'linkedin' }));
+    expect(health).toMatchObject({ importToken: null, reservedSearch: 0, reservedDetail: 0,
+      searchRequests: localStartup ? 0 : tasks.reduce((sum, task) => sum + task.search_request_limit!, 0),
+      detailRequests: localStartup ? 0 : tasks.reduce((sum, task) => sum + (task.detail_request_limit ?? 0), 0) });
+    expect(result.outcomes.every(row => row.errorKind === (localStartup ? 'local_startup' : 'error'))).toBe(true);
+    if (localStartup) {
+      expect(result.outcomes[0]!.message).toContain('Local collector startup failed');
+      expect(health.cooldownUntil).toBeNull();
+      expect(await query(SELECT.from(db().CollectionErrors).where({ run_ID: result.runId })))
+        .toEqual(result.outcomes.map(() => expect.objectContaining({ kind: 'local_startup' })));
+    }
   });
 
   it('filters new internships despite target keywords, while preserving listing updates and personal history', async () => {

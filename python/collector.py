@@ -34,7 +34,8 @@ from contextlib import contextmanager
 from unittest.mock import patch
 from datetime import date, datetime
 from typing import Any
-from transport import LinkedInTransport, RequestBudgetExhausted, network_config, retry_after, safe_message, use_transport
+from types import SimpleNamespace
+from transport import LinkedInTransport, RequestBudgetExhausted, linkedin_client, network_config, retry_after, safe_message, use_transport
 
 EMIT_LOCK = Lock()
 
@@ -181,9 +182,12 @@ def jobspy_search(source, transport, kwargs):
     scrapers = {}
 
     def session_factory(**session_options):
-        session = create_session(**session_options)
-        request = session.request
+        client = linkedin_client() if source == 'linkedin' else None
+        session = SimpleNamespace(headers={}) if client else create_session(**session_options)
+        request = client.request if client else session.request
         def guarded(method, url, **options):
+            if client:
+                client.ensure_allowed(transport)
             if transport.failure:
                 raise transport.failure
             if source in {"linkedin", "indeed"}:
@@ -192,12 +196,17 @@ def jobspy_search(source, transport, kwargs):
                     raise RequestBudgetExhausted('LinkedIn request allowance exhausted')
                 transport.before("search")
             options["allow_redirects"] = False
+            if client:
+                options['headers'] = {**session.headers, **(options.get('headers') or {})}
+                options['transport'] = transport
             response = request(method, url, **options)
             transport.check(response)
             if response.status_code >= 400:
                 response.raise_for_status()
             return response
         session.request = guarded
+        if client:
+            session.get = lambda url, **options: guarded('GET', url, **options)
         return session
 
     def process(scraper, *args, **options):

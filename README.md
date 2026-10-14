@@ -437,6 +437,17 @@ results and stored candidates to bounded `enrich_board()`. Glassdoor details als
 bounded enrichment, retaining JobSpy's search-session cookies; its stored URLs are not
 replayed separately. Indeed already includes descriptions in search results.
 
+LinkedIn search, hydration and manual detail imports use the same `curl_cffi` client
+implementation. One session is reused within its worker process, with the pinned library's
+native `chrome120` fingerprint and matching browser headers. JobSpy still parses search
+results; its conflicting User-Agent/authority overrides are filtered. The configured proxy,
+trusted CA bundle, certificate verification, request budgets and timeouts still apply.
+A 429/403 or access challenge latches the client closed to further I/O; it never switches
+clients, fingerprints or proxies to retry. Persistent source cooldowns remain in force.
+Browser impersonation is an experiment and does not establish that an IP rate limit is resolved.
+Any live smoke check must be separate and spend at most one search HTTP request, with no
+detail enrichment.
+
 For the first manual backfill, use a **7–14 day window** (`--hours 168` or `--hours 336`)
 and a small `--results` value. For example, run these separately and inspect their counters:
 
@@ -879,6 +890,9 @@ Regression coverage includes current-assessment notification selection and queue
 authoritative vacancy updates, conservative vacancy identity, demo isolation and legacy data
 migration, negative contract statements, mandatory gaps, and LLM request budgets. The tests
 use offline fixtures; no live job boards or Telegram messages are needed.
+The collector fixture uses the configured Python environment and exercises pinned JobSpy
+parsing plus `curl_cffi` responses with all HTTP mocked. Run it independently with
+`./.venv/bin/python -B test/helpers/freshness-regression.py`.
 Concurrency tests hold one sender open while another independent process completes,
 checking that only the claimed notification is delivered.
 Suites group matching, AI evidence, queue/cache, collection, identity, listing activity,
