@@ -105,7 +105,12 @@ export function detectWorkMode(config: AppConfig, job: MatchableJob, text: JobTe
     sources.some((source) => [...clause.matchAll(pattern(source, 'gi'))].some((match) =>
       attendanceRequirement(config, clause, match.index, match.index + match[0].length) !== 'optional')));
   if (nonOptional(signals.hybrid ?? []) || limitedHomeoffice(config, text.all).length) return 'hybrid';
-  if (matchesAny(text.all, signals.fully_remote ?? [])) return 'fully_remote';
+  const remoteSignals = sentences(text.all).flatMap((clause) => (signals.fully_remote ?? []).flatMap((source) =>
+    [...clause.matchAll(pattern(source, 'gi'))].map((match) =>
+      negatedOffer(clause, match.index, match[0].length) ||
+      /\b(?:isn|aren|wasn|weren)['’]t\s*$/.test(clause.slice(0, match.index)))));
+  // Conflicting positive/negative wording leaves attendance unresolved too.
+  if (remoteSignals.includes(false) && !remoteSignals.includes(true)) return 'fully_remote';
   if (nonOptional(signals.onsite ?? [])) return 'onsite';
   // Source flags also cover hybrid work and never establish an attendance schedule.
   return 'unknown';
@@ -184,6 +189,7 @@ export interface RequirementMention {
   start: number;
   end: number;
   alternativeGroup?: string;
+  alternativeStatus?: 'satisfied' | 'incompatible' | 'uncertain';
 }
 
 /** Original wording and list boundaries for evidence shared by both engines. */
@@ -204,8 +210,14 @@ function nearestMarker<T>(found: Marker<T>[], start: number, end: number): Marke
 }
 
 /** Keep an explicit choice separate from neighboring independent conditions. */
-function alternativeGroup(clause: string, position: number): string | null {
-  const boundaries = [...clause.matchAll(/,|\s+(?:and|und|sowie|with)\s+|\s*[+&]\s*/g)];
+function alternativeGroup(config: AppConfig, clause: string, position: number): string | null {
+  const obligation = [...(config.scoring.signals.mandatory_markers ?? []), ...(config.scoring.signals.preferred_markers ?? []),
+    '\\b(?:optional|voluntary)\\b'];
+  // Conjunctions belong inside complete alternatives unless both sides state
+  // independent obligations ("CAP or Kafka required AND ABAP required").
+  const boundaries = [...clause.matchAll(/,|\s+(?:and|und|sowie)\s+/g)].filter((match) =>
+    match[0] === ',' || matchesAny(clause.slice(0, match.index), obligation) &&
+      matchesAny(clause.slice(match.index + match[0].length), obligation));
   const start = boundaries.filter((match) => match.index + match[0].length <= position).at(-1);
   const end = boundaries.find((match) => match.index > position);
   const group = clause.slice(start ? start.index + start[0].length : 0, end?.index ?? clause.length);
@@ -299,7 +311,7 @@ export function requirementMentions(config: AppConfig, text: string, term: strin
       for (const occurrence of clause.matchAll(pattern(occurrenceSource, 'g'))) {
         const local = nearestMarker(foundMarkers, occurrence.index, occurrence.index + needle.length);
         const kind: Requirement = local?.kind ?? listKind ?? 'unclear';
-        const choice = alternativeGroup(clause, occurrence.index);
+        const choice = alternativeGroup(config, clause, occurrence.index);
         mentions.push({ kind, clause, start: occurrence.index, end: occurrence.index + needle.length,
           ...(choice ? { alternativeGroup: choice } : {}),
           quote: !local && section ? blocks.slice(sectionStart, blockIndex + 1).join('\n') : block });
@@ -422,7 +434,9 @@ function mandatoryOnsiteCondition(config: AppConfig, clause: string): boolean {
   // These patterns describe a required work mode or prohibit remote work.
   // Optional/negated markers still take precedence within that requirement.
   return rule.any.some((source) => [...clause.matchAll(new RegExp(source, 'gi'))].some((match) =>
-    attendanceRequirement(config, clause, match.index, match.index + match[0].length, 'mandatory') === 'mandatory'));
+    // Excluding fully remote work still leaves hybrid/attendance unresolved.
+    !/\b(?:fully|100\s*%)\s*$/.test(clause.slice(0, match.index)) &&
+      attendanceRequirement(config, clause, match.index, match.index + match[0].length, 'mandatory') === 'mandatory'));
 }
 
 export function hasMandatoryOnsiteCondition(config: AppConfig, text: string): boolean {

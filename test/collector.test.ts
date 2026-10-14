@@ -14,6 +14,7 @@ import { loadConfig, PROJECT_ROOT, resetConfigCache } from "../src/config/index.
 import { cds, connectDb, db, DELETE, disconnectDb, INSERT, query, queryOne, SELECT } from "../src/db/index.js";
 import { PRIORITY_DIRECTIONS, priorityDirections } from "../src/matching/directions.js";
 import { assessWithRules, prescreen } from "../src/matching/rules.js";
+import * as vacancyAnalysis from "../src/matching/analysis.js";
 import { type MatchableJob } from "../src/matching/types.js";
 import { normalizeJob } from "../src/normalize/index.js";
 import { ingestJobs } from "../src/persist/ingest.js";
@@ -395,7 +396,10 @@ describe("description-rotation", () => {
             await ingestJobs([normalizeJob({ id: '7097972', title: 'SAP BTP Developer',
                     job_url: 'https://www.michaelpage.pl/job-detail/sap-btp/ref/jn-092026-7097972',
                     date_posted: '2026-09-07', description: null }, 'michaelpage')!], { runId: null, seenAt: at });
+            const analyze = vi.spyOn(vacancyAnalysis, 'analyzeVacancy');
             const plan = await reserveBatchPlan(loadConfig(), { enrichOnly: true, onlySources: ['michaelpage'], resultsWanted: 5, at });
+            expect(analyze).toHaveBeenCalledTimes(1); // Both eligibility checks consume one analysis of the stored job.
+            analyze.mockRestore();
             const tasks = [...plan.tasksBySource.values()].flat();
             expect(plan.batchKey).toBe('description-backlog');
             expect(tasks).toHaveLength(1);

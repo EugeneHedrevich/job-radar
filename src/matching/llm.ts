@@ -126,7 +126,7 @@ Rules you must follow:
 - B2B integrations, EDI, A2A/B2B/B2G and customer/supplier integrations are technical experience, not employment contracts. Explicit permanent employment takes precedence over unrelated technical terminology. Real permanent/contract alternatives require review.
 - A source remote flag is coarse metadata, not proof of fully remote work. Follow explicit attendance wording, including German Homeoffice/mobile working capped at a number of days per week.
 - Optional hybrid attendance does not override fully remote work. Never assume a five-day workweek to infer mandatory monthly attendance. Negated permanent employment is not an employment offer.
-- Use the verified vacancy analysis. Evaluate compound requirements individually; a declared CAP capability does not establish Kafka. An explicit choice can be satisfied by one evidenced alternative.
+- Use the verified vacancy analysis. Evaluate compound requirements individually; a declared CAP capability does not establish Kafka or a separately required certification. A choice is satisfied only by one complete evidenced alternative; every contradicted alternative is a blocker, and remaining cases are uncertain.
 - Evaluate each required capability separately; a known CPI skill does not establish Commerce Cloud, Salesforce or EDI experience. Undocumented mandatory experience prevents an Apply-level score.
 - Evaluate a focused SAPUI5/Fiori frontend role against the candidate's frontend skills. Do not penalize it for lacking CAP, Node.js or BTP requirements that the vacancy does not ask for. Explicit mandatory ABAP requirements still take precedence.
 - suggested_cv_variant must be exactly one of the allowed CV variant ids.
@@ -171,6 +171,9 @@ export async function assessWithLlm(config: AppConfig, job: MatchableJob, analys
       { role: 'user', content: `CANDIDATE PROFILE\n${profileBrief(config)}\n\nVERIFIED VACANCY ANALYSIS\n${JSON.stringify({
         engagement: analysis.engagement, workMode: analysis.workMode, attendance: analysis.attendance,
         requirements: analysis.requirements.map(({ name, kind, profileEvidence }) => ({ name, kind, profileEvidence })),
+        alternatives: [...new Map(analysis.requirements.flatMap((item) => item.mentions)
+          .filter((mention) => mention.alternativeStatus).map((mention) =>
+            [mention.alternativeGroup, { requirement: mention.alternativeGroup, status: mention.alternativeStatus }])).values()],
         blockers: analysis.hardRejects, missingInformation: analysis.missingInformation,
       })}` },
       {

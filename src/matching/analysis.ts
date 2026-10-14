@@ -68,7 +68,9 @@ export function analyzeVacancy(config: AppConfig, job: MatchableJob): VacancyAna
   if (!relevance.accepted) hardRejects.push({ id: 'role_relevance', reason: relevance.reason! });
   hardRejects.push(...constraints.hardRejectReasons.map((reason) => ({ id: 'profile_constraint', reason })));
   const unclaimed = requirements.filter((item) => item.profileEvidence === 'not_claimed');
-  const mandatoryGaps = unclaimed.filter((item) => item.kind === 'mandatory').map((item) => `${item.name} appears to be mandatory`);
+  const mandatoryGaps = unclaimed.filter((item) => item.kind === 'mandatory' &&
+    item.mentions.some((mention) => mention.kind === 'mandatory' && !mention.alternativeGroup))
+    .map((item) => `${item.name} appears to be mandatory`);
   mandatoryGaps.push(...hardRejects.filter((hit) => hit.id !== 'unclaimed_mandatory_skill').map((hit) => hit.reason));
   const unclear = unclaimed.filter((item) => item.kind === 'unclear').map((item) => `unclear whether "${item.name}" is mandatory`);
   const capabilityUnknown = requirementUncertainty(requirements);
@@ -118,7 +120,12 @@ export function findHardRejects(config: AppConfig, text: JobText, requirements: 
       : matchesAny(text.all, rule.any) && !matchesAny(text.all, rule.none);
     if (matched) hits.push({ id: rule.id, reason: rule.reason });
   }
-  for (const item of requirements.filter((item) => item.profileEvidence === 'not_claimed' && item.kind === 'mandatory')) {
+  const incompatibleGroups = new Set(requirements.flatMap((item) => item.mentions
+    .filter((mention) => mention.alternativeStatus === 'incompatible').map((mention) => mention.alternativeGroup!)));
+  for (const group of incompatibleGroups) hits.push({ id: 'mandatory_alternatives',
+    reason: `Every alternative in the mandatory requirement "${group}" conflicts with the declared profile.` });
+  for (const item of requirements.filter((item) => item.profileEvidence === 'not_claimed' && item.kind === 'mandatory' &&
+    item.mentions.some((mention) => mention.kind === 'mandatory' && !mention.alternativeGroup))) {
     hits.push({ id: 'unclaimed_mandatory_skill', reason: `Required capability is explicitly not claimed in the profile: ${item.name} appears to be mandatory.` });
   }
   return hits;

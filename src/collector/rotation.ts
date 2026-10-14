@@ -2,6 +2,7 @@ import { z } from 'zod';
 import type { AppConfig } from '../config/index.js';
 import { collectorJobSchema, type CollectorTask, type TaskOutcome } from './types.js';
 import { assessWithRules, prescreen } from '../matching/rules.js';
+import { analyzeVacancy } from '../matching/analysis.js';
 import { cds, db, INSERT, SELECT, UPDATE } from '../db/index.js';
 import { planBatch, type PlanOptions, type PlannedBatch } from './plan.js';
 import { expireListingDeadlines, listingIsClosed } from '../persist/activity.js';
@@ -110,7 +111,9 @@ async function reserveEnrichment(tx: any, config: AppConfig, plan: PlannedBatch,
   const stored = await tx.run(`SELECT * FROM sap_jobradar_Jobs WHERE COALESCE(isDemo, 0) = 0`);
   const eligible = new Map<string, any>();
   for (const job of stored) {
-    if (job.status !== 'Ignored' && prescreen(config, job).passed && !assessWithRules(config, job).hardReject) eligible.set(job.ID, job);
+    if (job.status === 'Ignored') continue;
+    const analysis = analyzeVacancy(config, job);
+    if (prescreen(config, job, analysis).passed && !assessWithRules(config, job, analysis).hardReject) eligible.set(job.ID, job);
   }
   if (!eligible.size) return;
   for (const [source, tasks] of plan.tasksBySource) {

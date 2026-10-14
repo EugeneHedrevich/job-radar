@@ -2,7 +2,7 @@ import type { AppConfig } from '../config/index.js';
 import { normalizeText } from '../util/text.js';
 import { jobText, onsiteDaysPerMonth, requirementKind, requirementSource, sentences, type Requirement, type RequirementMention } from './signals.js';
 import type { MandatoryGapEvidence, MatchableJob } from './types.js';
-import { capabilityMentions, unclaimedMentions } from './capabilities.js';
+import { capabilityMentions, capabilityParts, unclaimedMentions, unknownCapabilityFragments } from './capabilities.js';
 import { constraintRequirementMatches, nonSkillConstraintClause } from './constraints.js';
 import { analyzeVacancy, type VacancyAnalysis } from './analysis.js';
 
@@ -91,9 +91,6 @@ export function capabilityRequirements(config: AppConfig, job: MatchableJob): Ca
   const text = requirementSource(job);
   const declared = Object.values(config.profile.skills).flatMap((skills) => skills.flatMap((skill) => [skill.name, ...(skill.aliases ?? [])]));
   const absent = config.profile.not_claimed.flatMap((claim) => [claim, ...(config.profile.not_claimed_aliases[claim] ?? [])]);
-  const known = [
-    ...declared, ...absent,
-  ];
   const result: CapabilityRequirement[] = [];
   const add = (name: string, terms: string[], mentions = terms.flatMap((term) => capabilityMentions(config, text, term)),
     evidence?: CapabilityRequirement['profileEvidence']) => {
@@ -112,28 +109,15 @@ export function capabilityRequirements(config: AppConfig, job: MatchableJob): Ca
   for (const [name, terms] of Object.entries(config.scoring.requirement_capabilities)) {
     add(name, terms);
   }
-  const markers = ['\\bnot\\s+optional\\b', '\\b(?:not|never)\\s+(?:strictly\\s+)?(?:required|mandatory|essential|compulsory|obligatory)\\b',
-    ...(config.scoring.signals.mandatory_markers ?? []), ...(config.scoring.signals.preferred_markers ?? []), '\\b(?:optional|voluntary)\\b'];
   const catalogTerms = Object.values(config.scoring.requirement_capabilities).flat();
-  // Protect aliases such as S/4HANA and FI/CO; / and + between capabilities
-  // are compound separators, not evidence that one member satisfies another.
-  const compounds = sentences(text).map((part) => part.replace(/\bS\/4(?:HANA)?\b|\bFI\/CO\b|\bSD\/MM\b|\bAMDP\/CDS\b/gi,
-    (term) => term.replaceAll('/', '∕')));
-  for (const part of compounds.flatMap((part) => part.split(/,|\s+(?:and|und|sowie|as well as|or|oder)\s+|\s*[&/+|]\s*/))) {
-    const clause = normalizeText(part.replaceAll('∕', '/'));
+  for (const clause of sentences(text).flatMap(capabilityParts)) {
     if (nonSkillConstraintClause(clause)) continue;
-    let capability = clause;
-    for (const marker of markers) capability = capability.replace(new RegExp(marker, 'gi'), '');
-    capability = capability.replace(/^(?:[-*#]+|\d+[.)])\s*/, '')
-      .replace(/\b(?:is|are|a|an|skills?|requirements?|qualifications?)\b/g, '').replace(/[:.!?]/g, '').trim();
-    // Connective fragments under a requirement heading are not capabilities.
-    if (/^(?:(?:and|or|with|in|of|to|for|the|you|will|we|our|your|mit|und|oder|der|die|das)\s*)+$/.test(capability)) continue;
-    if (!capability || termsInQuote(capability, known) || termsInQuote(capability, catalogTerms) ||
-      /\b(?:onsite|on-site|office|remote|hybrid|travel|attendance|relocat\w*|days?|hours?|years?|degree|bachelor\w*|master\w*|education|studium|ausbildung|abschluss\w*|english|german|french|dutch|italian|spanish|polish|russian|language|rate|salary|contract|freelanc\w*|b2b|work permit|authori[sz]ation)\b/.test(capability)) continue;
-    const mentions = capabilityMentions(config, text, capability);
-    // Bare unrecognised words in duties are not new requirements. An explicit
-    // alternative with no established profile evidence still needs review.
-    if (mentions.some((item) => item.kind !== 'unclear' || /\b(?:or|oder)\b/.test(item.clause))) add(capability, [capability], mentions);
+    for (const capability of unknownCapabilityFragments(config, clause)) {
+      if ((!/\b(?:certificat\w*|certified)\b/.test(capability) && termsInQuote(capability, catalogTerms)) ||
+        /\b(?:onsite|on-site|office|remote|hybrid|travel|attendance|relocat\w*|days?|hours?|years?|degree|bachelor\w*|master\w*|education|studium|ausbildung|abschluss\w*|english|german|french|dutch|italian|spanish|polish|russian|language|rate|salary|contract|freelanc\w*|b2b|work permit|authori[sz]ation)\b/.test(capability)) continue;
+      const mentions = capabilityMentions(config, text, capability);
+      if (mentions.some((item) => item.kind !== 'unclear' || item.alternativeGroup)) add(capability, [capability], mentions, 'unknown');
+    }
   }
   return result.filter((item, index) => result.findIndex((other) => other.name === item.name) === index);
 }

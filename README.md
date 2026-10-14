@@ -563,15 +563,19 @@ Key behaviours driven by configuration:
   those slots. Existing incomplete listings share the selected slots for enrichment.
 * **Scoring** — `weights` must sum to 1.0. Bumping `profile.version` or `scoring.version`
   invalidates every cached assessment.
-  Matching revision 16 shares one vacancy analysis and final policy between rules and
+  Matching revision 17 shares one vacancy analysis and final policy between rules and
   AI validation. Confirmed mandatory mismatches override keyword bonuses; unverified
   requirements remain unknown and cannot become confirmed matches. Compound requirements
   such as “SAP CAP / Kafka” and “SAP CAP + Kafka” are checked separately, while an
-  explicit “CAP or Kafka” choice can be satisfied by a declared alternative.
+  explicit “CAP or Kafka” choice is satisfied only when one complete alternative is
+  evidenced. If every alternative is explicitly contradicted, the requirement is a
+  blocker; otherwise it remains uncertain. Known skills do not hide other requirements
+  in the same fragment or establish a separately required certification.
   Technical B2B/EDI integrations are separate from employment offers;
   explicit permanent employment wins over unrelated technical wording, while genuine
   alternatives require review. Source remote flags do not prove fully remote work.
-  Optional hybrid attendance does not override fully remote work, and negated permanent
+  Optional hybrid attendance does not override fully remote work. “Not fully remote”
+  earns no remote bonus and leaves attendance unresolved until a schedule is stated. Negated permanent
   employment is not an offer. A Homeoffice/mobile-working cap (including “max. 2 Tage pro
   Woche”) leaves monthly attendance unknown unless the working schedule is stated;
   it never assumes a five-day week. Requirements under “Das bringst du mit” include combined German

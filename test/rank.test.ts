@@ -6,6 +6,7 @@ import { ingestJobs } from '../src/persist/ingest.js';
 import { notify } from '../src/pipeline/notify.js';
 import { rank, readTop } from '../src/pipeline/rank.js';
 import { requeueAssessment } from '../src/dashboard/assessment-retry.js';
+import * as vacancyAnalysis from '../src/matching/analysis.js';
 import { closeTempDb, resetTestDb, useTempDb } from './helpers/db.js';
 import { enableReviewAi, ingestReview as ingest, reviewAiResponse as llmResponse, reviewAiResponse, reviewRecord, reviewSender as sender, reviewRecord as strong } from './helpers/review.js';
 let file: string;
@@ -101,8 +102,13 @@ describe('durable AI work across collection cycles', () => {
         await disconnectDb(); resetConfigCache(); await connectDb(file); enableReviewAi();
         await rank({ jobIds: [], includePendingAi: true });
         expect(request).toHaveBeenCalledTimes(1);
+        const analyze = vi.spyOn(vacancyAnalysis, 'analyzeVacancy');
         expect(await requeueAssessment(seeded.jobIds[0]!)).toMatchObject({ queued: true, alreadyQueued: false });
+        expect(analyze).toHaveBeenCalledTimes(1); // Prescreen, rules and locked revalidation share these inputs.
+        analyze.mockClear();
         expect(await requeueAssessment(seeded.jobIds[0]!)).toMatchObject({ queued: true, alreadyQueued: true });
+        expect(analyze).toHaveBeenCalledTimes(1);
+        analyze.mockRestore();
         expect(request).toHaveBeenCalledTimes(1); // Requeue itself never calls the provider.
         request.mockImplementation(async () => llmResponse());
         await rank({ jobIds: [], includePendingAi: true });

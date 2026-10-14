@@ -244,12 +244,30 @@ describe('deterministic constraints survive a positive AI answer', () => {
         ['Workload: 50 hours per week is mandatory.', 'Skip'], ['Remote, UK residents only.', 'Skip'],
         ['Candidates must reside within the EU, excluding Bulgaria.', 'Skip'], ['UK right to work is mandatory.', 'Review'],
         ['Must have SAP CAP / Kafka.', 'Review'], ['SAP CAP + Kafka are mandatory.', 'Review'],
+        ['SAP CAP experience with Kafka is mandatory.', 'Review'],
+        ['Requirements:\nSAP CAP experience with Kafka', 'Review'],
+        ['SAP CAP certification is mandatory.', 'Review'],
+        ['SAP CAP experience and SAP CAP certification are required.', 'Review'],
+        ['Certification in SAP CAP is mandatory.', 'Review'],
+        ['ABAP OO development certification is mandatory.', 'Review'],
         ['Requirements:\n- SAP CAP/Kafka', 'Review'], ['Required: Kafka + SAP CAP.', 'Review'],
         ['SAP CAP + Kafka are not optional.', 'Review'],
         ['SAP CAP is required and Kafka or RabbitMQ is required.', 'Review'],
         ['SAP CAP or Kafka is required.', 'Apply'], ['SAP CAP is required; Kafka is optional.', 'Apply'],
         ['Expert SAPUI5 or Kafka is required.', 'Review'],
+        ['ABAP OO development or RAP ownership is required.', 'Skip', 'incompatible'],
+        ['SAP CAP + ABAP OO development or RAP ownership is required.', 'Skip', 'incompatible'],
+        ['SAP CAP experience with Kafka or ABAP OO development is required.', 'Review', 'uncertain'],
+        ['ABAP OO development or SAP CAP with Kafka is required.', 'Review', 'uncertain'],
+        ['ABAP OO development or SAP CAP + Node.js is required.', 'Apply', 'satisfied'],
+        ['SAP CAP / Node.js or RAP ownership is required.', 'Apply', 'satisfied'],
+        ['SAP CAP certification or RAP ownership is required.', 'Review', 'uncertain'],
+        ['SAP CAP certification or Node.js experience is required.', 'Apply', 'satisfied'],
+        ['SAP CAP experience and certification or RAP ownership is required.', 'Review', 'uncertain'],
+        ['SAP CAP or Kafka is required and RAP ownership is required.', 'Skip', 'satisfied'],
         ['Fully remote; hybrid attendance is optional.', 'Apply'], ['No permanent employment.', 'Apply'],
+        ['This position is not fully remote.', 'Review'], ["This position isn't fully remote.", 'Review'],
+        ['Fully remote is not offered.', 'Review'],
         ['Fully remote; optional hybrid attendance with Homeoffice (max. 2 Tage pro Woche).', 'Apply'],
         ['Homeoffice (max. 2 Tage pro Woche).', 'Review'],
         ['Optional: five onsite days per month.', 'Apply'], ['Five onsite days per month are not required.', 'Apply'],
@@ -259,9 +277,9 @@ describe('deterministic constraints survive a positive AI answer', () => {
         ['Onsite attendance is required, three days per week.', 'Skip'], ['Three days per week onsite, required.', 'Skip'],
         ['Fully onsite, SAPUI5 is optional.', 'Skip'], ['No remote work allowed. Optional onsite visits.', 'Skip'],
         ['Expert SAPUI5 knowledge is mandatory.', 'Skip'],
-    ])('preserves %s', async (condition, recommendation) => {
+    ])('preserves %s', async (condition, recommendation, alternativeStatus?: string) => {
         enableReviewAi(config);
-        vi.stubGlobal('fetch', vi.fn(async () => reviewAiResponse('Apply', 99, { strong_matches: ['CAP', 'Kafka'] })));
+        vi.stubGlobal('fetch', vi.fn(async () => reviewAiResponse('Apply', 99, { strong_matches: ['CAP', 'Kafka', 'SAP CAP certification'] })));
         const job = reviewJob(condition), analysis = analyzeVacancy(config, job);
         const rules = assessWithRules(config, job, analysis), ai = await assessWithLlm(config, job, analysis);
         expect(rules.recommendation).toBe(recommendation);
@@ -269,6 +287,7 @@ describe('deterministic constraints survive a positive AI answer', () => {
         expect(ai.hardReject).toBe(rules.hardReject);
         expect(ai.strongMatches).not.toContain('Kafka');
         expect(ai.mandatoryGapEvidence).toEqual(rules.mandatoryGapEvidence);
+        for (const evidence of ai.mandatoryGapEvidence) expect(validateGapEvidence(config, job, evidence, analysis)).toBeNull();
         for (const missing of rules.missingInformation)
             expect(ai.missingInformation).toContain(missing);
         if (rules.hardReject) {
@@ -286,6 +305,25 @@ describe('deterministic constraints survive a positive AI answer', () => {
             expect(analysis.requirements).toContainEqual(expect.objectContaining({ name: 'kafka', profileEvidence: 'unknown' }));
             expect(ai.mandatoryGaps.join(' ')).not.toMatch(/Kafka/i);
             expect(ai.missingInformation.join(' ')).toMatch(/required capability "kafka"/);
+        }
+        if (condition.includes('certification')) {
+            const certification = analysis.requirements.find((item) => item.name.includes('certification'));
+            expect(certification).toMatchObject({ profileEvidence: 'unknown' });
+            expect(ai.strongMatches).not.toContain(certification!.name);
+            expect(ai.strongMatches.some((match) => /certificat/i.test(match))).toBe(false);
+            expect(ai.missingInformation.join(' ')).toMatch(/profile evidence.*certification/);
+        }
+        if (alternativeStatus) {
+            const groups = analysis.requirements.flatMap((item) => item.mentions).filter((mention) => mention.alternativeGroup);
+            expect(groups.length).toBeGreaterThan(0);
+            expect(new Set(groups.map((mention) => mention.alternativeStatus))).toEqual(new Set([alternativeStatus]));
+            if (alternativeStatus === 'incompatible') expect(rules.hardRejectReason).toContain('Every alternative');
+        }
+        if (/not fully remote|isn't fully remote|fully remote is not offered/i.test(condition)) {
+            expect(analysis.workMode).toBe('unknown');
+            expect(analysis.attendance.mandatory).toBeNull();
+            expect(rules.locationFit).toBeLessThan(assessWithRules(config, reviewJob()).locationFit);
+            expect(ai.missingInformation.join(' ')).toMatch(/Work mode and attendance are not verified/);
         }
         const request = vi.mocked(fetch).mock.calls[0];
         expect(JSON.parse(String(request?.[1]?.body)).messages[1].content).toContain('Availability:');

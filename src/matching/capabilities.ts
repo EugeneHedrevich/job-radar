@@ -1,6 +1,6 @@
 import type { AppConfig } from '../config/index.js';
 import { normalizeText } from '../util/text.js';
-import { requirementMentions, type RequirementMention } from './signals.js';
+import { pattern, requirementMentions, type RequirementMention } from './signals.js';
 
 type AbapCapability = 'basic' | 'development' | 'unspecified';
 
@@ -13,21 +13,78 @@ export function requiredProficiency(mention: RequirementMention): string | undef
     /^\s+(?:(?:knowledge|experience|proficiency|at|level|is|are|must|be|an?|the)\s+){0,5}(expert|advanced|strong|working|basic)\b/.exec(suffix)?.[1];
 }
 
-/** One evidenced choice satisfies an explicit skill alternative. Insufficient
- * proficiency or basic ABAP never establishes an independent development skill. */
+export function capabilityParts(text: string): string[] {
+  return normalizeText(text).replace(/\bS\/4(?:HANA)?\b|\bFI\/CO\b|\bSD\/MM\b|\bAMDP\/CDS\b/gi, (term) => term.replaceAll('/', '∕'))
+    .split(/,|\s+(?:and|und|sowie|as well as|with|using|or|oder)\s+|\s*[&/+|]\s*/)
+    .map((part) => part.replaceAll('∕', '/'));
+}
+
+function certificationMention(mention: RequirementMention): boolean {
+  const boundaries = [...mention.clause.matchAll(/,|\s+(?:and|und|sowie|with|using|or|oder)\s+|\s*[&/+|]\s*/g)];
+  const start = boundaries.filter((match) => match.index + match[0].length <= mention.start).at(-1);
+  const end = boundaries.find((match) => match.index >= mention.end);
+  return /\b(?:certificat\w*|certified)\b/.test(mention.clause.slice(start ? start.index + start[0].length : 0, end?.index));
+}
+
+/** Retain the unmatched members of a fragment instead of letting a known skill
+ * hide them. A certification is a separate fact, never proved by a skill. */
+export function unknownCapabilityFragments(config: AppConfig, fragment: string): string[] {
+  const known = [...Object.values(config.profile.skills).flatMap((skills) => skills.flatMap((skill) => [skill.name, ...(skill.aliases ?? [])])),
+    ...config.profile.not_claimed.flatMap((claim) => [claim, ...(config.profile.not_claimed_aliases[claim] ?? [])])];
+  const markers = ['\\bnot\\s+optional\\b', '\\b(?:not|never)\\s+(?:strictly\\s+)?(?:required|mandatory|essential|compulsory|obligatory)\\b',
+    ...(config.scoring.signals.mandatory_markers ?? []), ...(config.scoring.signals.preferred_markers ?? []), '\\b(?:optional|voluntary)\\b'];
+  return capabilityParts(fragment).flatMap((part) => {
+    let residual = part;
+    for (const marker of markers) residual = residual.replace(pattern(marker, 'gi'), ' ');
+    const certification = /\b(?:certificat\w*|certified)\b/.test(residual);
+    if (!certification) for (const term of [...known].sort((a, b) => b.length - a.length)) {
+      const escaped = normalizeText(term).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      residual = residual.replace(pattern(`(?<![a-z0-9])(?:sap\\s+)?${escaped}(?![a-z0-9])`, 'g'), ' ');
+    }
+    residual = residual.replace(/^(?:[-*#]+|\d+[.)])\s*/, '')
+      .replace(/\b(?:is|are|be|a|an|skills?|requirements?|qualifications?)\b/g, ' ')
+      .replace(/[():.!?]/g, ' ').replace(/\s+/g, ' ').trim();
+    if (!certification) residual = residual.replace(/^(?:(?:experience|knowledge|understanding|proficiency|expert|advanced|strong|basic|working|deep|extensive|in|of|with|at|least|either|both|the)\s+)+/, '')
+      .replace(/\s+(?:(?:experience|knowledge|understanding|proficiency|development|in|of|with|at|level)\s*)+$/, '').trim();
+    if (!residual || /^(?:experience|knowledge|understanding|proficiency|development|expert|advanced|strong|basic|working|in|of|with|and|or|either|both|the|to|for|you|will|we|our|your|mit|und|oder|der|die|das)(?:\s+(?:of|in|with|and|or|the|will))*$/.test(residual)) return [];
+    return [residual];
+  });
+}
+
+export type AlternativeStatus = 'satisfied' | 'incompatible' | 'uncertain';
+
+/** Each alternative is a conjunction: all its requirements need evidence. */
+export function capabilityAlternativeStatus(config: AppConfig, group: string): AlternativeStatus {
+  const alternatives = group.split(/\b(?:or|oder)\b/).map((branch): AlternativeStatus => {
+    let evidenced = false;
+    let contradicted = false;
+    for (const skill of Object.values(config.profile.skills).flat()) {
+      for (const choice of [skill.name, ...(skill.aliases ?? [])].flatMap((alias) => requirementMentions(config, branch, alias))) {
+        // The mention may name a required certificate, rather than capability.
+        if (certificationMention(choice)) continue;
+        const level = requiredProficiency(choice);
+        if (level && proficiencyLevels[level]! > proficiencyLevels[skill.proficiency]!) contradicted = true;
+        else evidenced = true;
+      }
+    }
+    for (const claim of config.profile.not_claimed) {
+      const mentions = [claim, ...(config.profile.not_claimed_aliases[claim] ?? [])]
+        .flatMap((alias) => requirementMentions(config, branch, alias));
+      if (mentions.some((mention) => unclaimedCapability(claim, mention))) contradicted = true;
+    }
+    if (contradicted) return 'incompatible';
+    return evidenced && !unknownCapabilityFragments(config, branch).length ? 'satisfied' : 'uncertain';
+  });
+  return alternatives.includes('satisfied') ? 'satisfied' : alternatives.every((state) => state === 'incompatible') ? 'incompatible' : 'uncertain';
+}
+
+/** Preserve group uncertainty/contradiction on every member for both engines. */
 export function capabilityMentions(config: AppConfig, text: string, term: string): RequirementMention[] {
   return requirementMentions(config, text, term).map((mention) => {
     if (mention.kind !== 'mandatory' || !mention.alternativeGroup) return mention;
-    const satisfied = Object.values(config.profile.skills).flat().some((skill) =>
-      [skill.name, ...(skill.aliases ?? [])].some((alias) =>
-        requirementMentions(config, mention.alternativeGroup!, alias).some((choice) => {
-          const level = requiredProficiency(choice);
-          if (level && proficiencyLevels[level]! > proficiencyLevels[skill.proficiency]!) return false;
-          if (normalizeText(skill.name) === 'abap' && abapCapability(choice) === 'development' &&
-            config.profile.not_claimed.some((claim) => /abap.*development/i.test(claim))) return false;
-          return true;
-        })));
-    return { ...mention, kind: satisfied ? 'preferred' : 'unclear' };
+    const alternativeStatus = capabilityAlternativeStatus(config, mention.alternativeGroup);
+    return { ...mention, alternativeStatus, kind: alternativeStatus === 'satisfied' ? 'preferred' :
+      alternativeStatus === 'incompatible' ? 'mandatory' : 'unclear' };
   });
 }
 
@@ -60,11 +117,14 @@ export function abapCapability(mention: RequirementMention): AbapCapability {
 export function unclaimedMentions(config: AppConfig, text: string, claim: string): RequirementMention[] {
   const mentions = [claim, ...(config.profile.not_claimed_aliases[claim] ?? [])]
     .flatMap((term) => capabilityMentions(config, text, term));
-  if (!/abap/i.test(claim)) return mentions;
-  return mentions.filter((mention) => {
-    const capability = abapCapability(mention);
-    return capability === 'development' || capability === 'unspecified' && claim !== 'ABAP development';
-  });
+  return mentions.filter((mention) => unclaimedCapability(claim, mention));
+}
+
+function unclaimedCapability(claim: string, mention: RequirementMention): boolean {
+  if (certificationMention(mention)) return false;
+  if (!/abap/i.test(claim)) return true;
+  const capability = abapCapability(mention);
+  return capability === 'development' || capability === 'unspecified' && claim !== 'ABAP development';
 }
 
 export function abapUncertainty(config: AppConfig, text: string): { missing: string[]; requiresReview: boolean } {
