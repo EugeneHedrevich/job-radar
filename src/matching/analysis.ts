@@ -74,9 +74,12 @@ export function analyzeVacancy(config: AppConfig, job: MatchableJob): VacancyAna
   mandatoryGaps.push(...hardRejects.filter((hit) => hit.id !== 'unclaimed_mandatory_skill').map((hit) => hit.reason));
   const unclear = unclaimed.filter((item) => item.kind === 'unclear').map((item) => `unclear whether "${item.name}" is mandatory`);
   const capabilityUnknown = requirementUncertainty(requirements);
+  const unresolvedGroups = [...new Set(requirements.flatMap((item) => item.mentions)
+    .filter((mention) => mention.alternativeStatus === 'uncertain').map((mention) => mention.alternativeGroup!))];
   const abap = abapUncertainty(config, text.all);
   const missingInformation = [...unclear, ...capabilityUnknown.mandatory, ...capabilityUnknown.preferred,
-    ...educationUncertainty(config, job), ...constraints.missing, ...abap.missing];
+    ...educationUncertainty(config, job), ...constraints.missing, ...abap.missing,
+    ...unresolvedGroups.map((group) => `mandatory capability grouping "${group}" needs confirmation`)];
   if (attendance.unclear !== null) missingInformation.push(`unclear whether onsite attendance (${attendance.unclear.toFixed(1)} days/month) is mandatory`);
   if (unclearAttendance) missingInformation.push('onsite attendance frequency is not stated or unclear');
   if (!text.hasDescription) missingInformation.unshift('full description was not retrieved - assessment is based on the title only');
@@ -85,7 +88,7 @@ export function analyzeVacancy(config: AppConfig, job: MatchableJob): VacancyAna
     mandatoryGapEvidence: [...deterministicGapEvidence(config, job), ...constraints.evidence],
     preferredGaps: [...unclaimed.filter((item) => item.kind === 'preferred').map((item) => `${item.name} is listed as preferred`), ...constraints.preferredGaps],
     missingInformation: [...new Set(missingInformation)],
-    requiresReview: !text.hasDescription || Boolean(unclear.length || capabilityUnknown.mandatory.length || constraints.requiresReview ||
+    requiresReview: !text.hasDescription || Boolean(unclear.length || capabilityUnknown.mandatory.length || unresolvedGroups.length || constraints.requiresReview ||
       abap.requiresReview || unresolvedMandatoryEducation(config, job) || attendance.unclear !== null || unclearAttendance) };
 }
 

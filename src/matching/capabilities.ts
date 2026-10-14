@@ -1,6 +1,6 @@
 import type { AppConfig } from '../config/index.js';
 import { normalizeText } from '../util/text.js';
-import { pattern, requirementMentions, type RequirementMention } from './signals.js';
+import { capabilityExpression, pattern, requirementMentions, type CapabilityExpression, type RequirementMention } from './signals.js';
 
 type AbapCapability = 'basic' | 'development' | 'unspecified';
 
@@ -55,7 +55,16 @@ export type AlternativeStatus = 'satisfied' | 'incompatible' | 'uncertain';
 
 /** Each alternative is a conjunction: all its requirements need evidence. */
 export function capabilityAlternativeStatus(config: AppConfig, group: string): AlternativeStatus {
-  const alternatives = group.split(/\b(?:or|oder)\b/).map((branch): AlternativeStatus => {
+  const expression = capabilityExpression(config, group);
+  if (!expression) return 'uncertain';
+  const evaluate = (node: CapabilityExpression): AlternativeStatus => {
+    if (node.kind !== 'term') {
+      const children = node.children.map(evaluate);
+      return node.kind === 'or' ? children.includes('satisfied') ? 'satisfied' :
+        children.every((state) => state === 'incompatible') ? 'incompatible' : 'uncertain' :
+        children.includes('incompatible') ? 'incompatible' : children.every((state) => state === 'satisfied') ? 'satisfied' : 'uncertain';
+    }
+    const branch = group.slice(node.start, node.end);
     let evidenced = false;
     let contradicted = false;
     for (const skill of Object.values(config.profile.skills).flat()) {
@@ -74,8 +83,8 @@ export function capabilityAlternativeStatus(config: AppConfig, group: string): A
     }
     if (contradicted) return 'incompatible';
     return evidenced && !unknownCapabilityFragments(config, branch).length ? 'satisfied' : 'uncertain';
-  });
-  return alternatives.includes('satisfied') ? 'satisfied' : alternatives.every((state) => state === 'incompatible') ? 'incompatible' : 'uncertain';
+  };
+  return evaluate(expression);
 }
 
 /** Preserve group uncertainty/contradiction on every member for both engines. */

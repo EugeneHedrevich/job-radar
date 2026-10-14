@@ -209,19 +209,64 @@ function nearestMarker<T>(found: Marker<T>[], start: number, end: number): Marke
   return [...found].sort((a, b) => distance(a) - distance(b) || b.start - a.start)[0];
 }
 
-/** Keep an explicit choice separate from neighboring independent conditions. */
-function alternativeGroup(config: AppConfig, clause: string, position: number): string | null {
+export interface CapabilityExpression {
+  kind: 'term' | 'and' | 'or';
+  start: number;
+  end: number;
+  children: CapabilityExpression[];
+}
+
+/** Small, bounded boolean grammar. Offsets keep choices local to each mention. */
+export function capabilityExpression(config: AppConfig, text: string, start = 0, end = text.length, depth = 0): CapabilityExpression | null {
+  if (text.length > 1600 || depth > 4) return null;
+  const originalEnd = end;
   const obligation = [...(config.scoring.signals.mandatory_markers ?? []), ...(config.scoring.signals.preferred_markers ?? []),
     '\\b(?:optional|voluntary)\\b'];
-  // Conjunctions belong inside complete alternatives unless both sides state
-  // independent obligations ("CAP or Kafka required AND ABAP required").
-  const boundaries = [...clause.matchAll(/,|\s+(?:and|und|sowie)\s+/g)].filter((match) =>
-    match[0] === ',' || matchesAny(clause.slice(0, match.index), obligation) &&
-      matchesAny(clause.slice(match.index + match[0].length), obligation));
-  const start = boundaries.filter((match) => match.index + match[0].length <= position).at(-1);
-  const end = boundaries.find((match) => match.index > position);
-  const group = clause.slice(start ? start.index + start[0].length : 0, end?.index ?? clause.length);
-  return /\b(?:or|oder)\b/.test(group) ? group : null;
+  const colon = text.indexOf(':', start);
+  if (colon >= start && colon < end && matchesAny(text.slice(start, colon), obligation)) start = colon + 1;
+  const tail = pattern(`\\s+(?:(?:is|are)\\s+)?(?:${obligation.join('|')})[.!?\\s]*$`).exec(text.slice(start, end));
+  if (tail) end = start + tail.index;
+  while (start < end && /[\s.]/.test(text[start]!)) start++;
+  while (end > start && /[\s.]/.test(text[end - 1]!)) end--;
+  if (start === end) return null;
+  const operators: Array<{ start: number; end: number; kind: 'and' | 'or' }> = [];
+  let level = 0, outerEnd = -1;
+  const token = /\(|\)|\b(?:and|und|sowie|or|oder)\b|[+&]/g;
+  token.lastIndex = start;
+  for (let match = token.exec(text); match && match.index < end; match = token.exec(text)) {
+    if (match[0] === '(') level++;
+    else if (match[0] === ')') { if (--level < 0) return null; if (!level && outerEnd < 0) outerEnd = match.index; }
+    else if (!level) operators.push({ start: match.index, end: match.index + match[0].length,
+      kind: /^(?:or|oder)$/.test(match[0]) ? 'or' : 'and' });
+  }
+  if (level || operators.length > 16) return null;
+  if (text[start] === '(' && outerEnd === end - 1) return capabilityExpression(config, text, start + 1, end - 1, depth + 1);
+  // Explicit obligations on both sides of AND are independent, even when an
+  // earlier choice has no parentheses: "CAP or Kafka required AND RAP required".
+  const independent = operators.filter((op) => /^(?:and|und|sowie)$/.test(text.slice(op.start, op.end)) &&
+    matchesAny(text.slice(start, op.start), obligation) && matchesAny(text.slice(op.end, originalEnd), obligation));
+  if (!independent.length && operators.some((op) => op.kind === 'or') &&
+    operators.some((op) => /^(?:and|und|sowie)$/.test(text.slice(op.start, op.end)))) return null;
+  const split = independent.length ? independent : operators.some((op) => op.kind === 'or')
+    ? operators.filter((op) => op.kind === 'or') : operators;
+  if (!split.length) {
+    // Parenthetical prose/implicit operators are outside this grammar.
+    return /[()]/.test(text.slice(start, end)) ? null : { kind: 'term', start, end, children: [] };
+  }
+  const cuts = [start, ...split.map((op) => op.end)];
+  const children = cuts.map((from, index) => capabilityExpression(config, text, from, split[index]?.start ?? end, depth + 1));
+  if (children.some((child) => !child)) return null;
+  return { kind: independent.length ? 'and' : split[0]!.kind, start, end, children: children as CapabilityExpression[] };
+}
+
+/** AND conditions stay mandatory; only the enclosing OR can satisfy a choice. */
+function alternativeGroup(config: AppConfig, clause: string, position: number): string | null {
+  if (!/\b(?:or|oder)\b/.test(clause)) return null;
+  const expression = capabilityExpression(config, clause);
+  if (!expression) return clause; // The evaluator reports unsupported grouping as uncertain.
+  const choice = (node: CapabilityExpression): string | null => node.kind === 'or' ? clause.slice(node.start, node.end) :
+    node.children.filter((child) => position >= child.start && position < child.end).map(choice).find(Boolean) ?? null;
+  return choice(expression);
 }
 
 /** Decide whether a term appears as a must-have or a nice-to-have. */

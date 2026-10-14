@@ -265,6 +265,14 @@ describe('deterministic constraints survive a positive AI answer', () => {
         ['SAP CAP certification or Node.js experience is required.', 'Apply', 'satisfied'],
         ['SAP CAP experience and certification or RAP ownership is required.', 'Review', 'uncertain'],
         ['SAP CAP or Kafka is required and RAP ownership is required.', 'Skip', 'satisfied'],
+        ['Required: (SAP CAP or Node.js) and RAP ownership', 'Skip', 'satisfied'],
+        ['Required: (SAP CAP and Node.js) or RAP ownership', 'Apply', 'satisfied'],
+        ['Required: RAP ownership and (SAP CAP or Node.js)', 'Skip', 'satisfied'],
+        ['Required: ((SAP CAP or Node.js) and RAP ownership)', 'Skip', 'satisfied'],
+        ['Required: (SAP CAP and Kafka) or RAP ownership', 'Review', 'uncertain'],
+        ['Required: (SAP CAP or Node.js) and', 'Review', 'uncertain'],
+        ['Required: (SAP CAP or Node.js and RAP ownership', 'Review', 'uncertain'],
+        ['Required: SAP CAP or Node.js and RAP ownership', 'Review', 'uncertain'],
         ['Fully remote; hybrid attendance is optional.', 'Apply'], ['No permanent employment.', 'Apply'],
         ['This position is not fully remote.', 'Review'], ["This position isn't fully remote.", 'Review'],
         ['Fully remote is not offered.', 'Review'],
@@ -292,7 +300,8 @@ describe('deterministic constraints survive a positive AI answer', () => {
             expect(ai.missingInformation).toContain(missing);
         if (rules.hardReject) {
             expect(ai.recommendation).toBe('Skip');
-            expect(ai.fitScore).toBeLessThanOrEqual(30);
+            expect(ai.fitScore).toBeLessThanOrEqual(config.scoring.hard_rejects.score_cap);
+            expect(rules.fitScore).toBeLessThanOrEqual(config.scoring.hard_rejects.score_cap);
         }
         else if (recommendation === 'Review') {
             expect(ai.fitScore).toBeLessThan(75);
@@ -318,6 +327,19 @@ describe('deterministic constraints survive a positive AI answer', () => {
             expect(groups.length).toBeGreaterThan(0);
             expect(new Set(groups.map((mention) => mention.alternativeStatus))).toEqual(new Set([alternativeStatus]));
             if (alternativeStatus === 'incompatible') expect(rules.hardRejectReason).toContain('Every alternative');
+        }
+        if (condition === 'Required: (SAP CAP or Node.js) and RAP ownership') {
+            const rap = analysis.requirements.find((item) => item.name === 'RAP ownership');
+            expect(rap).toMatchObject({ kind: 'mandatory' });
+            expect(rap!.mentions.some((mention) => mention.kind === 'mandatory' && !mention.alternativeGroup)).toBe(true);
+            expect(rules.preferredGaps.join(' ')).not.toContain('RAP ownership');
+            expect(ai.mandatoryGapEvidence).toContainEqual(expect.objectContaining({ requirement: 'RAP ownership', vacancyQuote: condition }));
+            expect(rules.fitScore).toBe(config.scoring.hard_rejects.score_cap);
+            expect(ai.fitScore).toBe(config.scoring.hard_rejects.score_cap);
+        }
+        if (condition.startsWith('Required:') && alternativeStatus === 'uncertain') {
+            expect(analysis.requiresReview).toBe(true);
+            expect(ai.missingInformation.join(' ')).toContain('mandatory capability grouping');
         }
         if (/not fully remote|isn't fully remote|fully remote is not offered/i.test(condition)) {
             expect(analysis.workMode).toBe('unknown');
