@@ -65,6 +65,8 @@ export const collectorLineSchema = z.discriminatedUnion('type', [
     message: z.string().optional(),
     count: z.number(),
     head_checked: z.boolean().optional(),
+    coverage: z.enum(['exhausted', 'incomplete', 'unknown']).optional(),
+    coverage_reason: z.string().optional(),
     duration_ms: z.number(),
     search_requests: z.number().int().nonnegative().nullable().optional(),
     detail_requests: z.number().int().nonnegative().nullable().optional(),
@@ -120,6 +122,8 @@ export interface TaskOutcome {
   retryAfterSeconds?: number;
   nextCursor?: SearchCursor;
   headChecked?: boolean;
+  coverage?: 'exhausted' | 'incomplete' | 'unknown';
+  coverageReason?: string;
 }
 
 export interface SearchCursor { offset?: number; page?: number; index?: number }

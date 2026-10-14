@@ -6,6 +6,8 @@ import { ingestJobs } from '../src/persist/ingest.js';
 import { rank } from '../src/pipeline/rank.js';
 import { closeTempDb, resetTestDb, useTempDb } from './helpers/db.js';
 import { ingestReview as ingest, reviewRecord as strong } from './helpers/review.js';
+import { enableReviewAi, reviewAiResponse } from './helpers/review.js';
+import { readJob } from '../src/dashboard/store.js';
 beforeAll(useTempDb);
 beforeEach(async () => { vi.unstubAllGlobals(); resetConfigCache(); await resetTestDb(); });
 afterAll(async () => { vi.unstubAllGlobals(); resetConfigCache(); await closeTempDb(); });
@@ -95,6 +97,48 @@ describe("vacancy identity and refresh", () => {
         const current = await queryOne<any>(SELECT.from(db().Jobs));
         expect(current.isRemote).toBe(true);
         expect(Number(current.salaryMax)).toBe(75);
+    });
+    it('keeps equivalent primary observations and conflicting secondary facts stable across repeated AI ranks', async () => {
+        const id = (await ingest()).jobIds[0]!;
+        enableReviewAi();
+        vi.stubGlobal('fetch', vi.fn(async () => reviewAiResponse()));
+        const [original] = await rank();
+        const secondary = { id: 'secondary', job_url: 'https://indeed.com/viewjob?jk=secondary',
+            description: `${strong.description} Optional onsite visits.`, max_amount: 80, is_remote: false };
+        for (let visit = 0; visit < 3; visit++) {
+            await ingest(secondary, 'indeed');
+            expect((await rank())[0]!.assessmentId).toBe(original!.assessmentId);
+            await ingest({ description: strong.description!.replaceAll(' ', '  '), job_url: strong.job_url + '?utm_source=repeat' });
+            const [cached] = await rank();
+            expect(cached!.assessmentId).toBe(original!.assessmentId);
+            expect(cached!.cached).toBe(true);
+        }
+        expect(fetch).toHaveBeenCalledTimes(1);
+        const current = await queryOne<any>(SELECT.from(db().Jobs));
+        expect(current.description).toBe(strong.description);
+        expect(current.isRemote).toBe(true);
+        expect(Number(current.salaryMax)).toBe(75);
+        const details = await readJob(id);
+        expect(details.listings.find(listing => listing.source === 'indeed')!.conflicts)
+            .toContainEqual({ field: 'salaryMax', value: '80' });
+    });
+    it('keeps secondary-filled facts when subsequent secondary observations conflict', async () => {
+        await ingest({ description: null, is_remote: null, max_amount: null });
+        const secondary = { id: 'secondary', job_url: 'https://indeed.com/viewjob?jk=secondary' };
+        await ingest(secondary, 'indeed');
+        await ingest({ ...secondary, description: `${strong.description} No freelancers accepted.`, is_remote: false, max_amount: 30 }, 'indeed');
+        const current = await queryOne<any>(SELECT.from(db().Jobs));
+        expect(current.description).toBe(strong.description);
+        expect(current.isRemote).toBe(true);
+        expect(Number(current.salaryMax)).toBe(75);
+    });
+    it('does not attach a secondary currency to a conflicting primary amount', async () => {
+        await ingest({ min_amount: null, max_amount: 30, currency: null });
+        await ingest({ id: 'secondary', job_url: 'https://indeed.com/viewjob?jk=secondary' }, 'indeed');
+        const current = await queryOne<any>(SELECT.from(db().Jobs));
+        expect(current.salaryCurrency).toBeNull();
+        expect(Number(current.salaryMax)).toBe(30);
+        expect((await rank({ rulesOnly: true }))[0]!.assessment.hardReject).toBe(false);
     });
     it('does not report an update when stored decimal values are unchanged', async () => {
         await ingest();

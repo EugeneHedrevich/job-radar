@@ -59,6 +59,8 @@ async function createLegacyTemplate(): Promise<string> {
       DROP TABLE sap_jobradar_SearchProgress;
       ALTER TABLE sap_jobradar_CollectionTasks DROP COLUMN searchRequests;
       ALTER TABLE sap_jobradar_CollectionTasks DROP COLUMN detailRequests;
+      ALTER TABLE sap_jobradar_CollectionTasks DROP COLUMN coverage;
+      ALTER TABLE sap_jobradar_CollectionTasks DROP COLUMN coverageReason;
       ALTER TABLE sap_jobradar_SourceHealth DROP COLUMN rateLimitStreak;
       DROP TABLE sap_jobradar_AiAssessmentQueue;
       DROP TABLE sap_jobradar_ListingActivityEvents;
@@ -134,7 +136,9 @@ describe('serialized legacy database migrations', () => {
             expect(columns.map((column) => column.name)).toEqual(expect.arrayContaining(['claimToken', 'claimUntil']));
             expect(migrated.prepare('PRAGMA table_info(sap_jobradar_Assessments)').all().map((column) => column.name)).toContain('mandatoryGapEvidence');
             expect(migrated.prepare('PRAGMA table_info(sap_jobradar_CollectionTasks)').all().map((column) => column.name))
-                .toEqual(expect.arrayContaining(['searchRequests', 'detailRequests']));
+                .toEqual(expect.arrayContaining(['searchRequests', 'detailRequests', 'coverage', 'coverageReason']));
+            expect(migrated.prepare('PRAGMA table_info(sap_jobradar_SearchProgress)').all().map((column) => column.name))
+                .toEqual(expect.arrayContaining(['headCheckedAt', 'queryKey', 'failedAt', 'successfulVisits']));
             expect(migrated.prepare('PRAGMA table_info(sap_jobradar_SourceHealth)').all().map((column) => column.name)).toContain('rateLimitStreak');
             expect(migrated.prepare('SELECT COUNT(*) AS count FROM sap_jobradar_SearchProgress').get()).toEqual({ count: 0 });
             expect(migrated.prepare('PRAGMA table_info(sap_jobradar_SourceListings)').all().map((column) => column.name)).toContain('descriptionAttemptedAt');

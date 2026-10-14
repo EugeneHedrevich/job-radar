@@ -18,6 +18,10 @@ const compactAssessmentLabels: Record<AssessmentState, string> = {
   ai: 'AI', rules: 'Rules', 'ai-fallback': 'Rules · AI unavailable', outdated: 'Needs refresh', unassessed: 'Awaiting assessment',
 };
 
+const sourceFactLabels: Record<string, string> = { description: 'Description', jobType: 'Employment type',
+  isRemote: 'Source remote flag', location: 'Location', salaryMin: 'Minimum salary', salaryMax: 'Maximum salary',
+  salaryInterval: 'Pay interval', salaryCurrency: 'Currency', datePosted: 'Publication date' };
+
 function date(value: string | null | undefined, time = false): string {
   if (!value) return 'Unknown';
   const parsed = new Date(value);
@@ -101,11 +105,14 @@ function CollectionArea({ data, loading, error, retry }: {
         return <div className="source-item" key={source}><strong>{sourceLabel(source)}</strong>
           <span>{tasks.reduce((sum, task) => sum + task.resultCount, 0)} results · {tasks.filter((task) => task.status === 'Succeeded').length} succeeded · {tasks.filter((task) => task.status === 'Failed').length} failed · {tasks.filter((task) => task.status === 'Skipped').length} skipped</span>
           {tasks.some((task) => task.searchRequests !== null) && <span className="small">HTTP requests: {tasks.reduce((sum, task) => sum + (task.searchRequests ?? 0), 0)} search · {tasks.reduce((sum, task) => sum + (task.detailRequests ?? 0), 0)} detail</span>}
+          {tasks.some((task) => task.coverageReason) && <span className="muted small">{[...new Set(tasks.map((task) => task.coverageReason).filter(Boolean))].join(' ')}</span>}
           {tasks.filter((task) => task.status !== 'Succeeded' && task.message).map((task, index) => <span className="warning small" key={index}>{task.status}: {task.message}</span>)}
         </div>;
       })}</div>}
       {data?.sources.length ? <div className="source-grid">{data.sources.map((source) => <div className="source-item" key={source.source}>
         <strong>{sourceLabel(source.source)}</strong><span>{source.lastStatus ?? 'Unknown'} · {source.consecutiveFailures} consecutive failures{source.blocked ? ' · Blocked' : ''}</span>
+        <span className="small">{source.successfulChecks} verified checks within freshness · {source.incompleteScans} incomplete scans in last run · {source.pendingEnrichment} awaiting description</span>
+        {source.lastSuccessfulCheck && <span className="muted small">Last verified check {date(source.lastSuccessfulCheck, true)}</span>}
         {source.cooldownUntil && <span className="small">Cooldown {new Date(source.cooldownUntil).getTime() > Date.now() ? 'until' : 'ended'} {date(source.cooldownUntil, true)}</span>}
         {source.lastMessage && <span className="muted small">{source.lastMessage}</span>}
         {source.source === 'linkedin' && <span className="small">Shared window: {source.searchRequests} search / {source.detailRequests} detail requests
@@ -301,6 +308,9 @@ function VacancyDetail({ job, conversion, onSaved, onViewed, onDirty, onBusy, on
           Activity checked {date(listing.activityCheckedAt, true)}{listing.validThrough ? ` · Valid through ${date(listing.validThrough, true)}` : ''}</p>
         {listing.closureReason && <p className="small">Reason recorded: {listing.closureReason}</p>}
         {listing.activityEvidence && <p className="muted small">{listing.activityEvidence}</p>}
+        {Boolean(listing.conflicts?.length) && <details><summary>Conflicting source facts — review</summary>
+          {listing.conflicts!.map((fact) => <p className="small" key={fact.field}><strong>{sourceFactLabels[fact.field] ?? fact.field}</strong>: {fact.value}</p>)}
+        </details>}
       </div>)}
       {!job.listings.length && <p className="muted">No source listings saved.</p>}
     </details>

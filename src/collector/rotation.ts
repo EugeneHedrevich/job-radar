@@ -4,7 +4,7 @@ import { collectorJobSchema, type CollectorTask, type TaskOutcome } from './type
 import { assessWithRules, prescreen } from '../matching/rules.js';
 import { analyzeVacancy } from '../matching/analysis.js';
 import { cds, db, INSERT, SELECT, UPDATE } from '../db/index.js';
-import { planBatch, type PlanOptions, type PlannedBatch } from './plan.js';
+import { planBatch, searchQueryKey, type PlanOptions, type PlannedBatch } from './plan.js';
 import { expireListingDeadlines, listingIsClosed } from '../persist/activity.js';
 
 const ACTIVITY_REFRESH_MS = 24 * 3_600_000;
@@ -49,8 +49,16 @@ export async function reserveBatchPlan(config: AppConfig, options: PlanOptions =
       const idleHours = Math.max(task.hours_old, rotationHours * 2);
       const lastActivity = saved ? Math.max(new Date(saved.updatedAt).getTime(),
         saved.headCheckedAt ? new Date(saved.headCheckedAt).getTime() : 0) : 0;
-      if (!saved || at.getTime() - lastActivity >= idleHours * 3_600_000) {
-        const values = { state: '{}', sweepStartedAt: at.toISOString(), updatedAt: at.toISOString() };
+      const queryKey = searchQueryKey(task);
+      if (saved?.queryKey === queryKey) {
+        if (saved.failedAt) task.hours_old += Math.min(config.searches.coverage.catch_up_hours,
+          Math.max(0, Math.ceil((at.getTime() - new Date(saved.failedAt).getTime()) / 3_600_000)));
+        if (((saved.successfulVisits ?? 0) + 1) % config.searches.coverage.older_scan_every === 0)
+          task.hours_old = Math.max(task.hours_old, config.searches.coverage.older_scan_hours);
+      }
+      if (!saved || saved.queryKey !== queryKey || at.getTime() - lastActivity >= idleHours * 3_600_000) {
+        const values = { state: '{}', queryKey, sweepStartedAt: at.toISOString(), updatedAt: at.toISOString(),
+          ...(saved?.queryKey !== queryKey ? { headCheckedAt: null, failedAt: null, successfulVisits: 0 } : {}) };
         await tx.run(saved ? UPDATE(db().SearchProgress).set(values).where({ taskKey: task.task_id })
           : INSERT.into(db().SearchProgress).entries({ taskKey: task.task_id, ...values }));
         continue;
@@ -81,24 +89,24 @@ export async function reserveBatchPlan(config: AppConfig, options: PlanOptions =
 }
 
 /** A skipped combination stays at the front of the next plan, even if later tasks ran. */
-export async function recordQueryRotation(plan: PlannedBatch, outcomes: TaskOutcome[]): Promise<void> {
+export async function recordQueryRotation(plan: PlannedBatch, outcomes: TaskOutcome[], connection?: any): Promise<void> {
   const executed = new Set(outcomes.filter((row) => row.status !== 'Skipped' && row.executed !== false).map((row) => row.taskId));
   if (!executed.size) return;
-  await cds.tx(async (tx: any) => {
-    await tx.run('UPDATE sap_jobradar_Jobs SET ID = ID WHERE 0 = 1');
-    const row = await tx.run(SELECT.one.from(db().DescriptionRotation).where({ batchKey: '__all_batches__' }));
-    if (!row) return;
-    const state = stateSchema.parse(JSON.parse(row.state));
-    for (const [scope, tasks] of Object.entries(plan.searchRotation)) {
-      for (const task of tasks) {
-        if (!executed.has(task)) break;
-        state.lastSearchByScope[scope] = task;
-        if (scope.endsWith(':linkedin')) state.lastSearchByScope[`${task.split(':')[0]}:linkedin`] = task;
-      }
+  if (!connection) return cds.tx((tx: any) => recordQueryRotation(plan, outcomes, tx));
+  const tx = connection;
+  await tx.run('UPDATE sap_jobradar_Jobs SET ID = ID WHERE 0 = 1');
+  const row = await tx.run(SELECT.one.from(db().DescriptionRotation).where({ batchKey: '__all_batches__' }));
+  if (!row) return;
+  const state = stateSchema.parse(JSON.parse(row.state));
+  for (const [scope, tasks] of Object.entries(plan.searchRotation)) {
+    for (const task of tasks) {
+      if (!executed.has(task)) break;
+      state.lastSearchByScope[scope] = task;
+      if (scope.endsWith(':linkedin')) state.lastSearchByScope[`${task.split(':')[0]}:linkedin`] = task;
     }
-    await tx.run(UPDATE(db().DescriptionRotation).set({ state: JSON.stringify(state), updatedAt: new Date().toISOString() })
-      .where({ batchKey: '__all_batches__' }));
-  });
+  }
+  await tx.run(UPDATE(db().DescriptionRotation).set({ state: JSON.stringify(state), updatedAt: new Date().toISOString() })
+    .where({ batchKey: '__all_batches__' }));
 }
 
 /** Reuse the already selected description slots for enrichment and stale activity.
@@ -110,10 +118,13 @@ async function reserveEnrichment(tx: any, config: AppConfig, plan: PlannedBatch,
   if (![...plan.tasksBySource].some(([source, tasks]) => replaySources.has(source) && tasks.some((task) => task.fetch_description))) return;
   const stored = await tx.run(`SELECT * FROM sap_jobradar_Jobs WHERE COALESCE(isDemo, 0) = 0`);
   const eligible = new Map<string, any>();
+  const pending = new Set<string>();
   for (const job of stored) {
     if (job.status === 'Ignored') continue;
     const analysis = analyzeVacancy(config, job);
-    if (prescreen(config, job, analysis).passed && !assessWithRules(config, job, analysis).hardReject) eligible.set(job.ID, job);
+    if (analysis.relevance.state === 'unresolved') pending.add(job.ID);
+    if (analysis.relevance.state === 'unresolved' ||
+      prescreen(config, job, analysis).passed && !assessWithRules(config, job, analysis).hardReject) eligible.set(job.ID, job);
   }
   if (!eligible.size) return;
   for (const [source, tasks] of plan.tasksBySource) {
@@ -140,15 +151,16 @@ async function reserveEnrichment(tx: any, config: AppConfig, plan: PlannedBatch,
         if (listingIsClosed(listing, at) || chosen.has(listing.ID)) continue;
         const job = eligible.get(listing.job_ID)!;
         const refresh = Boolean(job.description?.trim());
+        const old = new Date(listing.lastSeenAt).getTime() < cutoff ||
+          Boolean(job.datePosted && new Date(job.datePosted).getTime() < cutoff);
         if (refresh) {
           const lastCheck = Math.max(...[listing.activityAttemptedAt, listing.activityCheckedAt, listing.firstSeenAt]
             .filter(Boolean).map((value) => new Date(value).getTime()));
           if (at.getTime() - lastCheck < ACTIVITY_REFRESH_MS) continue;
-        } else if (new Date(listing.lastSeenAt).getTime() < cutoff ||
-          job.datePosted && new Date(job.datePosted).getTime() < cutoff) continue;
+        } else if (old && !pending.has(job.ID)) continue;
         const raw = collectorJobSchema.parse(JSON.parse(listing.rawRecord));
         task.detail_jobs.push({ ...raw, job_url: listing.rawUrl ?? listing.canonicalUrl,
-          ...(refresh ? { activity_refresh: true } : {}) });
+          ...(refresh || old && pending.has(job.ID) ? { activity_refresh: true } : {}) });
         chosen.add(listing.ID);
         await tx.run(UPDATE(db().SourceListings).set({ activityAttemptedAt: at.toISOString(),
           ...(!refresh ? { descriptionAttemptedAt: at.toISOString() } : {}) }).where({ ID: listing.ID }));
@@ -158,16 +170,25 @@ async function reserveEnrichment(tx: any, config: AppConfig, plan: PlannedBatch,
   }
 }
 
-/** Persist completed/streamed search progress, including before a timeout. */
-export async function recordSearchProgress(outcomes: TaskOutcome[], at = new Date()): Promise<void> {
+/** Persist verified/streamed progress in the transaction that saves its records. */
+export async function recordSearchProgress(outcomes: TaskOutcome[], at = new Date(), connection: any = cds): Promise<void> {
   for (const outcome of outcomes) {
-    if (outcome.headChecked) await cds.run(UPDATE(db().SearchProgress).set({ headCheckedAt: at.toISOString() }).where({ taskKey: outcome.taskId }));
-    if (!outcome.nextCursor || outcome.status === 'Skipped' || outcome.status === 'Failed' && outcome.resultCount === 0) continue;
-    const previous: any = await cds.run(SELECT.one.from(db().SearchProgress).where({ taskKey: outcome.taskId }));
+    if (outcome.status === 'Skipped' || outcome.taskId.startsWith('description-backlog:')) continue;
+    const existing: any = await connection.run(SELECT.one.from(db().SearchProgress).where({ taskKey: outcome.taskId }));
+    const cursor = existing ? JSON.parse(existing.state) : {};
+    const hasBackfill = cursor.offset > 0 || cursor.page > 1 || cursor.index > 0;
+    const recovered = outcome.status === 'Succeeded' && (outcome.nextCursor || outcome.headChecked && !hasBackfill);
+    if (existing) await connection.run(UPDATE(db().SearchProgress).set({
+      failedAt: outcome.status === 'Failed' ? existing.failedAt ?? at.toISOString() : recovered ? null : existing.failedAt,
+      successfulVisits: (existing.successfulVisits ?? 0) + Number(outcome.status === 'Succeeded' && Boolean(outcome.headChecked)),
+    }).where({ taskKey: outcome.taskId }));
+    if (outcome.headChecked) await connection.run(UPDATE(db().SearchProgress).set({ headCheckedAt: at.toISOString() }).where({ taskKey: outcome.taskId }));
+    if (!outcome.nextCursor || outcome.status === 'Failed' && outcome.resultCount === 0) continue;
+    const previous: any = await connection.run(SELECT.one.from(db().SearchProgress).where({ taskKey: outcome.taskId }));
     const reset = outcome.nextCursor.offset === 0 || (outcome.nextCursor.page === 1 && !outcome.nextCursor.index);
     const values = { state: JSON.stringify(outcome.nextCursor), updatedAt: at.toISOString(),
       sweepStartedAt: reset || !previous ? at.toISOString() : previous.sweepStartedAt };
-    await cds.run(previous ? UPDATE(db().SearchProgress).set(values).where({ taskKey: outcome.taskId })
+    await connection.run(previous ? UPDATE(db().SearchProgress).set(values).where({ taskKey: outcome.taskId })
       : INSERT.into(db().SearchProgress).entries({ taskKey: outcome.taskId, ...values }));
   }
 }

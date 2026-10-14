@@ -36,6 +36,9 @@ export function unknownCapabilityFragments(config: AppConfig, fragment: string):
   return capabilityParts(fragment).flatMap((part) => {
     let residual = part;
     for (const marker of markers) residual = residual.replace(pattern(marker, 'gi'), ' ');
+    // Duration is not a capability. Keep the skill named by an experience
+    // requirement, without interpreting undocumented years as proven absence.
+    residual = residual.replace(/\b(?:(?:at least|minimum|over|more than)\s+)?(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten)(?:\s*(?:[-–]|to)\s*\d+)?\+?\s*[-–]?\s*(?:years?|yrs?)\b['’]?(?:\s+(?:of|in|with))?/g, ' ');
     const certification = /\b(?:certificat\w*|certified)\b/.test(residual);
     if (!certification) for (const term of [...known].sort((a, b) => b.length - a.length)) {
       const escaped = normalizeText(term).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');

@@ -68,6 +68,7 @@ export interface Listing {
   activityEvidence: string | null;
   firstSeenAt: string;
   lastSeenAt: string;
+  conflicts?: Array<{ field: string; value: string }>;
 }
 
 export interface JobDetail extends JobSummary {
@@ -159,7 +160,8 @@ export interface CollectionStatus {
     jobsNew: number;
     jobsUpdated: number;
     tasks: { source: string; status: string; resultCount: number; message: string | null;
-      searchRequests: number | null; detailRequests: number | null }[];
+      searchRequests: number | null; detailRequests: number | null;
+      coverage: string; coverageReason: string | null }[];
     errors: { source: string | null; kind: string; message: string; occurredAt: string | null }[];
   } | null;
   sources: {
@@ -177,5 +179,9 @@ export interface CollectionStatus {
     windowStartedAt: string | null;
     lastHttpStatus: number | null;
     lastRetryAfterSeconds: number | null;
+    successfulChecks: number;
+    incompleteScans: number;
+    pendingEnrichment: number;
+    lastSuccessfulCheck: string | null;
   }[];
 }

@@ -7,12 +7,14 @@ import { loadConfig, PROJECT_ROOT, resetConfigCache } from '../src/config/index.
 import { cds, connectDb, db, disconnectDb, INSERT, query, queryOne, SELECT, UPDATE } from '../src/db/index.js';
 import { importVacancy, type ImportMetadata } from '../src/dashboard/import.js';
 import { listReminders, updateReminder } from '../src/dashboard/reminders.js';
-import { listJobs, readJob, updateTracking } from '../src/dashboard/store.js';
+import { listJobs, readCollectionStatus, readJob, updateTracking } from '../src/dashboard/store.js';
 import { collect } from '../src/pipeline/collect.js';
 import { withCollectionOperation } from '../src/pipeline/collection-operation.js';
 import { rank } from '../src/pipeline/rank.js';
 import { claimImportSource, claimSourceRequests, recordOutcomes, settleSourceRequests } from '../src/collector/health.js';
-import { planBatch } from '../src/collector/plan.js';
+import { planBatch, searchQueryKey } from '../src/collector/plan.js';
+import { normalizeJob } from '../src/normalize/index.js';
+import * as ingestion from '../src/persist/ingest.js';
 import { reserveBatchPlan } from '../src/collector/rotation.js';
 import { closeTempDb, resetTestDb, useTempDb } from './helpers/db.js';
 import { enableReviewAi, ingestReview, reviewRecord } from './helpers/review.js';
@@ -122,6 +124,7 @@ describe('local dashboard controls', () => {
     const config = loadConfig(), options = { batchKey: 'cap-broad', onlySources: ['linkedin'] };
     const first = planBatch(config, options).tasksBySource.get('linkedin')![0]!;
     await cds.run(INSERT.into(db().SearchProgress).entries({ taskKey: first.task_id, state: '{"offset":20}',
+      queryKey: searchQueryKey(first),
       sweepStartedAt: new Date().toISOString(), updatedAt: new Date().toISOString() }));
     if (recovery) await recordOutcomes(config, [{ taskId: 'previous', source: 'linkedin', searchTerm: 'SAP',
       location: undefined, countryIndeed: undefined, status: 'Failed', resultCount: 0, durationMs: 1,
@@ -218,6 +221,50 @@ describe('local dashboard controls', () => {
     expect((await listJobs()).total).toBe(3); // The personally tracked legacy record remains accessible.
     const deliberate = await importVacancy({ url: 'https://example.com/student-role', title: 'SAP BTP Internship', description: 'SAP BTP and CAP internship.' });
     expect(deliberate).toMatchObject({ result: 'Added', message: expect.stringContaining('Relevance warning') });
+  });
+
+  it('bounds unresolved cards, hides them, and enriches them before confirming relevance', async () => {
+    loadConfig().searches.description_budget.max_pending_candidates = 2;
+    const cards = ['Senior Full Stack Developer', 'CAP Developer', 'Cloud Engineer', 'SAP CAP Internship', 'Sales Manager']
+      .map((title, index) => normalizeJob({ ...reviewRecord, title, description: null, id: `candidate-${index}`,
+        company: `Candidate ${index}`, job_url: `https://www.linkedin.com/jobs/view/${991400 + index}` }, 'linkedin')!);
+    expect(await ingestion.ingestJobs(cards, { runId: null, automatic: true })).toMatchObject({ created: 2, pendingEnrichment: 2, filtered: 3 });
+    expect((await listJobs()).total).toBe(0);
+    await rank({ rulesOnly: true });
+    expect(await query(SELECT.from(db().AiAssessmentQueue))).toEqual([]);
+    const plan = await reserveBatchPlan(loadConfig(), { enrichOnly: true, onlySources: ['linkedin'] });
+    expect([...plan.tasksBySource.values()].flat().flatMap(task => task.detail_jobs ?? []).map(row => row.title))
+      .toEqual(expect.arrayContaining(['Senior Full Stack Developer', 'CAP Developer']));
+    loadConfig().searches.description_budget.max_pending_candidates = 2;
+    expect(await ingestion.ingestJobs([normalizeJob({ ...JSON.parse(cards[0]!.listing.raw), description: reviewRecord.description }, 'linkedin')!, cards[2]!],
+      { runId: null, automatic: true })).toMatchObject({ created: 1, pendingEnrichment: 1 });
+    expect((await listJobs()).items.map(row => row.title)).toEqual(['Senior Full Stack Developer']);
+    expect((await readCollectionStatus()).sources.find(source => source.source === 'linkedin')?.pendingEnrichment).toBe(2);
+  });
+
+  it('rolls back results and cursors when ingestion fails, then replays idempotently', async () => {
+    vi.mocked(runCollector).mockImplementation(async (_config, { tasks }) => ({ jobspyVersion: 'offline', activities: [], malformedLines: 0,
+      jobs: [{ taskId: tasks[0]!.task_id, source: 'linkedin', job: reviewRecord }],
+      outcomes: tasks.map((task, index) => ({ taskId: task.task_id, source: task.source, searchTerm: task.search_term,
+        location: task.location, countryIndeed: task.country_indeed, status: index ? 'Skipped' : 'Succeeded',
+        resultCount: index ? 0 : 1, durationMs: 1, executed: !index, searchRequests: index ? 0 : 1, detailRequests: 0,
+        ...(!index ? { headChecked: true, nextCursor: { offset: 10 } } : {}) })) }));
+    const original = ingestion.ingestJobs;
+    const failing = vi.spyOn(ingestion, 'ingestJobs').mockImplementationOnce(async (jobs, context) => {
+      await original(jobs, context); throw new Error('Ingestion failed before cursor commit');
+    });
+    const options = { batchKey: 'cap-broad', onlySources: ['linkedin'] };
+    await expect(collect(options)).rejects.toThrow('Ingestion failed before cursor commit');
+    failing.mockRestore();
+    expect(await query(SELECT.from(db().Jobs))).toEqual([]);
+    expect(await query(SELECT.from(db().SourceListings))).toEqual([]);
+    const progress = await query<any>(SELECT.from(db().SearchProgress));
+    expect(progress.every(row => row.state === '{}' && !row.headCheckedAt)).toBe(true);
+    expect(JSON.parse((await queryOne<any>(SELECT.from(db().DescriptionRotation)))!.state).lastSearchByScope).toEqual({});
+    expect((await collect(options)).ingest.created).toBe(1);
+    expect(JSON.parse((await queryOne<any>(SELECT.from(db().SearchProgress).where({ taskKey: vi.mocked(runCollector).mock.calls[1]![1].tasks[0]!.task_id })))!.state)).toEqual({ offset: 10 });
+    expect((await collect(options)).ingest.created).toBe(0);
+    expect(await query(SELECT.from(db().SourceListings))).toHaveLength(1);
   });
 
   it('keeps separate assessment counts and provider errors through shared operation finalisation', async () => {

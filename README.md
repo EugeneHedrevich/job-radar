@@ -365,8 +365,9 @@ particular agency, use e.g.
 Description slots rotate between available sources and keyword/location tasks. The per-batch
 cursors are stored in SQLite and survive restarts, including manual repeats of the same batch.
 Disabled sources, cooldowns and `--source` exclusions consume no slots and retain their cursors.
-Demo collection does not advance the live cursors. A reservation is committed before collection,
-so a crash can advance a cursor but cannot leave an open transaction during HTTP requests.
+Demo collection does not advance the live cursors. Description reservations commit before I/O;
+vacancies, activity observations, query rotation and search progress commit together after I/O.
+A failed import rolls back its progress so replay is idempotent. No transaction spans HTTP work.
 RED Global and Whitehall read at most three search pages per task; Eursap uses one filtered
 response from its public browser search. Page and within-page cursors resume capped results
 on subsequent runs instead of repeating the first results. Cursor expiry measures inactivity
@@ -401,11 +402,11 @@ and `btp-markets` separately search supported non-LinkedIn markets outside the N
 including Germany, Switzerland, the UK, Poland, Austria and Ireland. LinkedIn allows
 **two search tasks per cycle** by default; postponed keyword/location combinations rotate
 through a persisted catalogue cursor on subsequent available cycles, using spare task
-capacity instead of waiting for their original batch to return. The actual configuration
-has **98 configured task entries**, reduced to **91 distinct query/geography combinations**
-by exact role overrides, and at most **66 search slots per 108-hour sequence** before
-cooldowns/shared allowances. At least 25 distinct combinations must wait beyond one
-sequence. Catalogue rotation avoids duplicate queries and repeats
+capacity instead of waiting for their original batch to return. Broad “SAP CAP” and “SAPUI5”
+queries retain their skill wording; explicit Developer queries run separately. Identical
+effective queries, geographies and filters share a task. The configured sequence allows at most
+**66 LinkedIn search slots per 108 hours** before cooldowns/shared allowances, so some
+combinations wait beyond one sequence. Catalogue rotation avoids duplicate queries and repeats
 until the sweep wraps; diagnostics report observed first-page coverage rather than promising
 complete coverage. The LinkedIn freshness window is 168 hours
 to accommodate its slower sweep; other source windows are unchanged. Larger custom batches
@@ -423,7 +424,12 @@ Selected public detail tasks also reserve a small share of their existing reques
 allowance for stored jobs without descriptions and stale listing activity, independently of the search term.
 Reservations persist before collection and rotate unsuccessful URLs to the queue tail.
 Public detail pages may be unavailable or blocked; those failures are reported through
-the normal circuit breaker, and incomplete jobs remain visible. Backlog and fresh search
+the normal circuit breaker. Confirmed SAP jobs remain visible when incomplete; unresolved
+technical cards (for example “CAP Developer” and “Senior Full Stack Developer”) wait in the
+same persisted store, hidden from the main list until their description confirms relevance.
+`description_budget.max_pending_candidates` caps this unresolved queue at 40. Clear internships
+and unrelated finance/sales roles are still filtered; manual imports and personal tracking remain
+accessible. Confirmed closures release pending capacity without deleting history. Backlog and fresh search
 details share the same allowance: **five LinkedIn detail HTTP requests per cycle**, including
 redirects, divided across selected description tasks; agencies retain ten per task.
 `searches.yaml` configures `linkedin_limits.max_search_tasks_per_run`,
@@ -563,7 +569,7 @@ Key behaviours driven by configuration:
   those slots. Existing incomplete listings share the selected slots for enrichment.
 * **Scoring** — `weights` must sum to 1.0. Bumping `profile.version` or `scoring.version`
   invalidates every cached assessment.
-  Matching revision 19 shares one vacancy analysis and final policy between rules and
+  Matching revision 20 shares one vacancy analysis and final policy between rules and
   AI validation. Confirmed mandatory mismatches override keyword bonuses; unverified
   requirements remain unknown and cannot become confirmed matches. Compound requirements
   such as “SAP CAP / Kafka” and “SAP CAP + Kafka” are checked separately, while an
@@ -578,6 +584,11 @@ Key behaviours driven by configuration:
   become confirmed profile matches. Unresolved optional-marker scope requires review.
   The AI prompt includes the exact verified gap evidence; undocumented capabilities
   remain uncertainty, and unsupported model gaps still produce an explicit rules fallback.
+  Experience wording such as “Must have 5 years of React experience” retains React as a
+  separate required capability. An undocumented skill requires review, never confirmed absence.
+  An explicitly comparable upper rate bound below `minimum_hourly_rate` forces Skip for
+  rules and AI. Missing/unknown currencies, missing upper bounds and overlapping ranges do
+  not establish a below-minimum blocker.
   Technical B2B/EDI integrations are separate from employment offers;
   explicit permanent employment wins over unrelated technical wording, while genuine
   alternatives require review. Source remote flags do not prove fully remote work.
@@ -651,17 +662,33 @@ and source attribution. Searches are bounded to three pages; feed/API availabili
 not guarantee exhaustive vacancy coverage. Public adapters save page/index progress;
 LinkedIn saves bounded offsets below 1,000 and Indeed below 300 with at most three
 HTTP searches per task. Indeed's offset still refetches earlier API pages; Glassdoor's
-pinned offset implementation cannot reliably resume a later page and is left unchanged.
+pinned offset implementation cannot reliably resume a later page. Its capped scans are
+explicitly marked incomplete instead of claiming coverage beyond the first results.
 Resumed LinkedIn searches reserve a head check within their actual HTTP allowance.
 Indeed uses one JobSpy invocation to check the head and walk to the saved backfill,
 so it does not request the first page twice within a task. Public page
-adapters likewise reserve one of their three page slots for the head. Head observations
+adapters likewise reserve one of their three page slots for the head; a head and backfill
+within page one reuse its response. Head observations
 do not overwrite backfill cursors; failed empty lookups retain progress. A one-request
 LinkedIn allowance alternates head/backfill visits. Sweeps restart at exhaustion or after
-at least two rotation periods without backfill progress. Regional location never proves cross-border
+at least two rotation periods without verified activity. Changed queries reset their saved progress.
+`coverage.catch_up_hours` extends the next visit after a missed head check by at most 72 hours;
+every sixth successful visit can scan up to 720 hours (`older_scan_every` / `older_scan_hours`).
+These visits use the same request/task allowance and preserve actual publication dates and
+explicit closure evidence. Source diagnostics separate successful checks, incomplete scans and
+pending descriptions; a successful check is not a claim of exhaustive coverage.
+Regional location never proves cross-border
 eligibility, and PLN rates are never treated as EUR.
 Successful LinkedIn details are cached by canonical job ID across the run's tasks;
 reusing them consumes no HTTP allowance. Explicit activity refreshes still fetch again.
+
+The first saved source listing remains authoritative for canonical vacancy facts; secondary
+sources fill missing fields and retain their latest conflicting observations in listing details.
+Conflicting compensation values/units are kept together rather than constructing a comparable
+rate from unrelated source amounts and currencies.
+Equivalent whitespace/case and tracking-URL changes do not replace established facts or
+invalidate the assessment cache. Alternating sources cannot repeatedly replace descriptions,
+rates or employment conditions; real changes from the authoritative source still refresh them.
 
 `enrich` spends at most two description tasks on relevant stored listings and issues no
 new searches. It supports LinkedIn, all five recruiter adapters and public API providers'

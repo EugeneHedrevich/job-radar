@@ -59,7 +59,7 @@ class FreshnessRegression(unittest.TestCase):
                 return job
 
         board = types.ModuleType(f'jobspy.{source}')
-        board.LinkedIn = board.Indeed = LinkedIn
+        board.LinkedIn = board.Indeed = board.Glassdoor = LinkedIn
         board.create_session = lambda **options: Session()
         jobspy = types.ModuleType('jobspy')
         jobspy.__path__ = []
@@ -120,6 +120,25 @@ class FreshnessRegression(unittest.TestCase):
         self.assertTrue(any(event.get('job', {}).get('title') == 'Inserted at the head' for event in events))
         self.assertEqual([event['cursor'] for event in events if event['type'] == 'search_progress'][-1], {'offset': 40})
         self.assertEqual(enrichment, [30])
+
+    def test_glassdoor_reports_incomplete_coverage_without_claiming_offset_continuation(self):
+        result, events, requests, _ = self.collect(source='glassdoor')
+        self.assertEqual(result['status'], 'succeeded')
+        self.assertTrue(result['head_checked'])
+        self.assertEqual(result['coverage'], 'incomplete')
+        self.assertIn('no reliable persisted cursor', result['coverage_reason'])
+        self.assertFalse(any(event['type'] == 'search_progress' for event in events))
+
+    def test_public_head_and_within_page_backfill_reuse_one_response(self):
+        from progress import SearchProgress
+        kwargs = {'results_wanted': 3, 'search_cursor': {'page': 1, 'index': 4}}
+        progress = SearchProgress(kwargs)
+        self.assertEqual(list(progress.pages(1)), [1])
+        self.assertEqual(list(progress.candidates(list(range(7)), 1)), [0, 1, 2, 4, 5, 6])
+        self.assertEqual(kwargs['next_cursor'], {'page': 1, 'index': 7})
+        self.assertEqual(kwargs['coverage'], 'incomplete')
+        progress.finish_page(1, False)
+        self.assertEqual(kwargs['coverage'], 'exhausted')
         self.assertTrue(any(event.get('job', {}).get('description') == 'A bounded detail result' for event in events))
 
     def test_blocked_empty_head_does_not_discard_backfill(self):

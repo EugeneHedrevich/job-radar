@@ -157,6 +157,8 @@ export async function runCollector(config: AppConfig, options: RunCollectorOptio
         executed: record.status !== 'skipped',
         resultCount: record.count,
         headChecked: Boolean(record.head_checked || checkedHeads.has(record.task_id)),
+        coverage: record.coverage ?? 'unknown',
+        ...(record.coverage_reason ? { coverageReason: redactProxy(record.coverage_reason) } : {}),
         durationMs: record.duration_ms,
         ...(record.error_kind ? { errorKind: record.error_kind } : {}),
         ...(record.error_kind === 'rate_limit' ? { httpStatus: 429 }

@@ -13,6 +13,8 @@ import { eligibleForAiRetry } from './assessment-retry.js';
 import { linkedinCoverage } from '../collector/plan.js';
 import { hasPersonalTracking, vacancyRelevance } from '../matching/relevance.js';
 import { detectWorkMode, jobText } from '../matching/signals.js';
+import { normalizeJob } from '../normalize/index.js';
+import { conflictingFacts } from '../persist/ingest.js';
 
 export { ApiError } from './errors.js';
 
@@ -202,10 +204,18 @@ export async function readJob(id: string): Promise<JobDetail> {
       url: row.directUrl ?? row.rawUrl ?? row.canonicalUrl, activity: listingActivity(row, at),
       activityCheckedAt: row.activityCheckedAt ?? null, validThrough: row.validThrough ?? null,
       closureReason: row.closureReason ?? null, activityEvidence: row.activityEvidence ?? null,
-      firstSeenAt: row.firstSeenAt, lastSeenAt: row.lastSeenAt })),
+      firstSeenAt: row.firstSeenAt, lastSeenAt: row.lastSeenAt,
+      conflicts: listingConflicts(job, row) })),
     currentAssessment: current ? savedAssessment(config, job, current, true) : null,
     assessmentHistory: assessments.filter((row) => row.ID !== current?.ID)
       .map((row) => savedAssessment(config, job, row, validKeys.includes(row.cacheKey))) };
+}
+
+function listingConflicts(job: any, listing: any) {
+  try {
+    const observed = normalizeJob(JSON.parse(listing.rawRecord), listing.source);
+    return observed ? conflictingFacts(job, observed) : [];
+  } catch { return []; }
 }
 
 /** Sole personal-tracking write path; ingestion never owns these fields. */
@@ -249,6 +259,13 @@ export async function readCollectionStatus(): Promise<CollectionStatus> {
   const { taskKeys, ...coverageCounts } = coverage;
   const headRows = await query(SELECT.from(db().SearchProgress).columns('taskKey', 'headCheckedAt'));
   const cutoff = Date.now() - coverage.freshnessHours * 3_600_000;
+  const config = loadConfig();
+  const pendingJobs = (await query<any>(SELECT.from(db().Jobs).where({ isDemo: false }))).filter((job) =>
+    job.status !== 'Ignored' && !job.description?.trim() && vacancyRelevance(config, job).state !== 'irrelevant');
+  const pendingListings = pendingJobs.length ? await query<any>(SELECT.from(db().SourceListings)
+    .where({ job_ID: { in: pendingJobs.map((job) => job.ID) } })) : [];
+  const sourceNames = [...new Set([...sources.map((row) => row.source), ...pendingListings.map((row) => row.source)])].sort();
+  const sourceRows = sourceNames.map((source) => sources.find((row) => row.source === source) ?? { source });
   return { linkedinCoverage: { ...coverageCounts, checkedWithinWindow: headRows.filter((row) =>
     taskKeys.includes(row.taskKey) && row.headCheckedAt && new Date(row.headCheckedAt).getTime() >= cutoff).length },
     latestRun: latestRun ? { ID: latestRun.ID, startedAt: latestRun.startedAt,
@@ -256,13 +273,22 @@ export async function readCollectionStatus(): Promise<CollectionStatus> {
     trigger: latestRun.trigger ?? null, batchKey: latestRun.batchKey ?? null, status: latestRun.status,
     jobsFound: latestRun.jobsFound ?? 0, jobsNew: latestRun.jobsNew ?? 0, jobsUpdated: latestRun.jobsUpdated ?? 0,
     tasks: tasks.map((row) => ({ source: row.source, status: row.status, resultCount: row.resultCount, message: row.message ?? null,
-      searchRequests: row.searchRequests ?? null, detailRequests: row.detailRequests ?? null })),
+      searchRequests: row.searchRequests ?? null, detailRequests: row.detailRequests ?? null,
+      coverage: row.coverage ?? 'unknown', coverageReason: row.coverageReason ?? null })),
     errors: errors.map((row) => ({ source: row.source ?? null, kind: row.kind, message: row.message, occurredAt: row.occurredAt ?? null })) } : null,
-    sources: sources.map((row) => ({ source: row.source, consecutiveFailures: row.consecutiveFailures ?? 0,
+    sources: sourceRows.map((row) => ({ source: row.source, consecutiveFailures: row.consecutiveFailures ?? 0,
       cooldownUntil: row.cooldownUntil ?? null, blocked: Boolean(row.blocked), lastStatus: row.lastStatus ?? null,
       lastMessage: row.lastMessage ?? null, updatedAt: row.updatedAt ?? null,
       searchRequests: row.searchRequests ?? 0, detailRequests: row.detailRequests ?? 0,
       reservedSearch: row.reservedSearch ?? 0, reservedDetail: row.reservedDetail ?? 0,
       windowStartedAt: row.windowStartedAt ?? null, lastHttpStatus: row.lastHttpStatus ?? null,
-      lastRetryAfterSeconds: row.lastRetryAfterSeconds ?? null })) };
+      lastRetryAfterSeconds: row.lastRetryAfterSeconds ?? null,
+      successfulChecks: headRows.filter((head) => head.taskKey.split(':')[1] === row.source && head.headCheckedAt &&
+        new Date(head.headCheckedAt).getTime() >= Date.now() - (config.searches.sources[row.source]?.hours_old ?? config.searches.defaults.hours_old) * 3_600_000).length,
+      lastSuccessfulCheck: headRows.filter((head) => head.taskKey.split(':')[1] === row.source && head.headCheckedAt)
+        .map((head) => head.headCheckedAt).sort().at(-1) ?? null,
+      incompleteScans: tasks.filter((task) => task.source === row.source &&
+        (task.coverage === 'incomplete' || task.status === 'Failed')).length,
+      pendingEnrichment: pendingListings.filter((listing) => listing.source === row.source && !listingIsClosed(listing)).length,
+    })) };
 }

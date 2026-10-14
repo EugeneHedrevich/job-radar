@@ -40,8 +40,9 @@ export async function expireListingDeadlines(at = new Date()): Promise<void> {
 
 /** Apply only explicit observations, including closures returned by failed tasks.
  * A search result cannot silently reopen a listing. Keep all activity history. */
-export async function applyListingActivity(observations: ListingActivity[]): Promise<void> {
+export async function applyListingActivity(observations: ListingActivity[], connection?: any): Promise<void> {
   if (!observations.length) return;
+  if (connection) return applyObservations(connection, observations);
   await cds.tx(async (tx: any) => {
     await tx.run('UPDATE sap_jobradar_Jobs SET ID = ID WHERE 0 = 1');
     await applyObservations(tx, observations);

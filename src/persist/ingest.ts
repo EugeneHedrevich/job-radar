@@ -1,10 +1,11 @@
 import { randomUUID } from 'node:crypto';
 import { cds, db, SELECT, INSERT, UPDATE } from '../db/index.js';
 import type { NormalizedJob } from '../normalize/index.js';
-import { normalizeText, tokenSimilarity } from '../util/text.js';
+import { canonicalizeUrl, normalizeText, tokenSimilarity } from '../util/text.js';
 import { log } from '../util/log.js';
 import { loadConfig } from '../config/index.js';
-import { vacancyRelevance } from '../matching/relevance.js';
+import { hasPersonalTracking, vacancyRelevance } from '../matching/relevance.js';
+import { closedJobIds } from './activity.js';
 
 export interface IngestResult {
   created: number;
@@ -16,6 +17,7 @@ export interface IngestResult {
   updatedJobIds: string[];
   accepted: number;
   filtered: number;
+  pendingEnrichment: number;
   exclusionReasons: Record<string, number>;
 }
 
@@ -75,7 +77,18 @@ async function ingestWithin(normalized: NormalizedJob[],
     updatedJobIds: [],
     accepted: normalized.length,
     filtered: 0,
+    pendingEnrichment: 0,
     exclusionReasons: {},
+  };
+  const config = loadConfig();
+  const closed = context.automatic ? await closedJobIds(connection) : new Set<string>();
+  const pending = new Set<string>(context.automatic ? (await connection.run(SELECT.from(db().Jobs))).filter((job: any) =>
+    !closed.has(job.ID) && !job.isDemo && !job.manuallyImportedAt && !hasPersonalTracking(job) &&
+    vacancyRelevance(config, job).state === 'unresolved').map((job: any) => job.ID) : []);
+  const refreshPending = async (jobId: string) => {
+    if (!pending.has(jobId)) return;
+    const saved = await connection.run(SELECT.one.from(db().Jobs).where({ ID: jobId }));
+    if (vacancyRelevance(config, saved).state !== 'unresolved') pending.delete(jobId);
   };
 
   // Guard against the same listing appearing twice inside one collection run
@@ -109,7 +122,8 @@ async function ingestWithin(normalized: NormalizedJob[],
     const existingListing = await findListing(job, connection);
     if (existingListing) {
       await touchListing(existingListing.ID, job, seenAt, context.runId, connection);
-      const enriched = await enrichJob(existingListing.job_ID, job, seenAt, true, context.demo, connection);
+      const enriched = await enrichJob(existingListing.job_ID, job, seenAt, context.demo, connection);
+      if (enriched) await refreshPending(existingListing.job_ID!);
       if (enriched) { result.updated += 1; result.updatedJobIds.push(existingListing.job_ID); }
       if (existingListing.job_ID) result.jobIds.push(existingListing.job_ID);
       continue;
@@ -118,7 +132,8 @@ async function ingestWithin(normalized: NormalizedJob[],
     const duplicate = await findCrossSourceDuplicate(job, Boolean(context.demo), connection);
     if (duplicate) {
       await insertListing(duplicate.ID, job, seenAt, context.runId, connection);
-      await enrichJob(duplicate.ID, job, seenAt, false, context.demo, connection);
+      await enrichJob(duplicate.ID, job, seenAt, context.demo, connection);
+      await refreshPending(duplicate.ID);
       result.mergedAcrossSources += 1;
       result.updatedJobIds.push(duplicate.ID);
       result.jobIds.push(duplicate.ID);
@@ -126,16 +141,18 @@ async function ingestWithin(normalized: NormalizedJob[],
     }
 
     // Existing listings and cross-source matches were handled first, preserving their history.
-    const relevance = context.automatic ? vacancyRelevance(loadConfig(), job) : null;
-    if (relevance && !relevance.accepted) {
+    const relevance = context.automatic ? vacancyRelevance(config, job) : null;
+    const waiting = relevance?.state === 'unresolved';
+    if (relevance?.state === 'irrelevant' || waiting && pending.size >= config.searches.description_budget.max_pending_candidates) {
       const count = occurrences.get(key)!;
       result.filtered += count;
       result.accepted -= count;
-      result.exclusionReasons[relevance.reason!] = (result.exclusionReasons[relevance.reason!] ?? 0) + count;
+      const reason = waiting ? 'Pending enrichment capacity reached' : relevance!.reason!;
+      result.exclusionReasons[reason] = (result.exclusionReasons[reason] ?? 0) + count;
       continue;
     }
-
     const jobId = randomUUID();
+    if (waiting) { pending.add(jobId); result.pendingEnrichment += 1; }
     await connection.run(
       INSERT.into(db().Jobs).entries({
         ID: jobId,
@@ -320,14 +337,15 @@ async function touchListing(
 }
 
 /**
- * Refresh stated values from an existing source listing; new cross-source
- * listings fill missing values only. Unknown values never erase known ones,
+ * The originating listing remains authoritative. Secondary observations only
+ * fill missing values, including on later visits. Their raw facts stay on the
+ * source listing for review. Unknown values never erase known ones,
  * and firstSeenAt is immutable.
  * Returns true when something other than lastSeenAt changed.
  */
 async function enrichJob(
   jobId: string | null, job: NormalizedJob, seenAt: string,
-  authoritative: boolean, demo = false, connection: any = cds,
+  demo = false, connection: any = cds,
 ): Promise<boolean> {
   if (!jobId) return false;
   const current: JobRow | undefined = await connection.run(SELECT.one.from(db().Jobs).where({ ID: jobId }));
@@ -335,6 +353,7 @@ async function enrichJob(
     log.warn('Listing points at a missing job', { jobId });
     return false;
   }
+  const authoritative = current.fingerprint === job.fingerprint || canonicalizeUrl(current.primaryUrl) === job.listing.canonicalUrl;
 
   const patch: Record<string, unknown> = { lastSeenAt: seenAt };
   const fill = <K extends keyof JobRow>(key: K, value: JobRow[K] | null) => {
@@ -342,7 +361,7 @@ async function enrichJob(
     // CAP returns Decimal columns as strings; compare their numeric values.
     const unchanged = (key === 'salaryMin' || key === 'salaryMax') && previous !== null && value !== null
       ? Number(previous) === Number(value)
-      : value === previous;
+      : typeof value === 'string' && typeof previous === 'string' ? normalizeText(value) === normalizeText(previous) : value === previous;
     if (value !== null && value !== undefined && !unchanged &&
       (authoritative || previous === null || previous === undefined)) {
       patch[key as string] = value;
@@ -356,19 +375,33 @@ async function enrichJob(
   if (patch.location && authoritative) patch.locationCountry = job.locationCountry;
   fill('isRemote', job.isRemote);
   fill('jobType', job.jobType);
-  fill('salaryMin', job.salaryMin);
-  fill('salaryMax', job.salaryMax);
-  fill('salaryInterval', job.salaryInterval);
-  fill('salaryCurrency', job.salaryCurrency);
+  const payFields = ['salaryMin', 'salaryMax', 'salaryInterval', 'salaryCurrency'] as const;
+  // Never construct a comparable rate from conflicting amounts/units on
+  // different sources. A secondary quote must agree with established pay.
+  const compatiblePay = authoritative || (Boolean(job.salaryCurrency && job.salaryInterval) ||
+    current.salaryCurrency === null && current.salaryInterval === null) && payFields.every((field) =>
+    current[field] === null || job[field] === null || (field === 'salaryMin' || field === 'salaryMax'
+      ? Number(current[field]) === Number(job[field]) : normalizeText(current[field]) === normalizeText(job[field])));
+  if (compatiblePay) for (const field of payFields) fill(field, job[field]);
   fill('datePosted', job.datePosted);
 
-  if (job.description && job.description !== current.description && (authoritative || !current.description)) {
+  if (job.description && job.descriptionHash !== current.descriptionHash && (authoritative || !current.description)) {
     patch.description = job.description;
     patch.descriptionHash = job.descriptionHash;
   }
   if (demo && !current.isDemo) patch.isDemo = true;
-  if (authoritative && current.primaryUrl !== job.primaryUrl) patch.primaryUrl = job.primaryUrl;
+  if (authoritative && canonicalizeUrl(current.primaryUrl) !== canonicalizeUrl(job.primaryUrl)) patch.primaryUrl = job.primaryUrl;
 
   await connection.run(UPDATE(db().Jobs).set(patch).where({ ID: jobId }));
   return Object.keys(patch).length > 1;
+}
+
+/** Latest conflicting source observations are retained in rawRecord, outside
+ * the assessment cache key. Show them in details rather than changing facts. */
+export function conflictingFacts(current: JobRow, observed: NormalizedJob): Array<{ field: string; value: string }> {
+  return (['description', 'jobType', 'isRemote', 'location', 'salaryMin', 'salaryMax', 'salaryInterval', 'salaryCurrency', 'datePosted'] as const)
+    .filter((field) => current[field] !== null && observed[field] !== null &&
+      (field === 'salaryMin' || field === 'salaryMax' ? Number(current[field]) !== Number(observed[field]) :
+        normalizeText(String(current[field])) !== normalizeText(String(observed[field]))))
+    .map((field) => ({ field, value: String(observed[field]) }));
 }

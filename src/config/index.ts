@@ -120,6 +120,11 @@ export const searchesSchema = z.object({
     max_search_requests_per_window: z.number().int().min(0).max(6).default(6),
     max_detail_requests_per_window: z.number().int().min(0).max(5).default(5),
   }).prefault({}),
+  coverage: z.object({
+    catch_up_hours: z.number().int().min(0).max(336).default(72),
+    older_scan_every: z.number().int().min(2).max(50).default(6),
+    older_scan_hours: z.number().int().positive().max(2160).default(720),
+  }).prefault({}),
   defaults: z.object({
     hours_old: z.number().int().positive(),
     results_wanted: z.number().int().positive(),
@@ -145,6 +150,7 @@ export const searchesSchema = z.object({
   }),
   description_budget: z.object({
     max_tasks_per_run: z.number().int().nonnegative(),
+    max_pending_candidates: z.number().int().min(0).max(100).default(40),
     prefer_sources: z.array(z.string()).default([]),
   }),
   resilience: z.object({

@@ -1,5 +1,6 @@
 import type { AppConfig } from '../config/index.js';
 import type { CollectorTask } from './types.js';
+import { normalizeText } from '../util/text.js';
 
 export interface PlannedBatch {
   batchKey: string;
@@ -105,7 +106,7 @@ export function planBatch(config: AppConfig, options: PlanOptions = {}): Planned
         tasks.push(makeTask(config, batch.key, source, geoId, keyword, options));
       }
     }
-    if (tasks.length) tasksBySource.set(source, tasks);
+    if (tasks.length) tasksBySource.set(source, distinctTasks(tasks));
   }
 
   const searchCursors = { ...options.descriptionRotation?.lastSearchByScope };
@@ -266,7 +267,18 @@ export function linkedinCatalogue(config: AppConfig): CollectorTask[] {
   const tasks = config.searches.rotation.batches.flatMap((batch) => (batch.targets.linkedin ?? []).filter((geo) =>
     !config.searches.sources.linkedin?.queries?.geos || config.searches.sources.linkedin.queries.geos.includes(geo)).flatMap((geo) =>
     batch.keywords.map((keyword) => makeTask(config, batch.key, 'linkedin', geo, keyword))));
-  return [...new Map(tasks.map((task) => [`${task.location ?? ''}|${task.search_term}`, task])).values()];
+  return distinctTasks(tasks);
+}
+
+/** Only identical effective queries and filters share a task; broad skills
+ * remain distinct from role phrases and from different country scopes. */
+export function searchQueryKey(task: CollectorTask): string {
+  return JSON.stringify([task.source, normalizeText(task.search_term), normalizeText(task.location),
+    normalizeText(task.country_indeed), task.is_remote, normalizeText(task.job_type)]);
+}
+
+function distinctTasks(tasks: CollectorTask[]): CollectorTask[] {
+  return [...new Map(tasks.map((task) => [searchQueryKey(task), task])).values()];
 }
 
 /** Capacity of the actual configured sequence, before cooldowns; never a promise of complete coverage. */

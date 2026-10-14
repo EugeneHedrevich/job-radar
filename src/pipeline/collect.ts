@@ -104,6 +104,7 @@ async function collectOwned(options: CollectOptions, claim: CollectionClaim): Pr
 
     const collected: Array<{ taskId: string; source: string; job: CollectorJob }> = [];
     const activities: ListingActivity[] = [];
+    const searchProgress: TaskOutcome[] = [];
     // Keyed by task id so a successful retry replaces the earlier failure.
     const outcomeByTask = new Map<string, TaskOutcome>();
     let malformedLines = 0;
@@ -186,7 +187,7 @@ async function collectOwned(options: CollectOptions, claim: CollectionClaim): Pr
           collected.push(...output.jobs);
           activities.push(...output.activities);
           for (const outcome of output.outcomes) outcomeByTask.set(outcome.taskId, outcome);
-          await recordSearchProgress(output.outcomes);
+          searchProgress.push(...output.outcomes);
 
           const retryable = output.outcomes.filter((outcome) => outcome.status === 'Failed' && isRetryable(outcome));
           if (source !== 'linkedin' && !output.outcomes.some((outcome) => ['rate_limit', 'blocked'].includes(outcome.errorKind ?? '')) &&
@@ -204,7 +205,7 @@ async function collectOwned(options: CollectOptions, claim: CollectionClaim): Pr
                 ...(last?.offset !== undefined ? { offset: last.offset } : last ? { search_cursor: last } : {}) });
             }
             const retried = await retryTasks(config, source, retryTasksPlan, retryable, collected, activities, progress);
-            await recordSearchProgress(retried);
+            searchProgress.push(...retried);
             for (const outcome of retried) outcomeByTask.set(outcome.taskId, outcome);
           }
           await recordOutcomes(config, tasks.map((task) => outcomeByTask.get(task.task_id)!), new Date(), startedAt);
@@ -230,6 +231,7 @@ async function collectOwned(options: CollectOptions, claim: CollectionClaim): Pr
             });
           }
           sourceOutcomes = tasks.map((task) => outcomeByTask.get(task.task_id)!);
+          searchProgress.push(...sourceOutcomes);
           await recordOutcomes(config, sourceOutcomes, new Date(), startedAt);
         } finally {
           if (requestClaim?.token) await settleSourceRequests(source, requestClaim.token,
@@ -237,7 +239,6 @@ async function collectOwned(options: CollectOptions, claim: CollectionClaim): Pr
               ? sourceOutcomes.reduce((sum, row) => sum + row.searchRequests!, 0) : undefined,
             sourceOutcomes && sourceOutcomes.every((row) => row.detailRequests !== undefined)
               ? sourceOutcomes.reduce((sum, row) => sum + row.detailRequests!, 0) : undefined);
-          await recordQueryRotation(plan, [...outcomeByTask.values()]);
         }
       }
     }
@@ -256,9 +257,17 @@ async function collectOwned(options: CollectOptions, claim: CollectionClaim): Pr
       else unusable += 1;
     }
 
-    const ingest = await ingestJobs(normalized, { runId, seenAt: new Date(), demo: Boolean(options.fixture), automatic: true });
+    // All network work is complete. Results, activity and their continuation
+    // commit together; a failed import rolls back cursors for idempotent replay.
+    const ingest = await cds.tx(async (tx: any) => {
+      await tx.run('UPDATE sap_jobradar_Jobs SET ID = ID WHERE 0 = 1');
+      const saved = await ingestJobs(normalized, { runId, seenAt: new Date(), demo: Boolean(options.fixture), automatic: true, connection: tx });
+      await applyListingActivity(activities, tx);
+      await recordSearchProgress(searchProgress, new Date(), tx);
+      await recordQueryRotation(plan, outcomes, tx);
+      return saved;
+    });
     ingest.unusable = unusable;
-    await applyListingActivity(activities);
 
     for (const outcome of outcomes) {
       await cds.run(
@@ -275,6 +284,8 @@ async function collectOwned(options: CollectOptions, claim: CollectionClaim): Pr
           durationMs: outcome.durationMs,
           searchRequests: outcome.searchRequests ?? null,
           detailRequests: outcome.detailRequests ?? null,
+          coverage: outcome.coverage ?? (outcome.status === 'Failed' ? 'incomplete' : 'unknown'),
+          coverageReason: outcome.coverageReason?.slice(0, 490) ?? null,
           message: outcome.message?.slice(0, 1900) ?? null,
         }),
       );

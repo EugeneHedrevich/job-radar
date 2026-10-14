@@ -27,6 +27,12 @@ linkedin_limits:
   max_search_requests_per_window: 6
   max_detail_requests_per_window: 5
 
+# Widen selected searches without allocating additional tasks or HTTP requests.
+coverage:
+  catch_up_hours: 72
+  older_scan_every: 6
+  older_scan_hours: 720
+
 # Reference catalogue; actual execution is defined by rotation.batches below.
 keywords:
   - "SAP BTP Developer"
@@ -81,11 +87,11 @@ sources:
       syntax: linkedin
       exact_phrases: true
       exclusions: [internship, working student, Werkstudent, Praktikum]
-      roles: { SAP CAP: SAP CAP Developer, SAP CAPM: SAP CAPM Developer, SAPUI5: SAPUI5 Developer }
+      roles: {} # broad skills stay broad; explicit Developer keywords still run
       # Optional: geos: [eu, de, bg]; employment: contract; remote_only: true.
       # Leave filters unset to retain adverts with missing/coarse source fields.
-    # Exact phrase overrides collapse 98 task entries to 91 distinct query/geography combinations.
-    # These share up to 66 slots per 108h sequence before cooldowns/shared limits.
+    # Equivalent query/geography combinations share one catalogue entry.
+    # These share bounded slots per sequence before cooldowns/shared limits.
     # The catalogue rotates fairly; actual first-page coverage is diagnostic,
     # not guaranteed. Keep a wider window for this deliberately slower source.
     hours_old: 168
@@ -117,7 +123,7 @@ sources:
       syntax: indeed
       exact_phrases: true
       exclusions: [internship, working student, Werkstudent, Praktikum]
-      roles: { SAP CAP: SAP CAP Developer, SAP CAPM: SAP CAPM Developer, SAPUI5: SAPUI5 Developer }
+      roles: {}
     # country_indeed is mandatory and must use JobSpy's exact spelling.
     geos:
       de: { id: de, country_indeed: "Germany", location: "Germany" }
@@ -140,7 +146,7 @@ sources:
 
   glassdoor:
     enabled: true
-    queries: { syntax: plain, roles: { SAP CAP: SAP CAP Developer, SAPUI5: SAPUI5 Developer } }
+    queries: { syntax: plain, roles: {} }
     # Only countries marked with * in the JobSpy README support Glassdoor.
     geos:
       de: { id: de, country_indeed: "Germany", location: "Germany" }
@@ -455,6 +461,7 @@ rotation:
 # invented assessment.
 description_budget:
   max_tasks_per_run: 2
+  max_pending_candidates: 40 # hidden cards awaiting SAP context; reuse description slots
   # Global persistent source cursor; independent batch keyword/location cursors.
   # Sources that already ship descriptions in search results are skipped here.
   prefer_sources: ["linkedin", "glassdoor", "redglobal", "eursap", "whitehall", "michaelpage", "nextventures"]

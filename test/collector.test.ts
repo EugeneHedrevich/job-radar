@@ -6,7 +6,7 @@ import { promisify } from "node:util";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { activeCooldowns, recordOutcomes } from "../src/collector/health.js";
 import { recoverInterruptedRuns, startRunHeartbeat } from "../src/collector/lifecycle.js";
-import { linkedinCoverage, planBatch, selectBatchIndex, type DescriptionRotation } from "../src/collector/plan.js";
+import { linkedinCoverage, planBatch, selectBatchIndex, sourceQuery, type DescriptionRotation } from "../src/collector/plan.js";
 import { recordQueryRotation, recordSearchProgress, reserveBatchPlan } from "../src/collector/rotation.js";
 import { CollectorStartupError, runCollector } from "../src/collector/run.js";
 import { type CollectorTask } from "../src/collector/types.js";
@@ -209,7 +209,9 @@ describe("priority-coverage", () => {
     describe('priority search coverage within operational limits', () => {
         it('covers distinct source queries fairly across the configured 66-slot/108h sequence', () => {
             const config = loadConfig();
-            expect(linkedinCoverage(config)).toMatchObject({ combinations: 91, slotsPerSequence: 66, sequenceHours: 108 });
+            const coverage = linkedinCoverage(config);
+            expect(coverage).toMatchObject({ slotsPerSequence: 66, sequenceHours: 108 });
+            expect(coverage.combinations).toBeGreaterThan(91); // Broad and explicit role searches remain distinct.
             let state: ReturnType<typeof planBatch>['descriptionRotation'] | undefined;
             const seen = new Set<string>();
             const count = config.searches.rotation.sequence!.length;
@@ -227,7 +229,22 @@ describe("priority-coverage", () => {
                 for (const task of tasks) if (task.source === 'linkedin') seen.add(task.task_id);
                 if (slot === count - 1) expect(seen.size).toBe(66);
             }
-            expect(seen.size).toBe(91); // Query overrides are deduplicated across batches/geographies.
+            expect(seen.size).toBe(coverage.combinations);
+        });
+        it('preserves broad skill searches and deduplicates equivalent query/geography tasks', () => {
+            const config = loadConfig();
+            for (const source of ['linkedin', 'indeed', 'glassdoor']) {
+                expect(sourceQuery(config, source, 'SAP CAP')).not.toContain('Developer');
+                expect(sourceQuery(config, source, 'SAPUI5')).not.toContain('Developer');
+                expect(sourceQuery(config, source, 'SAP CAP Developer')).toContain('SAP CAP Developer');
+            }
+            const batch = config.searches.rotation.batches.find(row => row.key === 'cap-broad')!;
+            const geo = batch.targets.indeed![0]!;
+            const before = planBatch(config, { batchKey: batch.key, onlySources: ['indeed'] }).tasksBySource.get('indeed')!.length;
+            config.searches.sources.indeed!.geos.equivalent = { ...config.searches.sources.indeed!.geos[geo]!, id: 'equivalent' };
+            batch.targets.indeed!.push('equivalent');
+            batch.keywords.push('sap cap');
+            expect(planBatch(config, { batchKey: batch.key, onlySources: ['indeed'] }).tasksBySource.get('indeed')).toHaveLength(before);
         });
         it('revisits every broad priority group and public catalogue within 36 hours', () => {
             const config = loadConfig();
@@ -408,6 +425,24 @@ describe("description-rotation", () => {
             expect(tasks[0]!.hours_old).toBe(2160);
             const empty = await reserveBatchPlan(loadConfig(), { enrichOnly: true, onlySources: ['whitehall'], at });
             expect(empty.tasksBySource.size).toBe(0);
+        });
+        it('bounds failed-search catch-up and occasionally includes older listings without extra tasks', async () => {
+            const config = loadConfig(), at = new Date('2026-10-01T00:00:00Z');
+            const options = { batchKey: 'cap-broad', onlySources: ['linkedin'] };
+            const first = await reserveBatchPlan(config, { ...options, at });
+            const task = first.tasksBySource.get('linkedin')![0]!;
+            const failure = { taskId: task.task_id, source: task.source, searchTerm: task.search_term,
+                location: task.location, countryIndeed: task.country_indeed, status: 'Failed' as const,
+                executed: true, headChecked: true, resultCount: 0, durationMs: 1 };
+            await recordSearchProgress([failure], at);
+            const resumed = await reserveBatchPlan(config, { ...options, at: new Date(at.getTime() + 100 * 3600000) });
+            expect(resumed.tasksBySource.get('linkedin')![0]!.hours_old).toBe(task.hours_old + config.searches.coverage.catch_up_hours);
+            for (let visit = 0; visit < 5; visit++) await recordSearchProgress([{ ...failure, status: 'Succeeded', headChecked: true }], at);
+            const older = await reserveBatchPlan(config, { ...options, at: new Date(at.getTime() + 101 * 3600000) });
+            expect(older.tasksBySource.get('linkedin')![0]!.hours_old).toBe(config.searches.coverage.older_scan_hours);
+            expect(older.tasksBySource.get('linkedin')).toHaveLength(first.tasksBySource.get('linkedin')!.length);
+            expect(JSON.parse((await queryOne<any>(SELECT.from(db().SearchProgress).where({ taskKey: task.task_id })))!.state)).toEqual({});
+            expect((await queryOne<any>(SELECT.from(db().SearchProgress).where({ taskKey: task.task_id })))!.failedAt).toBeNull();
         });
         it('enriches stored listings independently of the active keyword and moves failed reservations to the queue tail', async () => {
             const at = new Date('2026-10-09T12:00:00Z');

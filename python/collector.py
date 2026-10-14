@@ -224,7 +224,7 @@ def jobspy_search(source, transport, kwargs):
                            currency=pay.currency, salary_source="direct_data")
             if kwargs.get("on_record"):
                 kwargs["on_record"](row)
-            if source == "indeed" and kwargs.get("on_head_checked"):
+            if source in {"indeed", "glassdoor"} and kwargs.get("on_head_checked"):
                 kwargs["on_head_checked"]()  # Keep a verified head even if a later page fails.
             if source == "linkedin" and kwargs.get("on_progress"):
                 offset = int(kwargs.get("offset", 0)) // 10 * 10
@@ -326,6 +326,8 @@ def scrape_with_failures(kwargs: dict[str, Any]) -> tuple[Any, tuple[str, str, f
         if isinstance(verify, str):
             search_kwargs["ca_cert"] = verify
         source = kwargs["site_name"][0]
+        if source == 'glassdoor':
+            kwargs['coverage_reason'] = 'Glassdoor is capped at the first results; pinned JobSpy has no reliable persisted cursor continuation.'
         transport = kwargs.get("transport") or LinkedInTransport()
         import pandas as pd
         offset = int(kwargs.get('offset', 0))
@@ -360,6 +362,8 @@ def scrape_with_failures(kwargs: dict[str, Any]) -> tuple[Any, tuple[str, str, f
                     kwargs['next_cursor'] = {'offset': next_offset if count and next_offset < cap else 0}
                     if kwargs.get('on_progress'):
                         kwargs['on_progress'](kwargs['next_cursor'])
+                    if not failure and not phase.get('_budget_exhausted') and count < search_kwargs['results_wanted']:
+                        kwargs['coverage'] = 'exhausted' if count else 'unknown'
                 combined = pd.concat(frames, ignore_index=True)
                 if 'job_url' in combined.columns:
                     combined = combined.drop_duplicates(subset=['job_url'], keep='last')
@@ -390,6 +394,7 @@ def run_task(task: dict[str, Any], timeout_seconds: int, detail_cache=None) -> d
     source = task["source"]
     started = time.monotonic()
     kwargs = build_kwargs(task)
+    kwargs['coverage'] = 'unknown' if task.get('enrich_only') else 'incomplete'
     kwargs['detail_cache'] = detail_cache if detail_cache is not None else {}
     log(f"[task {task_id}] {source} :: {kwargs.get('search_term')!r} @ {kwargs.get('location')!r}")
 
@@ -462,6 +467,8 @@ def run_task(task: dict[str, Any], timeout_seconds: int, detail_cache=None) -> d
            if upstream_failure else {}),
         "count": len(collected_urls),
         "head_checked": bool(kwargs.get('head_checked')),
+        "coverage": kwargs['coverage'],
+        **({'coverage_reason': kwargs['coverage_reason']} if kwargs.get('coverage_reason') else {}),
         "duration_ms": int((time.monotonic() - started) * 1000),
         "search_requests": transport.search_requests if source == "linkedin" else None,
         "detail_requests": transport.detail_requests if source == "linkedin" else None,

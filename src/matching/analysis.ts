@@ -65,7 +65,11 @@ export function analyzeVacancy(config: AppConfig, job: MatchableJob): VacancyAna
     if (requirement) requirement.profileEvidence = 'mismatch';
   }
   const hardRejects = findHardRejects(config, text, requirements, attendance);
-  if (!relevance.accepted) hardRejects.push({ id: 'role_relevance', reason: relevance.reason! });
+  const rate = hourlyRate(config, job);
+  if (rate.comparable && rate.upperBound !== null && rate.upperBound < config.profile.compensation.minimum_hourly_rate) {
+    hardRejects.push({ id: 'minimum_rate', reason: `The stated rate is at most ${rate.upperBound.toFixed(2)} ${rate.currency}/h, below the profile minimum of ${config.profile.compensation.minimum_hourly_rate} ${rate.currency}/h.` });
+  }
+  if (relevance.state === 'irrelevant') hardRejects.push({ id: 'role_relevance', reason: relevance.reason! });
   hardRejects.push(...constraints.hardRejectReasons.map((reason) => ({ id: 'profile_constraint', reason })));
   const unclaimed = requirements.filter((item) => item.profileEvidence === 'not_claimed');
   const mandatoryGaps = unclaimed.filter((item) => item.kind === 'mandatory' &&
@@ -80,15 +84,16 @@ export function analyzeVacancy(config: AppConfig, job: MatchableJob): VacancyAna
   const missingInformation = [...unclear, ...capabilityUnknown.mandatory, ...capabilityUnknown.preferred,
     ...educationUncertainty(config, job), ...constraints.missing, ...abap.missing,
     ...unresolvedGroups.map((group) => `mandatory capability grouping "${group}" needs confirmation`)];
+  if (relevance.state === 'unresolved') missingInformation.push(relevance.reason!);
   if (attendance.unclear !== null) missingInformation.push(`unclear whether onsite attendance (${attendance.unclear.toFixed(1)} days/month) is mandatory`);
   if (unclearAttendance) missingInformation.push('onsite attendance frequency is not stated or unclear');
   if (!text.hasDescription) missingInformation.unshift('full description was not retrieved - assessment is based on the title only');
-  return { text, relevance, engagement, workMode, rate: hourlyRate(config, job), attendance, unclearAttendance, requirements, profileEvidence, constraints,
+  return { text, relevance, engagement, workMode, rate, attendance, unclearAttendance, requirements, profileEvidence, constraints,
     hardRejects, mandatoryGaps: [...new Set(mandatoryGaps)],
     mandatoryGapEvidence: [...deterministicGapEvidence(config, job), ...constraints.evidence],
     preferredGaps: [...unclaimed.filter((item) => item.kind === 'preferred').map((item) => `${item.name} is listed as preferred`), ...constraints.preferredGaps],
     missingInformation: [...new Set(missingInformation)],
-    requiresReview: !text.hasDescription || Boolean(unclear.length || capabilityUnknown.mandatory.length || unresolvedGroups.length || constraints.requiresReview ||
+    requiresReview: relevance.state === 'unresolved' || !text.hasDescription || Boolean(unclear.length || capabilityUnknown.mandatory.length || unresolvedGroups.length || constraints.requiresReview ||
       abap.requiresReview || unresolvedMandatoryEducation(config, job) || attendance.unclear !== null || unclearAttendance) };
 }
 

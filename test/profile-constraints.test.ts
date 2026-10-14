@@ -247,6 +247,11 @@ describe('deterministic constraints survive a positive AI answer', () => {
         ['Workload: 50 hours per week is mandatory.', 'Skip'], ['Remote, UK residents only.', 'Skip'],
         ['Candidates must reside within the EU, excluding Bulgaria.', 'Skip'], ['UK right to work is mandatory.', 'Review'],
         ['Must have SAP CAP / Kafka.', 'Review'], ['SAP CAP + Kafka are mandatory.', 'Review'],
+        ['Must have 5 years of React experience.', 'Review'],
+        ['Must have five years of React experience.', 'Review'], ['Must have 5-year React experience.', 'Review'],
+        ['Must have SAP CAP and 5 years of React experience.', 'Review'],
+        ['5 years of React experience is optional.', 'Apply'],
+        ['Required: (5 years of React experience and SAP CAP) or RAP ownership', 'Review', 'uncertain'],
         ['SAP CAP experience with Kafka is mandatory.', 'Review'],
         ['Requirements:\nSAP CAP experience with Kafka', 'Review'],
         ['SAP CAP certification is mandatory.', 'Review'],
@@ -328,6 +333,13 @@ describe('deterministic constraints survive a positive AI answer', () => {
             expect(ai.mandatoryGaps.join(' ')).not.toMatch(/Kafka/i);
             expect(ai.missingInformation.join(' ')).toMatch(/required capability "kafka"/);
         }
+        if (condition.includes('React')) {
+            expect(analysis.requirements).toContainEqual(expect.objectContaining({ name: 'react', profileEvidence: 'unknown',
+                kind: recommendation === 'Apply' ? 'preferred' : alternativeStatus ? 'unclear' : 'mandatory' }));
+            expect(ai.strongMatches).not.toContain('React');
+            expect(ai.mandatoryGaps.join(' ')).not.toMatch(/React/i);
+            expect(ai.mandatoryGapEvidence).toEqual([]);
+        }
         if (condition.includes('certification')) {
             const certification = analysis.requirements.find((item) => item.name.includes('certification'));
             expect(certification).toMatchObject({ profileEvidence: 'unknown' });
@@ -385,5 +397,25 @@ describe('deterministic constraints survive a positive AI answer', () => {
         if (accepted) await assessWithLlm(config, job);
         else await expect(assessWithLlm(config, job)).rejects.toThrow();
         expect(fetch).toHaveBeenCalledTimes(accepted ? 1 : 0);
+    });
+    it.each([
+        [20, 30, 'hourly', 'EUR', true], [160, 240, 'daily', 'EUR', true],
+        [30, 60, 'hourly', 'EUR', false], [20, 45, 'hourly', 'EUR', false],
+        [20, null, 'hourly', 'EUR', false], [70, 30, 'hourly', 'EUR', false],
+        [20, 30, 'hourly', 'USD', false], [20, 30, 'hourly', null, false],
+        [null, null, 'hourly', 'EUR', false],
+    ])('enforces only a comparable upper rate bound: %s–%s %s %s', async (salaryMin, salaryMax, salaryInterval, salaryCurrency, blocked) => {
+        enableReviewAi(config);
+        vi.stubGlobal('fetch', vi.fn(async () => reviewAiResponse('Apply', 99)));
+        const job = reviewJob('', { salaryMin, salaryMax, salaryInterval, salaryCurrency });
+        const analysis = analyzeVacancy(config, job), rules = assessWithRules(config, job, analysis), ai = await assessWithLlm(config, job, analysis);
+        for (const result of [rules, ai]) {
+            expect(result.hardReject).toBe(blocked);
+            if (blocked) {
+                expect(result.recommendation).toBe('Skip');
+                expect(result.fitScore).toBe(config.scoring.hard_rejects.score_cap);
+                expect(result.hardRejectReason).toContain('below the profile minimum');
+            }
+        }
     });
 });

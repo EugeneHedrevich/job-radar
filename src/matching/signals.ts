@@ -118,6 +118,7 @@ export function detectWorkMode(config: AppConfig, job: MatchableJob, text: JobTe
 
 export interface HourlyRate {
   value: number | null;
+  upperBound: number | null;
   currency: string | null;
   comparable: boolean;
   note: string | null;
@@ -127,7 +128,7 @@ export interface HourlyRate {
 export function hourlyRate(config: AppConfig, job: MatchableJob): HourlyRate {
   const amount = job.salaryMax ?? job.salaryMin;
   if (amount === null || amount === undefined) {
-    return { value: null, currency: job.salaryCurrency, comparable: false, note: 'rate not stated' };
+    return { value: null, upperBound: null, currency: job.salaryCurrency, comparable: false, note: 'rate not stated' };
   }
   const currency = (job.salaryCurrency ?? '').toUpperCase() || null;
   const { hours_per_day, working_days_per_month, working_months_per_year, currency: target } =
@@ -143,16 +144,19 @@ export function hourlyRate(config: AppConfig, job: MatchableJob): HourlyRate {
   };
   const factor = divisor[interval];
   if (!factor) {
-    return { value: null, currency, comparable: false, note: `salary interval "${interval || 'unknown'}" not comparable` };
+    return { value: null, upperBound: null, currency, comparable: false, note: `salary interval "${interval || 'unknown'}" not comparable` };
   }
   const value = amount / factor;
+  const upperBound = job.salaryMax !== null && Number.isFinite(Number(job.salaryMax)) && Number(job.salaryMax) >= 0 &&
+    (job.salaryMin === null || Number.isFinite(Number(job.salaryMin)) && Number(job.salaryMin) >= 0 &&
+      Number(job.salaryMin) <= Number(job.salaryMax)) ? Number(job.salaryMax) / factor : null;
   if (currency && currency !== target.toUpperCase()) {
-    return { value, currency, comparable: false, note: `rate stated in ${currency}, target is ${target}` };
+    return { value, upperBound, currency, comparable: false, note: `rate stated in ${currency}, target is ${target}` };
   }
   if (!currency) {
-    return { value, currency: null, comparable: false, note: 'salary currency not stated; rate cannot be compared with the profile' };
+    return { value, upperBound, currency: null, comparable: false, note: 'salary currency not stated; rate cannot be compared with the profile' };
   }
-  return { value, currency, comparable: true, note: null };
+  return { value, upperBound, currency, comparable: true, note: null };
 }
 
 /** Preserve list items and clauses, without splitting technology names at dots. */

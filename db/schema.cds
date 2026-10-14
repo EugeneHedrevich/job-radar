@@ -98,6 +98,8 @@ entity CollectionTasks : cuid {
   durationMs    : Integer;
   searchRequests : Integer; // observed HTTP requests; null for uninstrumented sources
   detailRequests : Integer;
+  coverage      : String(20); // exhausted | incomplete | unknown; success is separate
+  coverageReason : String(500);
   message       : String(2000);
 }
 
@@ -145,6 +147,9 @@ entity SearchProgress {
   sweepStartedAt : Timestamp;
   updatedAt : Timestamp;
   headCheckedAt : Timestamp;
+  queryKey : String(1000);
+  failedAt : Timestamp;
+  successfulVisits : Integer default 0;
 }
 
 /** One shared lease for UI, CLI and scheduler, including bounded assessment. */
