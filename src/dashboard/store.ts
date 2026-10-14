@@ -18,6 +18,7 @@ export { ApiError } from './errors.js';
 
 export const trackingPatchSchema = z.object({
   status: z.enum(APPLICATION_STATUSES).optional(),
+  viewed: z.boolean().optional(),
   personalNotes: z.string().max(20_000).optional(),
   applicationDate: z.iso.date().nullable().optional(),
   cvSent: z.boolean().optional(),
@@ -26,7 +27,7 @@ export const trackingPatchSchema = z.object({
 }).strict().refine((patch) => Object.keys(patch).length > 0, 'No tracking fields supplied');
 
 const listSchema = z.object({
-  view: z.enum(['vacancies', 'applications', 'imports']).default('vacancies'),
+  view: z.enum(['vacancies', 'applications', 'imports', 'viewed']).default('vacancies'),
   q: z.string().max(500).default(''),
   source: z.array(z.string().min(1).max(50)).max(50).default([]),
   minScore: z.coerce.number().int().min(0).max(100).optional(),
@@ -47,6 +48,7 @@ function parseInput<T>(schema: z.ZodType<T>, input: unknown): T {
 
 function tracking(row: any): Tracking {
   return { status: row.status ?? 'New', personalNotes: row.personalNotes ?? '',
+    viewedAt: row.viewedAt ?? null,
     applicationDate: row.applicationDate ?? null, cvSent: Boolean(row.cvSent), cvSentAt: row.cvSentAt ?? null,
     sentCvLabel: row.sentCvLabel ?? null };
 }
@@ -145,6 +147,8 @@ export async function listJobs(params = new URLSearchParams()): Promise<JobList>
   }
   const needle = input.q.trim().toLocaleLowerCase();
   const filtered = summaries.filter((job) =>
+    (input.view !== 'vacancies' || !job.viewedAt) &&
+    (input.view !== 'viewed' || Boolean(job.viewedAt)) &&
     (input.view !== 'vacancies' || hasPersonalTracking(job) || Boolean(job.manuallyImportedAt) ||
       vacancyRelevance(config, jobs.find((row: any) => row.ID === job.ID) as any).accepted) &&
     (input.view !== 'applications' || job.cvSent || job.applicationDate || Boolean(job.personalNotes.trim()) || job.status !== 'New') &&
@@ -216,14 +220,19 @@ export async function updateTracking(id: string, input: unknown): Promise<Tracki
     if (!nextSent && patch.cvSentAt) throw new ApiError(400, 'A send date requires CV sent');
     if (nextSent && previous.cvSentAt && patch.cvSentAt === null) throw new ApiError(400, 'Clear CV sent to remove its send date');
     if (patch.cvSentAt) patch.cvSentAt = new Date(patch.cvSentAt).toISOString();
-    const values = { ...patch, ...(!nextSent ? { cvSentAt: null } : {}) };
+    const { viewed, ...personal } = patch;
+    const values = { ...personal,
+      ...(!nextSent && patch.cvSent !== undefined ? { cvSentAt: null } : {}),
+      ...(viewed !== undefined ? { viewedAt: viewed ? previous.viewedAt ?? new Date().toISOString() : null } : {}) };
     await tx.run(UPDATE(db().Jobs).set(values).where({ ID: id }));
     if (patch.cvSent === true && !previous.cvSent) {
       await tx.run(UPDATE(db().Jobs).set({ status: 'Applied' }).where({ ID: id, status: { in: ['New', 'Interested'] } }));
     }
     if (patch.status === 'Ignored') await suppressIgnoredWork(tx, id);
     const row = await tx.run(SELECT.one.from(db().Jobs).where({ ID: id }));
-    await syncCvFollowUp(tx, previous, row);
+    if (patch.cvSent !== undefined || patch.cvSentAt !== undefined || patch.status !== undefined) {
+      await syncCvFollowUp(tx, previous, row);
+    }
     return tracking(row);
   });
 }

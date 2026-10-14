@@ -231,11 +231,17 @@ Expanded diagnostics separate unique new/updated jobs, cached assessments, new r
 assessments, successful AI assessments and failed AI attempts. The CLI and scheduler
 use the same finalisation, including saved AI failure reasons.
 
-The compact list opens with newest saved vacancies and no score cutoff. Search covers
+The compact list opens with newest saved, unviewed vacancies and no score cutoff. Search covers
 title, company, location and personal notes. **My applications** includes personal
 tracking regardless of score, assessment age or listing closure. **Added manually**
 keeps imports easy to find while assessment is pending. More filters and collection
 diagnostics are collapsed, along with detailed dates, source evidence and assessment history.
+**Mark viewed** in a row or vacancy details moves the vacancy from **Vacancies** to
+**Viewed**. The marker is saved in SQLite, survives collection and restarts, and is
+independent of application status. Opening a vacancy alone does not mark it viewed.
+**Mark unviewed** restores it to the main list, subject to its filters. Viewed
+applications and manual imports remain in their respective views; notes and reminders
+are preserved. Viewed vacancies have no minimum-score cutoff.
 The searchable Sources picker accepts multiple sources: jobs from any selected source
 are included once, and clearing the selection includes all sources. Filter by minimum
 current fit score, application status and listing activity; sort and paginate with the
@@ -309,9 +315,9 @@ The thin JSON API is local and intentionally limited:
 
 | Endpoint | Purpose |
 | --- | --- |
-| `GET /api/jobs` | Stored jobs with `view=vacancies\|applications\|imports`, search, filters, sort and pagination |
+| `GET /api/jobs` | Stored jobs with `view=vacancies\|viewed\|applications\|imports`, search, filters, sort and pagination |
 | `GET /api/jobs/:id` | Vacancy facts, listings, current assessment and saved history |
-| `PATCH /api/jobs/:id/tracking` | Only `status`, `personalNotes`, `applicationDate`, `cvSent`, `cvSentAt`, `sentCvLabel` |
+| `PATCH /api/jobs/:id/tracking` | Only `status`, `viewed`, `personalNotes`, `applicationDate`, `cvSent`, `cvSentAt`, `sentCvLabel` |
 | `POST /api/jobs/:id/assessment/retry` | Requeue a failed AI attempt; performs no provider request |
 | `GET /api/status` | Last stored collection and source health |
 | `POST /api/collection` | Start collection; return operation ID or the already active operation |
@@ -322,7 +328,9 @@ The thin JSON API is local and intentionally limited:
 
 Tracking updates accept JSON, reject unknown/read-only fields, validate statuses and
 dates (`YYYY-MM-DD` or `null`; `cvSentAt` is an ISO timestamp with an offset) and return saved tracking values. Page size is capped
-at 100. Supply several sources with repeated parameters (`source=indeed&source=linkedin`)
+at 100. `viewed: true` saves a server timestamp once; `viewed: false` clears the marker.
+The returned `viewedAt` is read-only; unrelated tracking saves leave it unchanged.
+Supply several sources with repeated parameters (`source=indeed&source=linkedin`)
 or a comma-separated value; the original single-source parameter still works.
 Allowed sort fields are `firstSeenAt`, `lastSeenAt`, `datePosted`, `fitScore`,
 `title` and `company`; direction is `asc` or `desc`. Unknown scores/dates sort last in
@@ -527,10 +535,13 @@ Key behaviours driven by configuration:
   CLI/enrichment and manual imports reserve the same allowance and source lease. Repeated
   runs do not reset it. Actual usage releases unused reservations; interrupted/unknown
   requests remain charged conservatively. Structured 429/403 failures and Retry-After
-  persist in source health. After cooldown, a recovery task uses at most one search and
-  one detail request (one detail for imports); another 429 pauses LinkedIn while other
+  persist in source health. After cooldown, a recovery task uses one HTTP request total:
+  a search for collection or a detail for enrichment/imports. Another 429 pauses LinkedIn while other
   sources continue. Diagnostics show the pause, last failure and shared request counts.
   Proxy secrets remain in the environment. Public access is not guaranteed.
+  Collection and manual lookups share the existing source lease for every provider,
+  including retries. Query rotation advances only through tasks that actually execute;
+  skipped combinations remain eligible for the next run.
 * **Description budget** — `description_budget.max_tasks_per_run` caps how many searches may
   fetch full descriptions (one extra HTTP request per job, and the fastest way to get
   blocked). A job without a description stays incomplete: it is shown and can be reviewed,
@@ -610,13 +621,16 @@ not guarantee exhaustive vacancy coverage. Public adapters save page/index progr
 LinkedIn saves bounded offsets below 1,000 and Indeed below 300 with at most three
 HTTP searches per task. Indeed's offset still refetches earlier API pages; Glassdoor's
 pinned offset implementation cannot reliably resume a later page and is left unchanged.
-Every resumed LinkedIn/Indeed search checks the first page using one of its existing
-three HTTP slots, then continues saved backfill with the remaining allowance. Public page
+Resumed LinkedIn searches reserve a head check within their actual HTTP allowance.
+Indeed uses one JobSpy invocation to check the head and walk to the saved backfill,
+so it does not request the first page twice within a task. Public page
 adapters likewise reserve one of their three page slots for the head. Head observations
 do not overwrite backfill cursors; failed empty lookups retain progress. A one-request
 LinkedIn allowance alternates head/backfill visits. Sweeps restart at exhaustion or after
 at least two rotation periods without backfill progress. Regional location never proves cross-border
 eligibility, and PLN rates are never treated as EUR.
+Successful LinkedIn details are cached by canonical job ID across the run's tasks;
+reusing them consumes no HTTP allowance. Explicit activity refreshes still fetch again.
 
 `enrich` spends at most two description tasks on relevant stored listings and issues no
 new searches. It supports LinkedIn, all five recruiter adapters and public API providers'

@@ -127,16 +127,28 @@ describe('personal dashboard stored data', () => {
     expect(changed.assessmentHistory[0]).toMatchObject({ kind: 'ai', current: false });
   });
 
-  it('preserves personal edits through collection enrichment, reassessment and database restart', async () => {
+  it('preserves personal edits and viewed markers through collection, reassessment and restart, with reversible views', async () => {
     const job = await storedJob();
+    expect((await readJob(job.ID)).viewedAt).toBeNull();
+    const { viewedAt } = await updateTracking(job.ID, { viewed: true });
+    expect(viewedAt).toEqual(expect.any(String));
+    expect((await listJobs()).total).toBe(0);
+    expect((await listJobs(new URLSearchParams({ view: 'applications' }))).total).toBe(0);
+    expect(await updateTracking(job.ID, { viewed: true })).toMatchObject({ viewedAt, status: 'New' });
     const personal = { status: 'Applied', personalNotes: 'Contact Alex; follow up Friday.',
       applicationDate: '2026-10-12', cvSent: false, cvSentAt: null, sentCvLabel: 'BTP-v3.pdf' };
-    expect(await updateTracking(job.ID, personal)).toEqual(personal);
+    expect(await updateTracking(job.ID, personal)).toEqual({ ...personal, viewedAt });
     await ingestReview({ description: `${reviewRecord.description}\nNew project information.` });
     await rank({ rulesOnly: true });
     await disconnectDb(); await connectDb(file);
-    expect(await readJob(job.ID)).toMatchObject(personal);
+    expect(await readJob(job.ID)).toMatchObject({ ...personal, viewedAt });
+    expect((await listJobs()).total).toBe(0);
+    expect((await listJobs(new URLSearchParams({ view: 'viewed', q: 'follow up', minScore: '100' }))).items)
+      .toMatchObject([{ ID: job.ID, viewedAt }]);
+    expect((await listJobs(new URLSearchParams({ view: 'applications' }))).items).toMatchObject([{ ID: job.ID, viewedAt }]);
+    expect(await updateTracking(job.ID, { viewed: false })).toEqual({ ...personal, viewedAt: null });
     expect((await listJobs(new URLSearchParams({ q: 'follow up' }))).total).toBe(1);
+    expect((await listJobs(new URLSearchParams({ view: 'viewed' }))).total).toBe(0);
     for (const status of ['Interview', 'Rejected']) {
       expect(await updateTracking(job.ID, { status, cvSent: true, cvSentAt: '2026-10-12T09:00:00Z' }))
         .toMatchObject({ ...personal, status, cvSent: true, cvSentAt: '2026-10-12T09:00:00.000Z' });
@@ -148,7 +160,8 @@ describe('personal dashboard stored data', () => {
   it('rejects vacancy/assessment writes and invalid tracking values without partial changes', async () => {
     const job = await storedJob();
     for (const patch of [{ title: 'Changed', status: 'Applied' }, { fitScore: 100 }, { description: 'Changed' },
-      { status: 'Closed' }, { cvSent: 'yes' }, { applicationDate: '2026-02-30' }, { personalNotes: 'x'.repeat(20_001) }, {}]) {
+      { status: 'Closed' }, { cvSent: 'yes' }, { viewed: 'yes' }, { viewedAt: '2026-10-14T09:00:00Z' },
+      { applicationDate: '2026-02-30' }, { personalNotes: 'x'.repeat(20_001) }, {}]) {
       await expect(updateTracking(job.ID, patch)).rejects.toMatchObject({ status: 400 });
     }
     expect(await readJob(job.ID)).toMatchObject({ title: job.title, status: 'New', cvSent: false, personalNotes: '' });

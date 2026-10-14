@@ -4,14 +4,16 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { claimCollection, readOperation, updateOperation } from '../src/collector/lease.js';
 import { runCollector } from '../src/collector/run.js';
 import { loadConfig, PROJECT_ROOT, resetConfigCache } from '../src/config/index.js';
-import { cds, connectDb, db, disconnectDb, query, queryOne, SELECT, UPDATE } from '../src/db/index.js';
+import { cds, connectDb, db, disconnectDb, INSERT, query, queryOne, SELECT, UPDATE } from '../src/db/index.js';
 import { importVacancy, type ImportMetadata } from '../src/dashboard/import.js';
 import { listReminders, updateReminder } from '../src/dashboard/reminders.js';
 import { listJobs, readJob, updateTracking } from '../src/dashboard/store.js';
 import { collect } from '../src/pipeline/collect.js';
 import { withCollectionOperation } from '../src/pipeline/collection-operation.js';
 import { rank } from '../src/pipeline/rank.js';
-import { claimSourceRequests, recordOutcomes, settleSourceRequests } from '../src/collector/health.js';
+import { claimImportSource, claimSourceRequests, recordOutcomes, settleSourceRequests } from '../src/collector/health.js';
+import { planBatch } from '../src/collector/plan.js';
+import { reserveBatchPlan } from '../src/collector/rotation.js';
 import { closeTempDb, resetTestDb, useTempDb } from './helpers/db.js';
 import { enableReviewAi, ingestReview, reviewRecord } from './helpers/review.js';
 import { startTestWorker, type TestWorker } from './helpers/worker.js';
@@ -114,6 +116,50 @@ describe('local dashboard controls', () => {
     expect(await claimSourceRequests('linkedin', 6, 5)).toMatchObject({ searchLimit: 0, detailLimit: 0 });
   });
 
+  it.each([false, true])('keeps the fresh head and skipped query when the actual allowance is one (recovery: %s)', async (recovery) => {
+    const config = loadConfig(), options = { batchKey: 'cap-broad', onlySources: ['linkedin'] };
+    const first = planBatch(config, options).tasksBySource.get('linkedin')![0]!;
+    await cds.run(INSERT.into(db().SearchProgress).entries({ taskKey: first.task_id, state: '{"offset":20}',
+      sweepStartedAt: new Date().toISOString(), updatedAt: new Date().toISOString() }));
+    if (recovery) await recordOutcomes(config, [{ taskId: 'previous', source: 'linkedin', searchTerm: 'SAP',
+      location: undefined, countryIndeed: undefined, status: 'Failed', resultCount: 0, durationMs: 1,
+      errorKind: 'rate_limit' }], new Date(Date.now() - 3 * 3600000));
+    else {
+      const claim = await claimSourceRequests('linkedin', 5, 0);
+      await settleSourceRequests('linkedin', claim.token!, 5, 0);
+    }
+    vi.mocked(runCollector).mockImplementation(async (_config, { tasks }) => ({ jobspyVersion: 'offline', jobs: [], activities: [], malformedLines: 0,
+      outcomes: tasks.map(task => ({ taskId: task.task_id, source: task.source, searchTerm: task.search_term,
+        location: task.location, countryIndeed: task.country_indeed, status: 'Succeeded', resultCount: 0,
+        durationMs: 1, searchRequests: 1, detailRequests: 0, headChecked: true })) }));
+    const result = await collect(options);
+    const tasks = vi.mocked(runCollector).mock.calls[0]![1].tasks;
+    expect(tasks).toHaveLength(1);
+    expect(tasks[0]).toMatchObject({ offset: 20, head_only: true, search_request_limit: 1 });
+    if (recovery) expect(tasks[0]).toMatchObject({ fetch_description: false, detail_request_limit: 0 });
+    const skipped = result.outcomes.find(row => row.status === 'Skipped')!;
+    expect((await reserveBatchPlan(config, options)).tasksBySource.get('linkedin')![0]!.task_id).toBe(skipped.taskId);
+  });
+
+  it.each(Object.keys(loadConfig().searches.sources))('shares the %s lease between collection and manual lookup', async (source) => {
+    const config = loadConfig();
+    const batchKey = config.searches.rotation.batches.find(batch => batch.targets[source]?.length)!.key;
+    const importClaim = await claimImportSource(source);
+    expect(importClaim.token).toBeTruthy();
+    expect((await collect({ batchKey, onlySources: [source] })).outcome).toBe('NoSources');
+    expect(runCollector).not.toHaveBeenCalled();
+    await settleSourceRequests(source, importClaim.token!, 0, 0);
+    vi.mocked(runCollector).mockImplementation(async (_config, { tasks }) => {
+      expect((await claimImportSource(source)).token).toBeUndefined();
+      return { jobspyVersion: 'offline', jobs: [], activities: [], malformedLines: 0, outcomes: tasks.map(task => ({ taskId: task.task_id,
+        source, searchTerm: task.search_term, location: task.location, countryIndeed: task.country_indeed,
+        status: 'Succeeded', resultCount: 0, durationMs: 1, searchRequests: 0, detailRequests: 0 })) };
+    });
+    await collect({ batchKey, onlySources: [source] });
+    expect(runCollector).toHaveBeenCalled();
+    expect((await queryOne<any>(SELECT.from(db().SourceHealth).where({ source }))).importToken).toBeNull();
+  });
+
   it('filters new internships despite target keywords, while preserving listing updates and personal history', async () => {
     const original = { ...reviewRecord, id: 'old-intern', title: 'Working student SAP CAP Developer', job_url: 'https://www.linkedin.com/jobs/view/889900' };
     const id = (await ingestReview(original)).jobIds[0]!;
@@ -207,12 +253,14 @@ describe('local dashboard controls', () => {
     expect(reminder.dueDate).toBe('2026-10-30');
     await updateReminder(reminder.ID, { action: 'reschedule', dueDate: '2000-01-01' });
     await updateTracking(id, { cvSent: true, cvSentAt: sentAt, personalNotes: 'Updated notes' });
+    await updateTracking(id, { viewed: true });
     await disconnectDb(); await connectDb(file);
     expect(await listReminders()).toMatchObject([{ ID: reminder.ID, dueDate: '2000-01-01', status: 'Pending' }]);
     expect(await readJob(id)).toMatchObject({ cvSentAt: sentAt, applicationDate: '2026-10-01' });
     await updateReminder(reminder.ID, { action: 'complete' });
     await updateReminder(reminder.ID, { action: 'complete' });
     await updateTracking(id, { cvSent: true, personalNotes: 'Another note' });
+    await updateTracking(id, { viewed: false });
     await updateTracking(id, { cvSent: false });
     expect(await listReminders(id)).toMatchObject([{ ID: reminder.ID, status: 'Completed' }]);
     await updateTracking(id, { cvSent: true, cvSentAt: sentAt });

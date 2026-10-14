@@ -39,11 +39,11 @@ export async function activeCooldowns(now: Date = new Date(), enrichOnly = false
       result.set(row.source, `on cooldown until ${until.toISOString()} (${row.lastStatus ?? 'unknown'})`);
       continue;
     }
+    if (row.importToken && row.importUntil && new Date(row.importUntil) > now) {
+      result.set(row.source, 'A shared source request is already running');
+      continue;
+    }
     if (row.source === 'linkedin') {
-      if (row.importToken && row.importUntil && new Date(row.importUntil) > now) {
-        result.set(row.source, 'A shared LinkedIn request is already running');
-        continue;
-      }
       const limits = loadConfig().searches.linkedin_limits;
       if (row.windowStartedAt && now.getTime() < new Date(row.windowStartedAt).getTime() + limits.window_minutes * 60_000 &&
         (enrichOnly ? (row.detailRequests ?? 0) + (row.reservedDetail ?? 0) >= limits.max_detail_requests_per_window
@@ -183,7 +183,7 @@ export async function claimSourceRequests(source: string, searchWanted: number, 
     const recovery = Boolean(row?.recoveryPending || row?.cooldownUntil && ['rate_limit', 'blocked'].includes(row.lastStatus));
     const searchLimit = source === 'linkedin' ? Math.min(searchWanted, recovery ? 1 : Infinity,
       Math.max(0, limits.max_search_requests_per_window - usedSearch)) : searchWanted;
-    const detailLimit = source === 'linkedin' ? Math.min(detailWanted, recovery ? 1 : Infinity,
+    const detailLimit = source === 'linkedin' ? Math.min(detailWanted, recovery ? (searchWanted > 0 ? 0 : 1) : Infinity,
       Math.max(0, limits.max_detail_requests_per_window - usedDetail)) : detailWanted;
     if (searchWanted > 0 ? searchLimit === 0 : detailWanted > 0 && detailLimit === 0) return unavailable(
       `LinkedIn request allowance used; available after ${new Date(new Date(windowStartedAt).getTime() + limits.window_minutes * 60_000).toISOString()}`);

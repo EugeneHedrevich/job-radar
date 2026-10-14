@@ -9,6 +9,8 @@ export interface PlannedBatch {
   tasksBySource: Map<string, CollectorTask[]>;
   skipped: Array<{ source: string; reason: string }>;
   descriptionRotation: DescriptionRotation;
+  /** Proposed search order; persist only the executed prefix of each scope. */
+  searchRotation: Record<string, string[]>;
 }
 
 export interface DescriptionRotation {
@@ -108,7 +110,8 @@ export function planBatch(config: AppConfig, options: PlanOptions = {}): Planned
 
   const searchCursors = { ...options.descriptionRotation?.lastSearchByScope };
   const linkedinPending = [...(options.descriptionRotation?.linkedinPending ?? [])];
-  if (!options.enrichOnly) applySearchBudget(config, batch.key, tasksBySource, searchCursors, skipped, linkedinPending, options);
+  const searchRotation: PlannedBatch['searchRotation'] = {};
+  if (!options.enrichOnly) applySearchBudget(config, batch.key, tasksBySource, searchCursors, skipped, linkedinPending, options, searchRotation);
   const descriptionRotation = applyDescriptionBudget(config, tasksBySource, options.descriptionRotation);
   descriptionRotation.lastSearchByScope = searchCursors;
   descriptionRotation.linkedinPending = linkedinPending;
@@ -125,12 +128,13 @@ export function planBatch(config: AppConfig, options: PlanOptions = {}): Planned
       else tasksBySource.delete(source);
     }
   }
-  return { batchKey: batch.key, keywords: batch.keywords, tasksBySource, skipped, descriptionRotation };
+  return { batchKey: batch.key, keywords: batch.keywords, tasksBySource, skipped, descriptionRotation, searchRotation };
 }
 
 /** Rotate capped combinations, including a batch's tail, across persisted runs. */
 function applySearchBudget(config: AppConfig, batchKey: string, tasksBySource: Map<string, CollectorTask[]>,
-  cursors: Record<string, string>, skipped: PlannedBatch['skipped'], pending: CollectorTask[], options: PlanOptions): void {
+  cursors: Record<string, string>, skipped: PlannedBatch['skipped'], pending: CollectorTask[], options: PlanOptions,
+  searchRotation: PlannedBatch['searchRotation']): void {
   const rotate = (tasks: CollectorTask[], key: string) => {
     const start = tasks.findIndex((task) => task.task_id === cursors[key]);
     return [...tasks.slice(start + 1), ...tasks.slice(0, start + 1)];
@@ -150,6 +154,8 @@ function applySearchBudget(config: AppConfig, batchKey: string, tasksBySource: M
   const key = `${batchKey}:__all__`;
   const selected = rotate(all, key).slice(0, Math.max(0,
     Math.min(18, config.searches.resilience.max_tasks_per_run) - selectedLinkedin.length));
+  searchRotation[key] = selected.map((task) => task.task_id);
+  searchRotation[scope] = selectedLinkedin.map((task) => task.task_id);
   const ids = new Set(selected.map((task) => task.task_id));
   for (const [source, tasks] of tasksBySource) {
     const ready = tasks.filter((task) => ids.has(task.task_id));

@@ -29,6 +29,7 @@ entity Jobs : cuid {
   lastSeenAt        : Timestamp not null;
   status            : String(20) default 'New';  // New | Interested | Applied | Ignored | Interview | Rejected
   personalNotes     : LargeString;           // user-owned; never changed by ingestion/ranking
+  viewedAt          : Timestamp;             // explicitly marked by the user; null = unviewed
   applicationDate   : Date;
   cvSent            : Boolean default false; // independent of application status
   cvSentAt          : Timestamp;             // actual send instant; legacy unknown stays null

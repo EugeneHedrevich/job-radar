@@ -1,8 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { loadConfig } from '../config/index.js';
-import { activeCooldowns, claimSourceRequests, recordOutcomes, settleSourceRequests, type SourceRequestClaim } from '../collector/health.js';
+import { activeCooldowns, claimSourceRequests, recordOutcomes, settleSourceRequests } from '../collector/health.js';
 import { planBatch, type PlanOptions } from '../collector/plan.js';
-import { recordSearchProgress, reserveBatchPlan } from '../collector/rotation.js';
+import { recordQueryRotation, recordSearchProgress, reserveBatchPlan } from '../collector/rotation.js';
 import { runCollector } from '../collector/run.js';
 import type { CollectorJob, CollectorTask, ListingActivity, TaskOutcome } from '../collector/types.js';
 import { cds, db, INSERT, UPDATE } from '../db/index.js';
@@ -138,19 +138,25 @@ async function collectOwned(options: CollectOptions, claim: CollectionClaim): Pr
         }
         const sourceConfig = config.searches.sources[source];
         if (!sourceConfig) continue;
-        let requestClaim: SourceRequestClaim | undefined;
+        const requestClaim = await claimSourceRequests(source,
+          source === 'linkedin' ? tasks.reduce((sum, task) => sum + (task.enrich_only ? 0 : task.search_request_limit ?? 3), 0) : 0,
+          source === 'linkedin' ? tasks.reduce((sum, task) => sum + (task.fetch_description ? task.detail_request_limit ?? 0 : 0), 0) : 0,
+          (config.searches.resilience.process_timeout_seconds * (source !== 'linkedin' && config.searches.resilience.max_retries_per_task > 0 ? 2 : 1) +
+            config.searches.resilience.retry_delay_seconds + 60) * 1000);
         let sourceOutcomes: TaskOutcome[] | undefined;
+        if (!requestClaim.token) {
+          for (const task of tasks) outcomeByTask.set(task.task_id, { taskId: task.task_id, source,
+            searchTerm: task.search_term, location: task.location, countryIndeed: task.country_indeed,
+            status: 'Skipped', resultCount: 0, durationMs: 0, message: requestClaim.reason });
+          continue;
+        }
         if (source === 'linkedin') {
-          requestClaim = await claimSourceRequests(source,
-            tasks.reduce((sum, task) => sum + (task.enrich_only ? 0 : task.search_request_limit ?? 3), 0),
-            tasks.reduce((sum, task) => sum + (task.fetch_description ? task.detail_request_limit ?? 0 : 0), 0),
-            (config.searches.resilience.process_timeout_seconds + 60) * 1000);
           let searches = requestClaim.searchLimit, details = requestClaim.detailLimit;
           const ready: CollectorTask[] = [];
           for (const [index, task] of tasks.entries()) {
             const searchLimit = task.enrich_only ? 0 : Math.min(task.search_request_limit ?? 3, Math.ceil(searches / (tasks.length - index)));
             const detailLimit = task.fetch_description ? Math.min(task.detail_request_limit ?? 0, details) : 0;
-            if (!requestClaim.token || (task.enrich_only ? !detailLimit : !searchLimit)) {
+            if (task.enrich_only ? !detailLimit : !searchLimit) {
               outcomeByTask.set(task.task_id, { taskId: task.task_id, source, searchTerm: task.search_term,
                 location: task.location, countryIndeed: task.country_indeed, status: 'Skipped', resultCount: 0, durationMs: 0,
                 message: requestClaim.reason ?? (requestClaim.recovery ? 'LinkedIn recovery probe is limited to one task' : 'LinkedIn shared request allowance exhausted') });
@@ -158,7 +164,9 @@ async function collectOwned(options: CollectOptions, claim: CollectionClaim): Pr
             }
             ready.push({ ...task, search_request_limit: searchLimit, detail_request_limit: detailLimit,
               fetch_description: Boolean(detailLimit), detail_jobs: detailLimit ? task.detail_jobs : undefined,
-              ...(requestClaim.recovery && task.offset ? { head_only: true } : {}) });
+              // Recovery always checks the head. Ordinary one-request visits
+              // use the persisted head observation, regardless of the planned limit.
+              ...(requestClaim.recovery ? { head_only: true } : {}) });
             searches -= searchLimit; details -= detailLimit;
             if (requestClaim.recovery) { searches = 0; details = 0; }
           }
@@ -179,7 +187,6 @@ async function collectOwned(options: CollectOptions, claim: CollectionClaim): Pr
           activities.push(...output.activities);
           for (const outcome of output.outcomes) outcomeByTask.set(outcome.taskId, outcome);
           await recordSearchProgress(output.outcomes);
-          if (source === 'linkedin') await recordOutcomes(config, output.outcomes, new Date(), startedAt);
 
           const retryable = output.outcomes.filter((outcome) => outcome.status === 'Failed' && isRetryable(outcome));
           if (source !== 'linkedin' && !output.outcomes.some((outcome) => ['rate_limit', 'blocked'].includes(outcome.errorKind ?? '')) &&
@@ -200,6 +207,7 @@ async function collectOwned(options: CollectOptions, claim: CollectionClaim): Pr
             await recordSearchProgress(retried);
             for (const outcome of retried) outcomeByTask.set(outcome.taskId, outcome);
           }
+          await recordOutcomes(config, tasks.map((task) => outcomeByTask.get(task.task_id)!), new Date(), startedAt);
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
           log.error(`Collector failed for source "${source}"`, { message });
@@ -211,22 +219,22 @@ async function collectOwned(options: CollectOptions, claim: CollectionClaim): Pr
               location: task.location,
               countryIndeed: task.country_indeed,
               status: 'Failed',
+              executed: sourceOutcomes?.some((row) => row.taskId === task.task_id && row.status !== 'Skipped' && row.executed !== false) ?? false,
               resultCount: 0,
               durationMs: 0,
               errorKind: 'error',
               message,
             });
           }
-          if (source === 'linkedin') {
-            sourceOutcomes = tasks.map((task) => outcomeByTask.get(task.task_id)!);
-            await recordOutcomes(config, sourceOutcomes, new Date(), startedAt);
-          }
+          sourceOutcomes = tasks.map((task) => outcomeByTask.get(task.task_id)!);
+          await recordOutcomes(config, sourceOutcomes, new Date(), startedAt);
         } finally {
           if (requestClaim?.token) await settleSourceRequests(source, requestClaim.token,
             sourceOutcomes && sourceOutcomes.every((row) => row.searchRequests !== undefined)
               ? sourceOutcomes.reduce((sum, row) => sum + row.searchRequests!, 0) : undefined,
             sourceOutcomes && sourceOutcomes.every((row) => row.detailRequests !== undefined)
               ? sourceOutcomes.reduce((sum, row) => sum + row.detailRequests!, 0) : undefined);
+          await recordQueryRotation(plan, [...outcomeByTask.values()]);
         }
       }
     }
@@ -271,7 +279,6 @@ async function collectOwned(options: CollectOptions, claim: CollectionClaim): Pr
         await recordError(runId, outcome.source, outcome.errorKind ?? 'error', outcome.message ?? '', new Date());
       }
     }
-    await recordOutcomes(config, outcomes.filter((row) => row.source !== 'linkedin'), new Date(), startedAt);
 
     const outcome = collectionOutcome(outcomes, collected.length, Boolean(options.fixture));
     await cds.run(

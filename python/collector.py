@@ -179,7 +179,6 @@ def jobspy_search(source, transport, kwargs):
     create_session = module.create_session
     original_process = scraper_class._process_job
     scrapers = {}
-    processed_count = 0
 
     def session_factory(**session_options):
         session = create_session(**session_options)
@@ -189,6 +188,7 @@ def jobspy_search(source, transport, kwargs):
                 raise transport.failure
             if source in {"linkedin", "indeed"}:
                 if transport.search_requests >= kwargs.get('_request_stop_at', transport.search_limit):
+                    kwargs['_budget_exhausted'] = True
                     raise RequestBudgetExhausted('LinkedIn request allowance exhausted')
                 transport.before("search")
             options["allow_redirects"] = False
@@ -201,11 +201,8 @@ def jobspy_search(source, transport, kwargs):
         return session
 
     def process(scraper, *args, **options):
-        nonlocal processed_count
         job = original_process(scraper, *args, **options)
         if job:
-            index = processed_count
-            processed_count += 1
             scrapers[job.job_url] = scraper
             row = job.model_dump()
             row.update(company=row.get("company_name"), site=source,
@@ -216,9 +213,10 @@ def jobspy_search(source, transport, kwargs):
                 row.update(min_amount=pay.min_amount, max_amount=pay.max_amount,
                            interval=pay.interval.value if pay.interval else None,
                            currency=pay.currency, salary_source="direct_data")
-            in_window = source != "indeed" or int(kwargs.get("offset", 0)) <= index < int(kwargs.get("offset", 0)) + int(kwargs.get("results_wanted", 25))
-            if in_window and kwargs.get("on_record"):
+            if kwargs.get("on_record"):
                 kwargs["on_record"](row)
+            if source == "indeed" and kwargs.get("on_head_checked"):
+                kwargs["on_head_checked"]()  # Keep a verified head even if a later page fails.
             if source == "linkedin" and kwargs.get("on_progress"):
                 offset = int(kwargs.get("offset", 0)) // 10 * 10
                 kwargs["next_cursor"] = {"offset": min(990, offset + len(scrapers) // 10 * 10)}
@@ -322,23 +320,34 @@ def scrape_with_failures(kwargs: dict[str, Any]) -> tuple[Any, tuple[str, str, f
         transport = kwargs.get("transport") or LinkedInTransport()
         import pandas as pd
         offset = int(kwargs.get('offset', 0))
-        phases = [False] if kwargs.get('head_only') else [False, True] if source in {'linkedin', 'indeed'} and offset > 0 and transport.search_limit > 1 else [True]
+        # Indeed's offset only slices client-side results: one invocation must
+        # walk from the head to the backfill, using the same server cursors.
+        phases = [True]
+        if source == 'linkedin' and offset > 0:
+            phases = [False, True] if transport.search_limit > 1 else [not kwargs.get('head_only', True)]
         frames = []
         failure = None
         for backfill in phases:
             phase = kwargs if backfill else {**kwargs, 'offset': 0, 'on_progress': None}
             phase['_request_stop_at'] = transport.search_limit if backfill else min(transport.search_limit, transport.search_requests + 1)
-            search_kwargs['offset'] = int(phase.get('offset', 0))
+            search_kwargs['offset'] = 0 if source == 'indeed' else int(phase.get('offset', 0))
+            if source == 'indeed':
+                search_kwargs['results_wanted'] = min(300, offset + int(kwargs.get('results_wanted', 25)))
             with jobspy_search(source, transport, phase):
                 frame = scrape_jobs(**search_kwargs)
                 frames.append(frame)
                 failure = failure_info(transport.failure) or capture.worst()
-                if not failure and int(phase.get('offset', 0)) == 0 and kwargs.get('on_head_checked'):
+                if not failure and transport.search_requests and search_kwargs['offset'] == 0 and kwargs.get('on_head_checked'):
                     kwargs['on_head_checked']()
                 if backfill and source in {'linkedin', 'indeed'} and (len(frame) or not failure):
                     count = len(frame)
-                    next_offset = offset + (max(10, (count // 10) * 10) if source == 'linkedin' else count)
+                    next_offset = offset + max(10, (count // 10) * 10) if source == 'linkedin' else count
                     cap = 1000 if source == 'linkedin' else 300
+                    if source == 'indeed':
+                        if failure or phase.get('_budget_exhausted'):
+                            next_offset = max(offset, count)  # The saved backfill may not have been reached.
+                        elif count < search_kwargs['results_wanted']:
+                            next_offset = 0  # The server cursor was exhausted before the requested window.
                     kwargs['next_cursor'] = {'offset': next_offset if count and next_offset < cap else 0}
                     if kwargs.get('on_progress'):
                         kwargs['on_progress'](kwargs['next_cursor'])
@@ -367,11 +376,12 @@ def scrape_with_failures(kwargs: dict[str, Any]) -> tuple[Any, tuple[str, str, f
         capture.close()
 
 
-def run_task(task: dict[str, Any], timeout_seconds: int) -> dict[str, Any]:
+def run_task(task: dict[str, Any], timeout_seconds: int, detail_cache=None) -> dict[str, Any]:
     task_id = task["task_id"]
     source = task["source"]
     started = time.monotonic()
     kwargs = build_kwargs(task)
+    kwargs['detail_cache'] = detail_cache if detail_cache is not None else {}
     log(f"[task {task_id}] {source} :: {kwargs.get('search_term')!r} @ {kwargs.get('location')!r}")
 
     collected_urls = set()
@@ -412,6 +422,8 @@ def run_task(task: dict[str, Any], timeout_seconds: int) -> dict[str, Any]:
     kwargs["on_record"] = stream
     kwargs["on_progress"] = lambda cursor: emit({"type": "search_progress", "task_id": task_id, "cursor": cursor})
     def checked_head():
+        if kwargs.get('head_checked'):
+            return
         kwargs['head_checked'] = True
         emit({'type': 'search_head_checked', 'task_id': task_id})
     kwargs['on_head_checked'] = checked_head
@@ -481,6 +493,7 @@ def main() -> int:
     emit({"type": "meta", "jobspy_version": version, "tasks": len(tasks)})
 
     paused_sources: dict[str, dict[str, Any]] = {}
+    detail_cache = {}
     for index, task in enumerate(tasks):
         if not isinstance(task, dict) or "task_id" not in task or "source" not in task:
             log(f"skipping malformed task at index {index}")
@@ -494,7 +507,7 @@ def main() -> int:
             continue
         if index > 0 and delay_seconds > 0:
             time.sleep(delay_seconds)
-        result = run_task(task, timeout_seconds)
+        result = run_task(task, timeout_seconds, detail_cache)
         emit(result)
         if result.get("error_kind") in {"blocked", "rate_limit", "timeout"}:
             paused_sources[task["source"]] = result

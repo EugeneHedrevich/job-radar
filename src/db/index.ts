@@ -89,6 +89,7 @@ async function ensurePersonalTracking(connection: any): Promise<void> {
     ['personalNotes', 'TEXT'], ['applicationDate', 'DATE'],
     ['cvSent', 'BOOLEAN DEFAULT 0'], ['sentCvLabel', 'VARCHAR(500)'],
     ['cvSentAt', 'TIMESTAMP'], ['manuallyImportedAt', 'TIMESTAMP'],
+    ['viewedAt', 'TIMESTAMP'],
   ]) {
     if (!columns.some((column) => column.name === name)) {
       await connection.run(`ALTER TABLE sap_jobradar_Jobs ADD COLUMN ${name} ${type}`);

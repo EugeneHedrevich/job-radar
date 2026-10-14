@@ -112,8 +112,10 @@ tbody tr:hover { background: #fafcf8; }
 .vacancy-meta { margin-top: 3px; color: #687c60; font-size: 11px; }
 .source-tags { display: flex; flex-wrap: wrap; gap: 3px; min-width: 78px; max-width: 145px; }
 .source-tags span { padding: 2px 5px; border-radius: 4px; background: #f3f6f1; color: #647b58; font-size: 11px; }
-.fit-cell { display: grid; grid-template-columns: auto 1fr; align-items: center; gap: 4px 6px; min-width: 112px; }
-.fit-cell > .muted, .fit-cell > .pending { grid-column: 1 / -1; font-size: 11px; }
+.fit-cell { display: flex; flex-direction: column; align-items: flex-start; gap: 5px; min-width: 0; }
+.fit-heading { display: flex; align-items: center; gap: 8px; white-space: nowrap; }
+.fit-cell > .muted, .fit-cell > .pending { font-size: 11px; }
+.fit-blockers { display: flex; flex-direction: column; gap: 4px; width: 100%; line-height: 1.45; overflow-wrap: anywhere; }
 .score { color: #4b6050; font-size: 18px; font-weight: 600; line-height: 1.2; }
 .score-apply { color: #397448; }
 .score small { margin-left: 2px; color: #97a18e; font-size: 9px; font-weight: 400; }
@@ -249,7 +251,7 @@ blockquote p { margin: 6px 0; }
 .reminders-panel .warning { font-weight: 600; }
 .retry-assessment { margin: 12px 0; }
 .retry-assessment p { margin-top: 6px; }
-.view-tabs { display: flex; gap: 5px; margin: 22px 0 12px; }
+.view-tabs { display: flex; flex-wrap: wrap; gap: 5px; margin: 22px 0 12px; }
 .view-tabs button { background: transparent; border-color: transparent; padding: 9px 14px; font-size: 13px; }
 .view-tabs .selected { color: var(--accent); background: #eaf2ec; border-color: #cbddcf; }
 .view-note { margin-bottom: 10px; }
@@ -258,10 +260,16 @@ blockquote p { margin: 6px 0; }
 .more-filters { position: relative; }
 .more-filters > summary { padding: 9px 12px; border: 1px solid var(--border); border-radius: 7px; }
 .extra-filters { position: absolute; z-index: 5; top: 45px; right: 0; display: grid; gap: 12px; width: 260px; padding: 16px; border: 1px solid var(--border); border-radius: 8px; background: #fff; box-shadow: 0 8px 24px #23352920; }
-table.compact-jobs { min-width: 720px; }
-.compact-jobs td { padding-top: 11px; padding-bottom: 11px; }
-.compact-jobs .vacancy-cell { width: 48%; max-width: 600px; }
+table.compact-jobs { min-width: 720px; table-layout: fixed; }
+.compact-jobs .vacancy-column { width: 46%; }
+.compact-jobs .assessment-column { width: 36%; }
+.compact-jobs .application-column { width: 18%; }
+.compact-jobs th { white-space: normal; }
+.compact-jobs td { padding-top: 11px; padding-bottom: 11px; overflow-wrap: anywhere; }
+.compact-jobs .vacancy-cell { min-width: 0; max-width: none; }
 .next-action { padding: 3px 0; background: transparent; border: 0; color: var(--accent); text-align: left; font-size: 12px; }
+.viewed-marker { margin-top: 5px; }
+.viewed-marker .text-button { padding: 3px 0; }
 .reminder-row { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; border-top: 1px solid var(--border); padding: 10px 0; }
 .reminder-row > div:first-child { flex: 1; min-width: 180px; display: flex; flex-direction: column; gap: 3px; }
 .reminder-row .job-title { font-size: 12px; }

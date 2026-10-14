@@ -7,7 +7,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import { activeCooldowns, recordOutcomes } from "../src/collector/health.js";
 import { recoverInterruptedRuns, startRunHeartbeat } from "../src/collector/lifecycle.js";
 import { linkedinCoverage, planBatch, selectBatchIndex, type DescriptionRotation } from "../src/collector/plan.js";
-import { recordSearchProgress, reserveBatchPlan } from "../src/collector/rotation.js";
+import { recordQueryRotation, recordSearchProgress, reserveBatchPlan } from "../src/collector/rotation.js";
 import { runCollector } from "../src/collector/run.js";
 import { type CollectorTask } from "../src/collector/types.js";
 import { loadConfig, PROJECT_ROOT, resetConfigCache } from "../src/config/index.js";
@@ -46,7 +46,7 @@ afterEach(() => {
     resetConfigCache();
 });
 describe('malformed collector output', () => {
-    it('checks a changing LinkedIn head while continuing backfill within the original HTTP allowance', async () => {
+    it('checks fresh heads, avoids repeated Indeed pages and shares canonical LinkedIn details offline', async () => {
         await promisify(execFile)('python3', [path.join(here, 'helpers/freshness-regression.py')], { cwd: PROJECT_ROOT });
     });
     it('kills an expired worker before returning, retaining records, request counts and progress', async () => {
@@ -343,6 +343,20 @@ describe("description-rotation", () => {
     });
     afterAll(closeTempDb);
     describe('bounded persistent description rotation', () => {
+        it('advances only executed queries, retaining budget-skipped and unstarted tasks for the next plan', async () => {
+            const config = loadConfig(), options = { batchKey: 'cap-broad', onlySources: ['linkedin'] };
+            const first = await reserveBatchPlan(config, options);
+            const tasks = first.tasksBySource.get('linkedin')!;
+            expect((await reserveBatchPlan(config, options)).tasksBySource.get('linkedin')!.map(row => row.task_id))
+                .toEqual(tasks.map(row => row.task_id)); // Planning reserves no search progress.
+            const outcomes = tasks.map((task, index) => ({ taskId: task.task_id, source: task.source,
+                searchTerm: task.search_term, location: task.location, countryIndeed: task.country_indeed,
+                status: index === 0 ? 'Succeeded' as const : 'Skipped' as const, resultCount: 0, durationMs: 1 }));
+            await recordQueryRotation(first, outcomes.map(row => ({ ...row, status: 'Failed', executed: false })));
+            expect((await reserveBatchPlan(config, options)).tasksBySource.get('linkedin')![0]!.task_id).toBe(tasks[0]!.task_id);
+            await recordQueryRotation(first, outcomes);
+            expect((await reserveBatchPlan(config, options)).tasksBySource.get('linkedin')![0]!.task_id).toBe(tasks[1]!.task_id);
+        });
         it('retains backfill and successful head observations across restart, failure and a 108-hour revisit', async () => {
             const config = loadConfig(), at = new Date('2026-10-01T00:00:00Z');
             const first = await reserveBatchPlan(config, { batchKey: 'cap-broad', onlySources: ['linkedin'], at });

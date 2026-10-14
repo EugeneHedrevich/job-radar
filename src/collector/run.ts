@@ -35,6 +35,7 @@ export async function runCollector(config: AppConfig, options: RunCollectorOptio
   const statistics = new Map<string, { searchRequests: number; detailRequests: number }>();
   const progress = new Map<string, NonNullable<TaskOutcome['nextCursor']>>();
   const checkedHeads = new Set<string>();
+  const startedTasks = new Set<string>();
   const positions = new Map<string, number>();
   let activeTaskId = options.tasks[0]?.task_id;
   let timedOut = false;
@@ -112,6 +113,7 @@ export async function runCollector(config: AppConfig, options: RunCollectorOptio
     if (record.type === 'meta') {
       output.jobspyVersion = record.jobspy_version;
     } else if (record.type === 'task_started' && pending.has(record.task_id)) {
+      startedTasks.add(record.task_id);
       activeTaskId = record.task_id;
       armTaskTimer();
     } else if (record.type === 'request_stats' && pending.has(record.task_id)) {
@@ -146,6 +148,7 @@ export async function runCollector(config: AppConfig, options: RunCollectorOptio
         location: task?.location,
         countryIndeed: task?.country_indeed,
         status: record.status === 'succeeded' ? 'Succeeded' : record.status === 'skipped' ? 'Skipped' : 'Failed',
+        executed: record.status !== 'skipped',
         resultCount: record.count,
         headChecked: Boolean(record.head_checked || checkedHeads.has(record.task_id)),
         durationMs: record.duration_ms,
@@ -205,6 +208,7 @@ export async function runCollector(config: AppConfig, options: RunCollectorOptio
       location: task.location,
       countryIndeed: task.country_indeed,
       status: timedOut && task.task_id !== activeTaskId ? 'Skipped' : 'Failed',
+      executed: startedTasks.has(task.task_id),
       resultCount: output.jobs.filter((record) => record.taskId === task.task_id).length,
       headChecked: checkedHeads.has(task.task_id),
       durationMs: timedOut && task.task_id === activeTaskId ? options.taskTimeoutSeconds * 1000 : 0,

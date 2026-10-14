@@ -109,24 +109,44 @@ def enrich_board(source: str, rows: list[dict[str, Any]], kwargs: dict[str, Any]
     result = [dict(row) for row in rows]
     positions = {row.get("job_url"): index for index, row in enumerate(result)}
     candidates = [*kwargs.get("detail_jobs", []), *rows]
-    seen: set[str] = set()
+    seen = set()
+    cache = kwargs.get("detail_cache", {}) if source == "linkedin" else {}
     requests_used = 0
     failure: BaseException | None = None
     for row in candidates:
         url = row.get("job_url")
-        if not url or url in seen or row.get("description") and not row.get("activity_refresh"):
+        if not url or row.get("description") and not row.get("activity_refresh"):
             continue
-        seen.add(url)
-        if requests_used >= limit:
-            break
-        if requests_used:
-            time.sleep(3)
-        requests_used += 1
         try:
-            hydrate = kwargs.get("hydrate_row", hydrate_board)
-            updated = hydrate(source, row, kwargs.get("description_format", "markdown"))
+            identity = linkedin_job_id(url) if source == "linkedin" else url
+            refresh = bool(row.get("activity_refresh"))
+            key = (identity, refresh)
+            if key in seen and (refresh or identity not in cache):
+                continue
+            seen.add(key)
+            if not refresh and identity in cache:
+                if cache[identity] is None:
+                    continue  # A failed attempt is not repeated by another task in this run.
+                updated = {**row, **cache[identity]}
+                # Keep the current listing's identifiers when reusing details.
+                updated.update({key: row[key] for key in ("id", "job_url", "job_url_direct") if key in row})
+            else:
+                if requests_used >= limit:
+                    continue  # Later candidates can still reuse successful details.
+                transport = active_transport.get()
+                if source == "linkedin" and transport and transport.detail_requests >= transport.detail_limit:
+                    continue
+                if requests_used:
+                    time.sleep(3)
+                requests_used += 1
+                hydrate = kwargs.get("hydrate_row", hydrate_board)
+                if source == "linkedin":
+                    cache.setdefault(identity, None)
+                updated = hydrate(source, row, kwargs.get("description_format", "markdown"))
+                if source == "linkedin":
+                    cache[identity] = dict(updated)
         except RequestBudgetExhausted:
-            break
+            continue
         except Exception as exc:
             if isinstance(exc, ValueError):
                 failure = failure or exc

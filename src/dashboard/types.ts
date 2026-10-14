@@ -10,6 +10,7 @@ export type JobSort = 'firstSeenAt' | 'lastSeenAt' | 'datePosted' | 'fitScore' |
 
 export interface Tracking {
   status: ApplicationStatus;
+  viewedAt: string | null;
   personalNotes: string;
   applicationDate: string | null;
   cvSent: boolean;

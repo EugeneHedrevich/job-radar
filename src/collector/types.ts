@@ -89,6 +89,7 @@ export interface CollectorTask {
   description_format: 'markdown' | 'html';
   fetch_description: boolean;
   offset?: number;
+  /** When only one search request is allocated, check the head before backfill. */
   head_only?: boolean;
   search_cursor?: SearchCursor;
   detail_request_limit?: number;
@@ -108,6 +109,8 @@ export interface TaskOutcome {
   location: string | undefined;
   countryIndeed: string | undefined;
   status: 'Succeeded' | 'Failed' | 'Skipped';
+  /** False when the source worker never started this task. */
+  executed?: boolean;
   resultCount: number;
   durationMs: number;
   errorKind?: ErrorKind;

@@ -55,7 +55,8 @@ export async function reserveBatchPlan(config: AppConfig, options: PlanOptions =
       const cursor = JSON.parse(saved.state);
       if (['linkedin', 'indeed'].includes(task.source)) {
         if (cursor.offset > 0 && cursor.offset < (task.source === 'linkedin' ? 1000 : 300)) task.offset = cursor.offset;
-        if (task.offset && (task.search_request_limit ?? 3) === 1) task.head_only = !saved.headCheckedAt ||
+        // Decide head/backfill again in Python using the actual allocated allowance.
+        if (task.offset) task.head_only = !saved.headCheckedAt ||
           new Date(saved.headCheckedAt).getTime() <= new Date(saved.updatedAt).getTime();
       } else task.search_cursor = cursor;
     }
@@ -67,11 +68,33 @@ export async function reserveBatchPlan(config: AppConfig, options: PlanOptions =
         else plan.tasksBySource.delete(source);
       }
     }
-    const values = { state: JSON.stringify(plan.descriptionRotation), updatedAt: new Date().toISOString() };
+    const values = { state: JSON.stringify({ ...plan.descriptionRotation,
+      lastSearchByScope: previous.lastSearchByScope }), updatedAt: new Date().toISOString() };
     await tx.run(existing
       ? UPDATE(db().DescriptionRotation).set(values).where({ batchKey: globalKey })
       : INSERT.into(db().DescriptionRotation).entries({ batchKey: globalKey, ...values }));
     return plan;
+  });
+}
+
+/** A skipped combination stays at the front of the next plan, even if later tasks ran. */
+export async function recordQueryRotation(plan: PlannedBatch, outcomes: TaskOutcome[]): Promise<void> {
+  const executed = new Set(outcomes.filter((row) => row.status !== 'Skipped' && row.executed !== false).map((row) => row.taskId));
+  if (!executed.size) return;
+  await cds.tx(async (tx: any) => {
+    await tx.run('UPDATE sap_jobradar_Jobs SET ID = ID WHERE 0 = 1');
+    const row = await tx.run(SELECT.one.from(db().DescriptionRotation).where({ batchKey: '__all_batches__' }));
+    if (!row) return;
+    const state = stateSchema.parse(JSON.parse(row.state));
+    for (const [scope, tasks] of Object.entries(plan.searchRotation)) {
+      for (const task of tasks) {
+        if (!executed.has(task)) break;
+        state.lastSearchByScope[scope] = task;
+        if (scope.endsWith(':linkedin')) state.lastSearchByScope[`${task.split(':')[0]}:linkedin`] = task;
+      }
+    }
+    await tx.run(UPDATE(db().DescriptionRotation).set({ state: JSON.stringify(state), updatedAt: new Date().toISOString() })
+      .where({ batchKey: '__all_batches__' }));
   });
 }
 
