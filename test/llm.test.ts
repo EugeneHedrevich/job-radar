@@ -175,9 +175,13 @@ describe("AI evidence and deterministic safeguards", () => {
         ])[1].body as string);
         expect(body.messages[1].content).toContain('Education: Chemical Engineering (qualification level: unknown; institution: unknown)');
         expect(body.messages[0].content).toContain('Do not infer a qualification level or institution');
+        expect(body.messages[0].content).toContain('If the verified list is empty, output mandatory_gaps: []');
+        const verified = JSON.parse(body.messages[1].content.split('VERIFIED VACANCY ANALYSIS\n')[1]);
+        expect(verified.verified_mandatory_gaps).toEqual([]);
     });
     it.each([
         'Mandatory requirements:\n- ABAP OO development\nPreferred skills:\n- SAPUI5',
+        '### **Requirements**\n* ABAP OO development\n### **Nice to have**\n* SAPUI5',
         'Must have CAP, Node.js, ABAP OO development. Nice to have SAPUI5.',
         'SAPUI5 is preferred, ABAP OO development is mandatory.',
         '**Profil kandydata**\n* Bardzo dobra znajomość:\n  + ABAP Objects,\n**Oferujemy**\n* Praca w 100% zdalna',
@@ -191,5 +195,11 @@ describe("AI evidence and deterministic safeguards", () => {
         expect(result.fitScore).toBe(loadConfig().scoring.hard_rejects.score_cap);
         expect(result.mandatoryGaps.join(' ')).toMatch(/ABAP OO development/);
         expect(result.recommendation).toBe('Skip');
+        const request = vi.mocked(fetch).mock.calls[0];
+        const body = JSON.parse(String(request?.[1]?.body));
+        const verified = JSON.parse(body.messages[1].content.split('VERIFIED VACANCY ANALYSIS\n')[1]);
+        expect(verified.verified_mandatory_gaps).toContainEqual(expect.objectContaining({
+            requirement: 'ABAP OO development', profile_path: 'not_claimed.1', profile_value: 'ABAP OO development',
+        }));
     });
 });

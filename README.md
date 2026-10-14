@@ -563,7 +563,7 @@ Key behaviours driven by configuration:
   those slots. Existing incomplete listings share the selected slots for enrichment.
 * **Scoring** — `weights` must sum to 1.0. Bumping `profile.version` or `scoring.version`
   invalidates every cached assessment.
-  Matching revision 18 shares one vacancy analysis and final policy between rules and
+  Matching revision 19 shares one vacancy analysis and final policy between rules and
   AI validation. Confirmed mandatory mismatches override keyword bonuses; unverified
   requirements remain unknown and cannot become confirmed matches. Compound requirements
   such as “SAP CAP / Kafka” and “SAP CAP + Kafka” are checked separately, while an
@@ -574,6 +574,10 @@ Key behaviours driven by configuration:
   Parentheses preserve independent AND conditions: “(CAP or Node.js) and RAP ownership”
   still requires RAP. “(CAP and Node.js) or RAP ownership” can use the complete CAP/Node.js
   branch. Malformed or ambiguous grouping requires review instead of assuming a match.
+  Local optional or “not required” capabilities do not block a mandatory branch or
+  become confirmed profile matches. Unresolved optional-marker scope requires review.
+  The AI prompt includes the exact verified gap evidence; undocumented capabilities
+  remain uncertainty, and unsupported model gaps still produce an explicit rules fallback.
   Technical B2B/EDI integrations are separate from employment offers;
   explicit permanent employment wins over unrelated technical wording, while genuine
   alternatives require review. Source remote flags do not prove fully remote work.

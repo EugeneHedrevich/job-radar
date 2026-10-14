@@ -220,12 +220,16 @@ export interface CapabilityExpression {
 export function capabilityExpression(config: AppConfig, text: string, start = 0, end = text.length, depth = 0): CapabilityExpression | null {
   if (text.length > 1600 || depth > 4) return null;
   const originalEnd = end;
-  const obligation = [...(config.scoring.signals.mandatory_markers ?? []), ...(config.scoring.signals.preferred_markers ?? []),
+  const mandatory = config.scoring.signals.mandatory_markers ?? [];
+  const obligation = [...mandatory, ...(config.scoring.signals.preferred_markers ?? []),
     '\\b(?:optional|voluntary)\\b'];
   const colon = text.indexOf(':', start);
-  if (colon >= start && colon < end && matchesAny(text.slice(start, colon), obligation)) start = colon + 1;
-  const tail = pattern(`\\s+(?:(?:is|are)\\s+)?(?:${obligation.join('|')})[.!?\\s]*$`).exec(text.slice(start, end));
-  if (tail) end = start + tail.index;
+  if (colon >= start && colon < end && !/[()]/.test(text.slice(start, colon)) &&
+    !/\b(?:and|or|und|oder)\b/.test(text.slice(start, colon)) && matchesAny(text.slice(start, colon), mandatory)) start = colon + 1;
+  const tail = mandatory.length ? pattern(`\\s+(?:(?:is|are)\\s+)?(?:${mandatory.join('|')})[.!?\\s]*$`).exec(text.slice(start, end)) : null;
+  // Only peel a positive outer decorator needed to expose a closing bracket.
+  // Leaf-local "optional" and "not required" remain available to classification.
+  if (tail && text.slice(start, start + tail.index).trimEnd().endsWith(')')) end = start + tail.index;
   while (start < end && /[\s.]/.test(text[start]!)) start++;
   while (end > start && /[\s.]/.test(text[end - 1]!)) end--;
   if (start === end) return null;
@@ -270,7 +274,7 @@ function alternativeGroup(config: AppConfig, clause: string, position: number): 
 }
 
 /** Decide whether a term appears as a must-have or a nice-to-have. */
-export function requirementMentions(config: AppConfig, text: string, term: string): RequirementMention[] {
+export function requirementMentions(config: AppConfig, text: string, term: string, inheritedKind?: Requirement): RequirementMention[] {
   const needle = normalizeText(term);
   if (!needle) return [];
   const escapedNeedle = needle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -284,7 +288,7 @@ export function requirementMentions(config: AppConfig, text: string, term: strin
   let sectionStart = 0;
   const blocks = sentences(text);
   for (const [blockIndex, block] of blocks.entries()) {
-    const heading = normalizeText(block).replace(/^(?:[-+*#]+|\d+[.)])\s*/, '')
+    const heading = normalizeText(block).replace(/^(?:(?:[-+*#]+|\d+[.)])\s*)+/, '')
       .replace(/[:*#]+$/g, '').trim();
     // Recruiter requirement sections often have no marker on each list item.
     // Section boundaries also keep benefits/responsibilities out of that list.
@@ -354,11 +358,20 @@ export function requirementMentions(config: AppConfig, text: string, term: strin
         listKind = null;
       }
       for (const occurrence of clause.matchAll(pattern(occurrenceSource, 'g'))) {
-        const local = nearestMarker(foundMarkers, occurrence.index, occurrence.index + needle.length);
-        const kind: Requirement = local?.kind ?? listKind ?? 'unclear';
+        const expressionContext = inheritedKind !== undefined || /\b(?:and|or|und|oder)\b|[+&]/.test(clause);
+        const expression = expressionContext ? capabilityExpression(config, clause) : null;
+        const scope = (node: CapabilityExpression): CapabilityExpression | undefined => node.kind === 'term' ? node :
+          node.children.filter((child) => occurrence.index >= child.start && occurrence.index < child.end).map(scope).find(Boolean);
+        const leaf = expression ? scope(expression) : undefined;
+        const local = nearestMarker(leaf ? foundMarkers.filter((marker) => marker.start >= leaf.start && marker.end <= leaf.end) : foundMarkers,
+          occurrence.index, occurrence.index + needle.length);
+        const kind: Requirement = local?.kind ?? listKind ?? inheritedKind ??
+          (leaf && foundMarkers.some((marker) => marker.kind === 'mandatory') ? 'mandatory' : 'unclear');
         const choice = alternativeGroup(config, clause, occurrence.index);
-        mentions.push({ kind, clause, start: occurrence.index, end: occurrence.index + needle.length,
-          ...(choice ? { alternativeGroup: choice } : {}),
+        const uncertainScope = expressionContext && !expression && foundMarkers.some((marker) => marker.kind === 'preferred');
+        mentions.push({ kind: uncertainScope ? 'unclear' : kind, clause, start: occurrence.index, end: occurrence.index + needle.length,
+          ...((choice && kind !== 'preferred') || uncertainScope ? { alternativeGroup: choice ?? clause } : {}),
+          ...(uncertainScope ? { alternativeStatus: 'uncertain' as const } : {}),
           quote: !local && section ? blocks.slice(sectionStart, blockIndex + 1).join('\n') : block });
       }
       if (foundMarkers.length && !attendancePart) listKind = [...foundMarkers].sort((a, b) => b.start - a.start)[0]!.kind;

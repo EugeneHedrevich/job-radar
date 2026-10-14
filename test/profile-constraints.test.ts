@@ -4,7 +4,7 @@ import { validateGapEvidence } from '../src/matching/evidence.js';
 import { assessWithLlm } from '../src/matching/llm.js';
 import { assessWithRules } from '../src/matching/rules.js';
 import { analyzeVacancy } from '../src/matching/analysis.js';
-import { detectEngagement, detectWorkMode, jobText } from '../src/matching/signals.js';
+import { detectEngagement, detectWorkMode, jobText, requirementKind } from '../src/matching/signals.js';
 import { enableReviewAi, reviewAiResponse, reviewJob } from './helpers/review.js';
 let config: AppConfig;
 beforeEach(() => { resetConfigCache(); config = loadConfig(); });
@@ -240,6 +240,9 @@ describe('deterministic constraints survive a positive AI answer', () => {
     // deliberately optimistic and includes a capability with no profile fact.
     it.each([
         ['German optional. French is mandatory.', 'Skip'],
+        ['### **Requirements**\n* German - Fluent (C1)', 'Skip'],
+        ['**Was Dich auszeichnet**\n* Deine Deutschkenntnisse sind sehr gut, Deine Englischkenntnisse gut', 'Skip'],
+        ['### **Nice to have**\n* German - Fluent (C1)', 'Apply'],
         ['Basic ABAP reading is mandatory.', 'Review'], ['English C1 is required.', 'Review'],
         ['Workload: 50 hours per week is mandatory.', 'Skip'], ['Remote, UK residents only.', 'Skip'],
         ['Candidates must reside within the EU, excluding Bulgaria.', 'Skip'], ['UK right to work is mandatory.', 'Review'],
@@ -267,6 +270,16 @@ describe('deterministic constraints survive a positive AI answer', () => {
         ['SAP CAP or Kafka is required and RAP ownership is required.', 'Skip', 'satisfied'],
         ['Required: (SAP CAP or Node.js) and RAP ownership', 'Skip', 'satisfied'],
         ['Required: (SAP CAP and Node.js) or RAP ownership', 'Apply', 'satisfied'],
+        ['Required: (SAP CAP and optional RAP ownership) or ABAP OO development.', 'Apply', 'satisfied'],
+        ['Required: (SAP CAP and RAP ownership is optional) or ABAP OO development.', 'Apply', 'satisfied'],
+        ['Required: (SAP CAP and RAP ownership is not required) or ABAP OO development.', 'Apply', 'satisfied'],
+        ['Required: (SAP CAP and not required RAP ownership) or ABAP OO development.', 'Apply', 'satisfied'],
+        ['Required: (optional RAP ownership and SAP CAP) or ABAP OO development.', 'Apply', 'satisfied'],
+        ['Required: (SAP CAP and optional Kafka) or ABAP OO development.', 'Apply', 'satisfied'],
+        ['Required: (SAP CAP and Kafka is not required) or ABAP OO development.', 'Apply', 'satisfied'],
+        ['Required: (SAP CAP and RAP ownership is not optional) or ABAP OO development.', 'Skip', 'incompatible'],
+        ['Required: (SAP CAP and optional RAP ownership or ABAP OO development.', 'Review', 'uncertain'],
+        ['Required: SAP CAP and optional RAP ownership or ABAP OO development.', 'Review', 'uncertain'],
         ['Required: RAP ownership and (SAP CAP or Node.js)', 'Skip', 'satisfied'],
         ['Required: ((SAP CAP or Node.js) and RAP ownership)', 'Skip', 'satisfied'],
         ['Required: (SAP CAP and Kafka) or RAP ownership', 'Review', 'uncertain'],
@@ -336,6 +349,15 @@ describe('deterministic constraints survive a positive AI answer', () => {
             expect(ai.mandatoryGapEvidence).toContainEqual(expect.objectContaining({ requirement: 'RAP ownership', vacancyQuote: condition }));
             expect(rules.fitScore).toBe(config.scoring.hard_rejects.score_cap);
             expect(ai.fitScore).toBe(config.scoring.hard_rejects.score_cap);
+        }
+        if (condition.startsWith('Required:') && condition.includes('ABAP OO development') && recommendation === 'Apply') {
+            const optional = condition.includes('Kafka') ? 'Kafka' : 'RAP ownership';
+            expect(requirementKind(config, condition, optional)).toBe('preferred');
+            const requirement = analysis.requirements.find((item) => item.name.toLowerCase() === optional.toLowerCase());
+            expect(requirement).toMatchObject({ kind: 'preferred', profileEvidence: optional === 'Kafka' ? 'unknown' : 'not_claimed' });
+            expect(ai.hardReject).toBe(false);
+            expect(ai.mandatoryGapEvidence).toEqual([]);
+            expect(ai.strongMatches).not.toContain(optional);
         }
         if (condition.startsWith('Required:') && alternativeStatus === 'uncertain') {
             expect(analysis.requiresReview).toBe(true);

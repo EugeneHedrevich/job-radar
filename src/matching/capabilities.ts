@@ -57,18 +57,27 @@ export type AlternativeStatus = 'satisfied' | 'incompatible' | 'uncertain';
 export function capabilityAlternativeStatus(config: AppConfig, group: string): AlternativeStatus {
   const expression = capabilityExpression(config, group);
   if (!expression) return 'uncertain';
-  const evaluate = (node: CapabilityExpression): AlternativeStatus => {
+  const evaluate = (node: CapabilityExpression): AlternativeStatus | 'optional' => {
     if (node.kind !== 'term') {
       const children = node.children.map(evaluate);
       return node.kind === 'or' ? children.includes('satisfied') ? 'satisfied' :
         children.every((state) => state === 'incompatible') ? 'incompatible' : 'uncertain' :
-        children.includes('incompatible') ? 'incompatible' : children.every((state) => state === 'satisfied') ? 'satisfied' : 'uncertain';
+        children.includes('incompatible') ? 'incompatible' : children.every((state) => state === 'optional') ? 'optional' :
+          children.every((state) => state === 'satisfied' || state === 'optional') ? 'satisfied' : 'uncertain';
     }
     const branch = group.slice(node.start, node.end);
     let evidenced = false;
     let contradicted = false;
+    let optional = false, required = false, unclear = false;
+    const compulsory = (mention: RequirementMention) => {
+      if (mention.kind === 'preferred') { optional = true; return false; }
+      if (mention.kind === 'unclear') { unclear = true; return false; }
+      required = true;
+      return true;
+    };
     for (const skill of Object.values(config.profile.skills).flat()) {
-      for (const choice of [skill.name, ...(skill.aliases ?? [])].flatMap((alias) => requirementMentions(config, branch, alias))) {
+      for (const choice of [skill.name, ...(skill.aliases ?? [])].flatMap((alias) => requirementMentions(config, branch, alias, 'mandatory'))) {
+        if (!compulsory(choice)) continue;
         // The mention may name a required certificate, rather than capability.
         if (certificationMention(choice)) continue;
         const level = requiredProficiency(choice);
@@ -78,13 +87,21 @@ export function capabilityAlternativeStatus(config: AppConfig, group: string): A
     }
     for (const claim of config.profile.not_claimed) {
       const mentions = [claim, ...(config.profile.not_claimed_aliases[claim] ?? [])]
-        .flatMap((alias) => requirementMentions(config, branch, alias));
-      if (mentions.some((mention) => unclaimedCapability(claim, mention))) contradicted = true;
+        .flatMap((alias) => requirementMentions(config, branch, alias, 'mandatory'));
+      if (mentions.some((mention) => compulsory(mention) && unclaimedCapability(claim, mention))) contradicted = true;
     }
+    const unknown = unknownCapabilityFragments(config, branch).filter((capability) => {
+      const mentions = requirementMentions(config, branch, capability, 'mandatory');
+      return !mentions.length || mentions.some(compulsory);
+    });
+    if (unclear) return 'uncertain';
+    // An optional term is neutral within AND, without claiming profile evidence.
+    if (optional && !required && !unknown.length) return 'optional';
     if (contradicted) return 'incompatible';
-    return evidenced && !unknownCapabilityFragments(config, branch).length ? 'satisfied' : 'uncertain';
+    return evidenced && !unknown.length ? 'satisfied' : 'uncertain';
   };
-  return evaluate(expression);
+  const result = evaluate(expression);
+  return result === 'optional' ? 'uncertain' : result;
 }
 
 /** Preserve group uncertainty/contradiction on every member for both engines. */

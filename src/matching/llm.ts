@@ -116,6 +116,7 @@ Rules you must follow:
 - Separate mandatory requirements from preferred ones. Only a missing MANDATORY requirement belongs in mandatory_gaps.
 - An unlisted skill, unstated education or unknown qualification level belongs in missing_information. A gap needs explicit absence, a known insufficient level, or a confirmed profile constraint. Missing documentation is not incompatibility. "7+ years" is not proof of less than 10 years.
 - Every mandatory_gaps item must contain requirement, vacancy_quote (short verbatim quotation), profile_path (exact dotted profile fact path) and profile_value (that fact as a string). The quotation must establish the specific mandatory requirement; the profile fact must prove incompatibility. Unsupported gaps cause a rules fallback, so report uncertainty instead.
+- Copy mandatory_gaps only from VERIFIED VACANCY ANALYSIS.verified_mandatory_gaps, preserving the exact requirement, quotation, profile path and profile value. If the verified list is empty, output mandatory_gaps: []. Put any other possible gap in missing_information; never cite an unrelated known skill or invent an absent profile fact.
 - If a fact (rate, contract type, location eligibility, work authorisation, language requirement) is not stated, put it in missing_information. Do not guess it, and do not treat it as either a pass or a fail.
 - Use the stated education field. Do not infer a qualification level or institution, or equate Chemical Engineering with Computer Science. Distinguish an unspecified degree requirement from a requirement for a specific field or qualification level.
 - Mixed BTP/ABAP or BTP/IS-U roles must be judged on what the description actually requires, not on the title.
@@ -175,6 +176,8 @@ export async function assessWithLlm(config: AppConfig, job: MatchableJob, analys
           .filter((mention) => mention.alternativeStatus).map((mention) =>
             [mention.alternativeGroup, { requirement: mention.alternativeGroup, status: mention.alternativeStatus }])).values()],
         blockers: analysis.hardRejects, missingInformation: analysis.missingInformation,
+        verified_mandatory_gaps: analysis.mandatoryGapEvidence.map((gap) => ({ requirement: gap.requirement,
+          vacancy_quote: gap.vacancyQuote, profile_path: gap.profilePath, profile_value: gap.profileValue })),
       })}` },
       {
         role: 'user',
