@@ -1,7 +1,7 @@
 import { claimCollection, finishOperation, readOperation, startLeaseHeartbeat, updateOperation,
   type CollectionClaim } from '../collector/lease.js';
 import { loadConfig } from '../config/index.js';
-import { db, SELECT, query } from '../db/index.js';
+import { cds, db, SELECT, UPDATE, query } from '../db/index.js';
 import { collect, outcomeMessage, type CollectOptions, type CollectSummary } from './collect.js';
 import { rank, emptyRankProgress, type RankOptions, type RankedJob, type RankProgress } from './rank.js';
 import { PENDING_AI_STATUSES } from './ai-queue.js';
@@ -11,6 +11,7 @@ import { hasPersonalTracking, vacancyRelevance } from '../matching/relevance.js'
 import { jobText } from '../matching/signals.js';
 import { patchRunDiagnostics } from '../dashboard/diagnostics.js';
 import { ApiError } from '../dashboard/errors.js';
+import { MAX_PERIOD_HOURS } from '../dashboard/types.js';
 
 /** No notification path: a dashboard collection never sends Telegram. */
 export async function collectAndAssess(claim: CollectionClaim, options: CollectOptions = {}) {
@@ -91,14 +92,21 @@ export async function withCollectionOperation(claim: CollectionClaim, collectWor
 
 export async function startDashboardCollection(input: unknown = {}) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw new ApiError(400, 'Invalid collection options');
-  const { mode } = input as { mode?: unknown };
+  const { mode, lookbackHours, automatic } = input as { mode?: unknown; lookbackHours?: unknown; automatic?: unknown };
   let { continueId } = input as { continueId?: unknown };
   if (mode !== undefined && !['rotation', 'weekly'].includes(String(mode)) ||
     continueId !== undefined && (typeof continueId !== 'string' || !/^[\da-f-]{36}$/i.test(continueId)))
     throw new ApiError(400, 'Use rotation or weekly collection and a valid continuation ID');
+  if (lookbackHours !== undefined && (typeof lookbackHours !== 'number' || !Number.isInteger(lookbackHours) ||
+    lookbackHours < 1 || lookbackHours > MAX_PERIOD_HOURS))
+    throw new ApiError(400, `Choose a whole number of hours from 1 to ${MAX_PERIOD_HOURS} (up to one year)`);
+  if (lookbackHours !== undefined && (mode !== 'weekly' || continueId))
+    throw new ApiError(400, 'Choose a period when starting a new period search; continuation keeps its saved dates');
+  if (automatic !== undefined && (typeof automatic !== 'boolean' || mode !== 'weekly'))
+    throw new ApiError(400, 'Automatic continuation must be a boolean for a period search');
   const config = loadConfig({ reload: true });
   if (mode === 'weekly' && !continueId) {
-    const pending = await query<any>(SELECT.from(db().CollectionOperations).where({ outcome: 'Running', weeklyState: { '!=': null } }).orderBy('startedAt asc'));
+    const pending = await query<any>(SELECT.from(db().CollectionOperations).where({ outcome: 'Running', pauseRequestedAt: null, weeklyState: { '!=': null } }).orderBy('startedAt asc'));
     const automatic = pending.find((row) => JSON.parse(row.weeklyState).automatic);
     if (automatic) return { operationId: automatic.ID, reused: true, operation: await readOperation(automatic.ID) };
   }
@@ -112,9 +120,9 @@ export async function startDashboardCollection(input: unknown = {}) {
   if (reservation.acquired) {
     try {
       const prior = continueId ? await readWeeklyState(String(continueId)) : null;
-      const weekly = prior ? extendWeeklyCatalogue(config, prior) : mode === 'weekly' ? createWeeklyState(config, began) : null;
+      const weekly = prior ? extendWeeklyCatalogue(config, prior) : mode === 'weekly' ? createWeeklyState(config, began, lookbackHours as number | undefined) : null;
       if (weekly) {
-        weekly.automatic = true;
+        weekly.automatic = (automatic as boolean | undefined) ?? prior?.automatic ?? false;
         const runs = await query<any>(SELECT.from(db().CollectionRuns).columns('diagnostics').where({ operationId: reservation.claim.operationId }));
         const spent = runs.reduce((count, row) => count + (JSON.parse(row.diagnostics ?? '{}').assessment?.aiCalls ?? 0), 0);
         if (!weekly.totals) {
@@ -143,11 +151,31 @@ export async function startDashboardCollection(input: unknown = {}) {
   return { operationId, reused: !reservation.acquired, operation: await readOperation(operationId) };
 }
 
+/** Pausing never requests source I/O, refunds usage, or interrupts saved-result commits. */
+export async function pausePeriodCollection(id: string) {
+  if (!/^[\da-f-]{36}$/i.test(id)) throw new ApiError(400, 'Invalid operation ID');
+  await cds.tx(async (tx: any) => {
+    await tx.run('UPDATE sap_jobradar_Jobs SET ID = ID WHERE 0 = 1');
+    const operation = await tx.run(SELECT.one.from(db().CollectionOperations).where({ ID: id }));
+    if (!operation?.weeklyState) throw new ApiError(404, 'Period search not found');
+    if (!weeklyProgress(JSON.parse(operation.weeklyState)).canContinue) throw new ApiError(409, 'No remaining searches to pause');
+    const lease = await tx.run(SELECT.one.from(db().CollectionLease).where({ name: 'collection' }));
+    const executing = lease?.operation_ID === id && lease.token && Date.parse(lease.expiresAt) > Date.now();
+    const now = new Date().toISOString();
+    await tx.run(UPDATE(db().CollectionOperations).set({ pauseRequestedAt: operation.pauseRequestedAt ?? now,
+      resumeAt: null, updatedAt: now,
+      ...(!executing ? { stage: 'Paused', outcome: 'Partial', finishedAt: now } : {}),
+      message: executing ? 'Pausing after the current batch saves its results. No further batches will be scheduled.'
+        : 'Search paused. Saved dates and progress retained; resume explicitly to continue.' }).where({ ID: id }));
+  });
+  return readOperation(id);
+}
+
 /** Called by the existing scheduler, including after restart. The lease rechecks due time atomically. */
 export async function resumePeriodCollection(at = new Date()): Promise<boolean> {
   await readOperation(); // recover an expired execution lease without resetting source reservations
   at = new Date(Math.max(at.getTime(), Date.now())); // recovery may have just made an operation eligible
-  const waiting = await query<any>(SELECT.from(db().CollectionOperations).where({ stage: 'Waiting', outcome: 'Running', resumeAt: { '<=': at.toISOString() } }).orderBy('resumeAt asc'));
+  const waiting = await query<any>(SELECT.from(db().CollectionOperations).where({ stage: 'Waiting', outcome: 'Running', pauseRequestedAt: null, resumeAt: { '<=': at.toISOString() } }).orderBy('resumeAt asc'));
   for (const operation of waiting) {
     const state = await readWeeklyState(operation.ID);
     if (!state?.automatic) continue;

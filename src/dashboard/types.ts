@@ -2,6 +2,7 @@ import type { AssessmentResult, AiOutcome } from '../matching/types.js';
 import type { SourceFailure } from '../collector/types.js';
 
 export const APPLICATION_STATUSES = ['New', 'Interested', 'Applied', 'Ignored', 'Interview', 'Rejected'] as const;
+export const MAX_PERIOD_HOURS = 365 * 24;
 export type ApplicationStatus = typeof APPLICATION_STATUSES[number];
 export type Activity = 'Active' | 'Unknown' | 'Closed';
 export type AssessmentKind = 'ai' | 'rules' | 'ai-fallback';
@@ -99,11 +100,12 @@ export interface CollectionOperation {
   currentSource?: string | null;
   assessmentRemaining?: number | null;
   resumeAt?: string | null;
+  pauseRequestedAt?: string | null;
   aiCallsReserved?: number;
   aiCallLimit?: number;
   ID: string;
   run_ID: string | null;
-  stage: 'Preparing' | 'Collecting' | 'Saving' | 'Assessing' | 'Waiting' | 'Finished' | 'Error';
+  stage: 'Preparing' | 'Collecting' | 'Saving' | 'Assessing' | 'Waiting' | 'Paused' | 'Finished' | 'Error';
   outcome: 'Running' | 'Completed' | 'Empty' | 'Partial' | 'Failed' | 'NoSources';
   startedAt: string;
   updatedAt: string;

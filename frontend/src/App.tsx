@@ -5,7 +5,7 @@ import { request, useResource } from './api';
 import SourceFilter, { sourceLabel } from './SourceFilter';
 import { useEuroRate, type EuroConversion } from './currency';
 import { sofiaDate, sofiaDateTime, sofiaInstant } from '../../src/util/calendar';
-import { CollectionProgress, useCollection } from './CollectionControls';
+import { CollectionProgress, CollectionToolbar, useCollection } from './CollectionControls';
 import AddVacancy from './AddVacancy';
 import Reminders from './Reminders';
 
@@ -67,16 +67,20 @@ function Badge({ value }: { value: string }) {
 }
 
 function Fit({ job }: { job: JobSummary }) {
+  if (job.assessmentState === 'awaiting-description') return <div className="fit-cell">
+    <span className="assessment-pending" title="The source card has no saved job description. A full assessment needs description enrichment.">Description pending</span>
+  </div>;
   return <div className="fit-cell">
     <div className="fit-heading">
       <strong className={job.fitScore === null ? 'score unknown' : `score score-${job.recommendation?.toLowerCase()}`}>{job.fitScore ?? '—'}
         {job.fitScore !== null && <small>/100</small>}</strong>
       {job.recommendation && <Badge value={job.recommendation} />}
     </div>
-    <span className="muted small" title={assessmentLabels[job.assessmentState]}>{job.assessmentState === 'awaiting-description' ? 'Awaiting description' : job.aiPending ? 'Rules · AI queued' : compactAssessmentLabels[job.assessmentState]}</span>
-    {Boolean(job.mainBlockers?.length) && <div className="fit-blockers">
-      {job.mainBlockers.slice(0, 2).map((reason) => <span className="warning small" key={reason}>{reason}</span>)}
-    </div>}
+    <span className="muted small" title={assessmentLabels[job.assessmentState]}>{job.aiPending ? 'Rules · AI queued' : compactAssessmentLabels[job.assessmentState]}</span>
+    {Boolean(job.mainBlockers?.length) && <details className="fit-blockers">
+      <summary>Assessment notes ({job.mainBlockers.length})</summary>
+      {job.mainBlockers.map((reason) => <p className="warning small" key={reason}>{reason}</p>)}
+    </details>}
   </div>;
 }
 
@@ -286,6 +290,7 @@ function VacancyDetail({ job, conversion, onSaved, onViewed, onDirty, onBusy, on
       {job.reminders.map((reminder) => <p className="small" key={reminder.ID}>{reminder.status} · Due {reminder.dueDate} · CV sent {date(reminder.sentAt, true)}</p>)}
     </details>}
     <section className="detail-section"><h3>Current assessment</h3>
+      {job.assessmentState === 'awaiting-description' && <p className="muted small">Description enrichment is pending. Any saved card-only assessment below is provisional.</p>}
       {job.aiPending && <p className="pending small">AI work pending · Queued {date(job.aiQueuedAt, true)}</p>}
       {job.currentAssessment ? <AssessmentView assessment={job.currentAssessment} /> : <p className="muted">
         {job.assessmentState === 'outdated' ? 'The saved assessment is outdated for the current vacancy or matching configuration. No current score is available.' : 'No saved current assessment yet.'}</p>}
@@ -322,7 +327,7 @@ function VacancyDetail({ job, conversion, onSaved, onViewed, onDirty, onBusy, on
   </>;
 }
 
-const defaultFilters = { q: '', sources: [] as string[], minScore: '', status: '', activity: '', sort: 'firstSeenAt', direction: 'desc', pageSize: '20' };
+const defaultFilters = { q: '', sources: [] as string[], minScore: '', status: '', activity: '', sort: 'fitScore', direction: 'desc', pageSize: '20' };
 
 function nextAction(job: JobSummary): string | null {
   if (job.nextFollowUp && job.nextFollowUp.dueDate <= sofiaDate()) return `Follow up · ${job.nextFollowUp.dueDate}`;
@@ -406,28 +411,31 @@ export default function App() {
   const updating = list.loading || search !== filters.q || validScore && scoreInput !== filters.minScore;
   const hasFilters = Boolean(search || scoreInput || filters.sources.length || filters.status || filters.activity);
   const linkedin = diagnostics.data?.sources.find((source) => source.source === 'linkedin');
+  const periodIsCurrent = collection.weeklyOperation && (!collection.operation ||
+    collection.weeklyOperation.outcome === 'Running' || collection.weeklyOperation.updatedAt >= collection.operation.updatedAt);
+  const progressOperation = !collection.running && periodIsCurrent ? collection.weeklyOperation : collection.operation;
+  const activePeriod = collection.weeklyOperation?.outcome === 'Running' ? collection.weeklyOperation :
+    collection.operation?.weekly && collection.operation.outcome === 'Running' ? collection.operation : null;
   return <div className="app">
     <header className="app-header"><div className="brand"><div className="radar-mark"><RadarMark /></div><strong>Job Radar</strong></div>
       <span className="workspace-label">Personal · Local</span></header>
     <main>
       <div className="page-heading"><div><h1 id="vacancies-heading">Job Radar <span className="count">{data?.storedTotal ?? '—'}</span></h1>
         <p className="muted">Vacancies, applications and your next steps.</p></div>
-        <div className="primary-actions"><button className="primary" onClick={() => void collection.start()} disabled={collection.starting || collection.running}>
-          {collection.running ? 'Collecting…' : collection.starting ? 'Starting…' : 'Collect vacancies'}</button>
-          <button onClick={() => void collection.start('weekly')} disabled={collection.starting || collection.running || collection.periodActive}>
-            {collection.periodActive ? 'Period search active' : 'Last 7 days'}</button>
-          <button onClick={() => { if (guard()) setAddOpen(true); }} disabled={saving}>Add vacancy</button></div>
+        <div className="primary-actions"><button onClick={() => { if (guard()) setAddOpen(true); }} disabled={saving}>Add vacancy</button></div>
       </div>
+      <CollectionToolbar operation={activePeriod} loading={collection.loading} busy={collection.starting || collection.running && !activePeriod}
+        onStart={(hours, automatic) => void collection.start('weekly', undefined, hours, automatic)} onPause={id => void collection.pause(id)} />
       {notice && <div className="notice" role="status">{notice}<button className="text-button" onClick={() => setNotice(null)} aria-label="Dismiss import result">×</button></div>}
       {linkedin?.cooldownUntil && new Date(linkedin.cooldownUntil).getTime() > Date.now() && <p className="warning small">
         LinkedIn paused until {date(linkedin.cooldownUntil, true)} · {linkedin.lastMessage ?? linkedin.lastStatus}
         {' '}· {linkedin.searchRequests} search / {linkedin.detailRequests} detail requests in the shared window.</p>}
-      <CollectionProgress operation={collection.operation} error={collection.error} starting={collection.starting}
-        onContinue={() => { if (collection.operation) void collection.start('weekly', collection.operation.ID); }}>
+      <CollectionProgress operation={progressOperation} error={collection.error} starting={collection.starting}
+        onContinue={() => { if (progressOperation) void collection.start('weekly', progressOperation.ID); }}>
         <CollectionArea data={diagnostics.data} loading={diagnostics.loading} error={diagnostics.error} retry={refresh} />
         <button className="text-button" onClick={refresh}>Refresh saved data</button>
       </CollectionProgress>
-      {collection.weeklyOperation && collection.weeklyOperation.ID !== collection.operation?.ID &&
+      {collection.weeklyOperation && collection.weeklyOperation.ID !== progressOperation?.ID &&
         <CollectionProgress operation={collection.weeklyOperation} error={null} starting={collection.starting || collection.running}
           onContinue={() => void collection.start('weekly', collection.weeklyOperation!.ID)} />}
       {reminders.error ? <p className="error" role="alert">Follow-ups: {reminders.error} <button onClick={refresh}>Retry</button></p>

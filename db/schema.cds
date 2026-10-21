@@ -177,11 +177,12 @@ entity CollectionOperations : cuid {
   currentSource : String(50);
   assessmentRemaining : Integer;
   resumeAt : Timestamp;
+  pauseRequestedAt : Timestamp; // durable across an in-flight batch and process restart
   aiCallsReserved : Integer default 0; // durable operation-wide spending, including interrupted calls
   aiCallLimit : Integer default 5;
   run : Association to CollectionRuns;
   trigger : String(50);
-  stage : String(20); // Preparing | Collecting | Saving | Assessing | Waiting | Finished | Error
+  stage : String(20); // Preparing | Collecting | Saving | Assessing | Waiting | Paused | Finished | Error
   outcome : String(30); // Running | Completed | Empty | Partial | Failed | NoSources
   startedAt : Timestamp;
   updatedAt : Timestamp;

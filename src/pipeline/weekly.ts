@@ -56,8 +56,8 @@ export function reviewConfiguration(config: AppConfig) {
     notificationThreshold: config.settings.telegram.min_fit_score };
 }
 
-export function createWeeklyState(config: AppConfig, at = new Date()): WeeklyState {
-  return { start: new Date(at.getTime() - 168 * 3_600_000).toISOString(), end: at.toISOString(), cycles: 0,
+export function createWeeklyState(config: AppConfig, at = new Date(), lookbackHours = 168): WeeklyState {
+  return { start: new Date(at.getTime() - lookbackHours * 3_600_000).toISOString(), end: at.toISOString(), cycles: 0,
     searches: searchCatalogue(config).map((task) => ({ task, visits: 0, checked: false, state: 'pending', reason: 'Awaiting a bounded search slot' })),
     unsupported: catalogueLimitations(config), configuration: reviewConfiguration(config), revision: codeRevision() };
 }

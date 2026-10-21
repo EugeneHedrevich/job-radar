@@ -231,9 +231,15 @@ Expanded diagnostics separate unique new/updated jobs, cached assessments, new r
 assessments, successful AI assessments and failed AI attempts. The CLI and scheduler
 use the same finalisation, including saved AI failure reasons.
 
-**Last 7 days** starts a weekly review operation with an exact frozen UTC interval
-(the preceding 168 hours). It walks the enabled, deduplicated query/geography
-catalogue. It continues automatically through bounded cycles of at most 18 search
+**Last [number] [hours / days / weeks] → Collect vacancies** starts a review operation
+for the chosen lookback (default seven days, up to one year). The interval ends
+when the operation starts and stays frozen across continuation cycles. Days and
+weeks mean 24 and 168 hours. Progress displays readable dates in Europe/Sofia and
+the interval duration; exports retain exact UTC timestamps. The resume time only
+schedules the next batch and never shortens the requested period. It walks the enabled, deduplicated query/geography
+catalogue. By default, a click runs one bounded batch and saves continuation for
+**Continue search**. **Continue automatically in the background** is an explicit,
+unchecked option that schedules further bounded cycles of at most 18 search
 tasks and two description tasks, with the existing LinkedIn allowances, cooldowns
 and source leases. **Five AI calls is a ceiling for the entire period operation**,
 reserved durably before each attempt, including interrupted attempts. Cached AI
@@ -245,8 +251,12 @@ the next eligible resume time, and recovers interrupted operations after their
 lease expires. Available sources continue while LinkedIn is paused. Regular watch
 cycles defer to an active period operation; automatic continuations never deliver
 notifications. Keep the application running for scheduled continuation; restarting
-it recovers saved work. Older manually stepped searches opt in using **Continue
-weekly search automatically**. Dates, committed cursors and aggregate counters
+it recovers work that was explicitly set to continue automatically. Refreshing the
+browser only reads status. **Pause search** stops waiting continuation immediately;
+**Pause after this batch** lets an in-flight batch save before stopping. Pauses
+survive refresh, stale worker snapshots and process restart. **Resume saved search**
+retains the interval, cursors, allowances and chosen automatic/manual mode.
+Dates, committed cursors and aggregate counters
 survive continuation. Capped/unsupported scopes stop automatically; three failed
 visits also cap a scope for review. A local startup error requires repair and an
 explicit resume rather than repeated automatic worker starts.
@@ -329,7 +339,10 @@ request counts. Changed analysis uses cache revision 23 and preserves prior asse
 `refreshSavedVacancies()` performs an idempotent local rules refresh and can recover
 relevant candidates from saved filtered observations, with no source or AI requests.
 
-The compact list opens with newest saved, unviewed vacancies and no score cutoff. Search covers
+The compact list opens with the highest current scores first among unviewed vacancies,
+with no score cutoff. Unscored cards follow assessed vacancies. Cards awaiting
+description enrichment show a short pending label; assessment notes are collapsed
+in scored rows and remain available in vacancy details. Search covers
 title, company, location and personal notes. **My applications** includes personal
 tracking regardless of score, assessment age or listing closure. **Added manually**
 keeps imports easy to find while assessment is pending. More filters and collection

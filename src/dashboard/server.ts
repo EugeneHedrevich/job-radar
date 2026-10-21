@@ -3,7 +3,7 @@ import { readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { PROJECT_ROOT } from '../config/index.js';
 import { ApiError, listJobs, readCollectionStatus, readJob, updateTracking } from './store.js';
-import { startDashboardCollection } from '../pipeline/collection-operation.js';
+import { pausePeriodCollection, startDashboardCollection } from '../pipeline/collection-operation.js';
 import { readOperation, readLatestWeeklyOperation } from '../collector/lease.js';
 import { importVacancy } from './import.js';
 import { listReminders, updateReminder } from './reminders.js';
@@ -85,6 +85,10 @@ export function createDashboardServer(frontendDirectory = path.join(PROJECT_ROOT
       }
       if (url.pathname === '/api/collection' && request.method === 'GET') {
         json(response, 200, { operation: await readOperation(), weeklyOperation: await readLatestWeeklyOperation() }); return;
+      }
+      const pause = /^\/api\/collection\/([^/]+)\/pause$/.exec(url.pathname);
+      if (pause && request.method === 'POST') {
+        json(response, 200, { operation: await pausePeriodCollection(decodeURIComponent(pause[1]!)) }); return;
       }
       const report = /^\/api\/collection\/([^/]+)\/diagnostics$/.exec(url.pathname);
       if (report && request.method === 'GET') {

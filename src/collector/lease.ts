@@ -15,10 +15,11 @@ export class CollectionBusyError extends Error {
 async function expireLease(tx: any, lease: any, now: Date): Promise<void> {
   if (!lease?.token || new Date(lease.expiresAt).getTime() > now.getTime()) return;
   const operation = await tx.run(SELECT.one.from(db().CollectionOperations).where({ ID: lease.operation_ID }));
-  const automatic = operation?.weeklyState && JSON.parse(operation.weeklyState).automatic;
-  await tx.run(UPDATE(db().CollectionOperations).set({ stage: automatic ? 'Waiting' : 'Error', outcome: automatic ? 'Running' : 'Failed',
+  const automatic = operation?.weeklyState && JSON.parse(operation.weeklyState).automatic && !operation.pauseRequestedAt;
+  await tx.run(UPDATE(db().CollectionOperations).set({ stage: automatic ? 'Waiting' : operation?.pauseRequestedAt ? 'Paused' : 'Error',
+    outcome: automatic ? 'Running' : operation?.pauseRequestedAt ? 'Partial' : 'Failed',
     finishedAt: automatic ? null : now.toISOString(), resumeAt: automatic ? now.toISOString() : null, updatedAt: now.toISOString(),
-    message: automatic ? 'Interrupted cycle; committed progress retained. Waiting for scheduled recovery.' : 'The local process stopped or lost its lease. Start collection to continue.' })
+    message: automatic ? 'Interrupted cycle; committed progress retained. Waiting for scheduled recovery.' : operation?.pauseRequestedAt ? 'Search paused. Saved progress retained; resume explicitly to continue.' : 'The local process stopped or lost its lease. Start collection to continue.' })
     .where({ ID: lease.operation_ID, outcome: 'Running' }));
   if (operation?.run_ID) {
     const changed = await tx.run(UPDATE(db().CollectionRuns).set({ status: 'Failed', finishedAt: now.toISOString() })
@@ -42,12 +43,12 @@ export async function claimCollection(trigger: string, now = new Date(), resumeI
     const operationId = resumeId ?? randomUUID(), token = randomUUID();
     if (resumeId) {
       const prior = await tx.run(SELECT.one.from(db().CollectionOperations).where({ ID: resumeId }));
-      if (dueOnly && (!prior || prior.stage !== 'Waiting' || !prior.resumeAt || Date.parse(prior.resumeAt) > now.getTime() ||
+      if (dueOnly && (!prior || prior.pauseRequestedAt || prior.stage !== 'Waiting' || !prior.resumeAt || Date.parse(prior.resumeAt) > now.getTime() ||
         !JSON.parse(prior.weeklyState ?? '{}').automatic)) return { acquired: false as const, operationId };
       if (!prior?.weeklyState || !weeklyProgress(JSON.parse(prior.weeklyState) as WeeklyState).canContinue && !JSON.parse(prior.weeklyState).automatic)
         throw new Error('No pending weekly search to continue');
       await tx.run(UPDATE(db().CollectionOperations).set({ stage: 'Preparing', outcome: 'Running', finishedAt: null,
-        updatedAt: now.toISOString(), resumeAt: null, currentSource: null, tasksDone: 0, tasksTotal: 0, tasksFailed: 0,
+        updatedAt: now.toISOString(), resumeAt: null, pauseRequestedAt: null, currentSource: null, tasksDone: 0, tasksTotal: 0, tasksFailed: 0,
         tasksSkipped: 0, tasksSucceeded: 0, jobsFound: 0, jobsNew: 0, jobsUpdated: 0, jobsAssessed: 0,
         aiCalls: 0, cachedAssessments: 0, rulesAssessments: 0, aiSucceeded: 0, aiFailures: 0,
         aiFailureReasons: '[]', jobsAccepted: null, jobsFiltered: null, jobsDeferred: 0, exclusionReasons: '{}',
@@ -87,8 +88,19 @@ export function startLeaseHeartbeat(claim: CollectionClaim): () => Promise<void>
 
 export async function finishOperation(claim: CollectionClaim, patch: Partial<CollectionOperation>): Promise<void> {
   await updateOperation(claim, { ...patch, finishedAt: patch.stage === 'Waiting' ? null : new Date().toISOString() });
-  await cds.run(UPDATE(db().CollectionLease).set({ token: null, expiresAt: null })
-    .where({ name: NAME, token: claim.token, operation_ID: claim.operationId }));
+  await cds.tx(async (tx: any) => {
+    await tx.run('UPDATE sap_jobradar_Jobs SET ID = ID WHERE 0 = 1');
+    const operation = await tx.run(SELECT.one.from(db().CollectionOperations).where({ ID: claim.operationId }));
+    // A pause can arrive after the worker read its weekly snapshot. Settle it
+    // under the same writer lock that releases the execution lease.
+    if (operation?.pauseRequestedAt && operation.weeklyState && ['Waiting', 'Finished'].includes(operation.stage) &&
+      weeklyProgress(JSON.parse(operation.weeklyState)).canContinue)
+      await tx.run(UPDATE(db().CollectionOperations).set({ stage: 'Paused', outcome: 'Partial', resumeAt: null,
+        finishedAt: new Date().toISOString(), message: 'Search paused. Saved dates and progress retained; resume explicitly to continue.' })
+        .where({ ID: claim.operationId }));
+    await tx.run(UPDATE(db().CollectionLease).set({ token: null, expiresAt: null })
+      .where({ name: NAME, token: claim.token, operation_ID: claim.operationId }));
+  });
 }
 
 export async function readOperation(id?: string): Promise<CollectionOperation | null> {

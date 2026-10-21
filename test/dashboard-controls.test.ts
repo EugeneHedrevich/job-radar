@@ -9,7 +9,7 @@ import { importVacancy, type ImportMetadata } from '../src/dashboard/import.js';
 import { listReminders, updateReminder } from '../src/dashboard/reminders.js';
 import { listJobs, readCollectionStatus, readJob, updateTracking } from '../src/dashboard/store.js';
 import { collect } from '../src/pipeline/collect.js';
-import { resumePeriodCollection, withCollectionOperation } from '../src/pipeline/collection-operation.js';
+import { pausePeriodCollection, resumePeriodCollection, startDashboardCollection, withCollectionOperation } from '../src/pipeline/collection-operation.js';
 import { claimAiAttempt } from '../src/pipeline/ai-queue.js';
 import { rank } from '../src/pipeline/rank.js';
 import { claimImportSource, claimSourceRequests, recordOutcomes, settleSourceRequests } from '../src/collector/health.js';
@@ -39,6 +39,31 @@ afterEach(() => { for (const worker of workers.splice(0)) if (worker.child.exitC
 afterAll(async () => { vi.unstubAllEnvs(); vi.unstubAllGlobals(); resetConfigCache(); await closeTempDb(); });
 
 describe('local dashboard controls', () => {
+  it('retains an in-flight pause through stale worker snapshots, refresh, and restart until explicit resume', async () => {
+    const weekly = createWeeklyState(loadConfig()); weekly.automatic = true;
+    weekly.searches[0]!.task.offset = 30;
+    const reservation = await claimCollection('dashboard'); if (!reservation.acquired) throw new Error('Expected lease');
+    await updateOperation(reservation.claim, { weeklyState: JSON.stringify(weekly), stage: 'Collecting' });
+    const requested = await pausePeriodCollection(reservation.claim.operationId);
+    expect(requested).toMatchObject({ stage: 'Collecting', resumeAt: null, pauseRequestedAt: expect.any(String) });
+    // The worker saves a snapshot captured before the pause request.
+    await updateOperation(reservation.claim, { weeklyState: JSON.stringify(weekly) });
+    await finishOperation(reservation.claim, { stage: 'Waiting', outcome: 'Running', resumeAt: new Date().toISOString() });
+    await disconnectDb(); await connectDb(file);
+    expect(await readOperation(reservation.claim.operationId)).toMatchObject({ stage: 'Paused', outcome: 'Partial', resumeAt: null,
+      pauseRequestedAt: requested!.pauseRequestedAt, weekly: { start: weekly.start, end: weekly.end } });
+    expect((await readWeeklyState(reservation.claim.operationId))!.searches[0]!.task.offset).toBe(30);
+    expect(await resumePeriodCollection()).toBe(false);
+    expect(await queryOne(SELECT.from(db().CollectionLease))).toMatchObject({ token: null });
+    const resumed = await claimCollection('dashboard', new Date(), reservation.claim.operationId);
+    if (!resumed.acquired) throw new Error('Expected explicit resume');
+    expect(await readOperation(resumed.claim.operationId)).toMatchObject({ stage: 'Preparing', pauseRequestedAt: null });
+    await finishOperation(resumed.claim, { stage: 'Finished', outcome: 'Partial' });
+    await pausePeriodCollection(resumed.claim.operationId); // idle pause takes effect immediately
+    expect(await readOperation(resumed.claim.operationId)).toMatchObject({ stage: 'Paused', resumeAt: null });
+    expect(runCollector).not.toHaveBeenCalled(); expect(fetch).not.toHaveBeenCalled();
+  });
+
   it('automatically resumes the same period after restart, waits without leases, and leaves capped scopes alone', async () => {
     const config = loadConfig(), weekly = createWeeklyState(config);
     weekly.start = new Date(Date.parse(weekly.end) - 48 * 3_600_000).toISOString(); weekly.automatic = true; weekly.unsupported = [];
@@ -141,6 +166,15 @@ describe('local dashboard controls', () => {
   it('plans the full weekly catalogue in bounded cycles with fixed dates and explicit date uncertainty', () => {
     const config = loadConfig(), began = new Date('2026-10-19T12:00:00Z');
     const weekly = createWeeklyState(config, began);
+    for (const hours of [1, 2, 3, 48, 3 * 168]) {
+      const period = createWeeklyState(config, began, hours);
+      expect(Date.parse(period.end) - Date.parse(period.start)).toBe(hours * 3_600_000);
+      expect(period.searches).toHaveLength(weekly.searches.length);
+      const resumed = weeklyTasks(config, period, new Map(), new Date(began.getTime() + 24 * 3_600_000));
+      expect(resumed.length).toBeGreaterThan(0);
+      expect(resumed.every(task => task.requested_start === period.start && task.requested_end === period.end && task.hours_old === hours + 24)).toBe(true);
+      expect(resumed.length).toBeLessThanOrEqual(18);
+    }
     expect(weekly.searches).toHaveLength(searchCatalogue(config).length);
     expect(new Set(weekly.searches.map((s) => searchQueryKey(s.task))).size).toBe(weekly.searches.length);
     expect(new Set(weekly.searches.map((s) => s.task.source))).toEqual(new Set(Object.entries(config.searches.sources)
@@ -165,6 +199,18 @@ describe('local dashboard controls', () => {
     expect(heads.slice(0, 8).some(task => /Integration|CPI/.test(task.search_term))).toBe(true);
     expect(heads.some(task => task.location === 'United Arab Emirates')).toBe(true);
     expect(heads.some(task => task.location === 'Saudi Arabia')).toBe(true);
+  });
+
+  it.each([
+    { mode: 'weekly', lookbackHours: 0 }, { mode: 'weekly', lookbackHours: -1 },
+    { mode: 'weekly', lookbackHours: 1.5 }, { mode: 'weekly', lookbackHours: '48' },
+    { mode: 'weekly', lookbackHours: 365 * 24 + 1 }, { mode: 'rotation', lookbackHours: 24 },
+    { mode: 'weekly', lookbackHours: 24, continueId: '2185e392-a505-4c83-b8ca-8015436a01e4' },
+    { mode: 'weekly', automatic: 'true' }, { mode: 'rotation', automatic: true },
+  ])('rejects invalid or replacement periods before claiming collection: %j', async (input) => {
+    await expect(startDashboardCollection(input)).rejects.toMatchObject({ status: 400 });
+    expect(await query(SELECT.from(db().CollectionOperations))).toHaveLength(0);
+    expect(runCollector).not.toHaveBeenCalled(); expect(fetch).not.toHaveBeenCalled();
   });
 
   it('exports weekly candidates, retains continuation across restart, and rolls it back with failed ingestion', async () => {
@@ -200,7 +246,7 @@ describe('local dashboard controls', () => {
     const module = await import(`${PROJECT_ROOT}/frontend/src/CollectionControls.tsx`);
     const markup = renderToStaticMarkup(createElement(module.CollectionProgress, { operation: await readOperation(first.claim.operationId), error: null,
       onContinue: () => {} }));
-    expect(markup).toContain('Continue weekly search');
+    expect(markup).toContain('Continue search');
     expect(markup).toContain('Export diagnostics JSON');
     expect(markup).toContain(weekly.start);
     const second = await claimCollection('dashboard', new Date(), first.claim.operationId);
