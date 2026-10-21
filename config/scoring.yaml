@@ -200,6 +200,7 @@ relevance:
       - '\b(?:finance|financial|administrative)\s+(?:administrator|assistant|officer|specialist)\b'
       - '\b(?:finance|financial|fi/co|fi[- ]co)\s+(?:functional\s+)?consultant\b'
     Functional-only SAP role:
+      - '^(?!.*\b(?:btp|capm?|cpi|ui5|fiori|integration|integratie|technical|technisch\w*|develop\w*|entwickl\w*)\b).*\bsap\s+(?:fi(?:[-/ ]co)?|co|pp|qm|sd|mm|hcm|payroll)\b.*\b(?:consultant|berater)\b'
       - '^(?!.*\b(?:btp|capm?|cpi|ui5|fiori|integration|integratie)\b).*\bsap\s+(?:fi/?co|fi[- ]co|sd/mm|payroll)\s+(?:functional\s+)?(?:consultant|berater)\b'
 
 # These technologies are not claimed absent: requirements need profile confirmation.

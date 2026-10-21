@@ -7,7 +7,7 @@ import { CollectorStartupError, runCollector } from '../collector/run.js';
 import type { CollectorJob, CollectorTask, ListingActivity, TaskOutcome } from '../collector/types.js';
 import { cds, db, INSERT, UPDATE } from '../db/index.js';
 import { normalizeJob, type NormalizedJob } from '../normalize/index.js';
-import { ingestJobs, type IngestResult } from '../persist/ingest.js';
+import { ingestJobs, replayDeferredCandidates, type IngestResult } from '../persist/ingest.js';
 import { applyListingActivity } from '../persist/activity.js';
 import { log } from '../util/log.js';
 import { recoverInterruptedRuns, startRunHeartbeat } from '../collector/lifecycle.js';
@@ -203,6 +203,7 @@ async function collectOwned(options: CollectOptions, claim: CollectionClaim): Pr
           });
           malformedLines += output.malformedLines;
           sourceOutcomes = output.outcomes;
+          (diagnostic.effectiveRequests ??= []).push(...(output.requests ?? []));
           (diagnostic.quarantinedCandidates ??= []).push(...(output.rejectedCandidates ?? []));
           collected.push(...output.jobs);
           activities.push(...output.activities);
@@ -306,10 +307,22 @@ async function collectOwned(options: CollectOptions, claim: CollectionClaim): Pr
     const ingest = await cds.tx(async (tx: any) => {
       await tx.run('UPDATE sap_jobradar_Jobs SET ID = ID WHERE 0 = 1');
       const saved = await ingestJobs(normalized, { runId, seenAt: new Date(), demo: Boolean(options.fixture), automatic: true, connection: tx });
+      // The ledger and cursor commit together. Capacity deferrals can be replayed
+      // without requesting upstream pages again, including legacy diagnostic rows.
+      const deferredKeys = saved.decisions.filter((row) => row.action === 'deferred').map((row) => row.key);
+      await tx.run(UPDATE(db().CollectionRuns).set({ deferredKeys: JSON.stringify(deferredKeys), jobsDeferred: deferredKeys.length }).where({ ID: runId }));
+      const replayed = await replayDeferredCandidates(tx, runId);
+      saved.jobIds = [...new Set([...saved.jobIds, ...replayed.jobIds])];
+      saved.created += replayed.created;
+      diagnostic.replayedCandidates = replayed;
       await applyListingActivity(activities, tx);
       if (options.weekly) await commitWeeklyProgress(claim.operationId, options.weekly, outcomes, tx,
         new Map([...skipSources, ...Object.entries(config.searches.sources)
-          .filter(([, settings]) => !settings.enabled).map(([source]) => [source, 'Source is currently disabled'] as const)]), saved.jobIds);
+          .filter(([, settings]) => !settings.enabled).map(([source]) => [source, 'Source is currently disabled'] as const)]), saved.jobIds,
+        { received: collected.length, accepted: saved.accepted, filtered: saved.filtered, deferred: saved.deferred,
+          created: saved.created, updated: saved.updatedJobIds.length, tasksDone: outcomes.length,
+          tasksSucceeded: outcomes.filter(task => task.status === 'Succeeded').length,
+          tasksFailed: outcomes.filter(task => task.status === 'Failed').length, tasksSkipped: outcomes.filter(task => task.status === 'Skipped').length });
       else {
         await recordSearchProgress(searchProgress, new Date(), tx);
         await recordQueryRotation(plan, outcomes, tx);
@@ -364,7 +377,7 @@ async function collectOwned(options: CollectOptions, claim: CollectionClaim): Pr
         .where({ ID: runId }),
     );
     await updateOperation(claim, { jobsNew: ingest.created, jobsUpdated: ingest.updatedJobIds.length,
-      jobsAccepted: ingest.accepted, jobsFiltered: ingest.filtered, exclusionReasons: ingest.exclusionReasons });
+      jobsAccepted: ingest.accepted, jobsFiltered: ingest.filtered, jobsDeferred: ingest.deferred, exclusionReasons: ingest.exclusionReasons });
 
     return {
       runId,

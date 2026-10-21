@@ -82,7 +82,7 @@ skills:
     - { name: "REST", proficiency: expert }
     - { name: "S/4HANA integration", proficiency: strong, aliases: ["S4HANA", "S/4"] }
   integration:
-    - { name: "SAP Integration Suite", proficiency: strong }
+    - { name: "SAP Integration Suite", proficiency: strong, aliases: ["SAP BTP Integration Suite", "BTP Integration Suite"] }
     - { name: "SAP CPI", proficiency: strong, aliases: ["Cloud Platform Integration", "SAP Cloud Integration", "CPI", "HCI"] }
     - { name: "Destinations", proficiency: strong }
     - { name: "OAuth", proficiency: strong, aliases: ["OAuth2", "OAuth 2.0"] }

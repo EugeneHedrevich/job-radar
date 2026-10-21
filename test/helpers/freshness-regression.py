@@ -120,6 +120,7 @@ class FreshnessRegression(unittest.TestCase):
         self.assertTrue(any(event.get('job', {}).get('title') == 'Inserted at the head' for event in events))
         self.assertEqual([event['cursor'] for event in events if event['type'] == 'search_progress'][-1], {'offset': 40})
         self.assertEqual(enrichment, [30])
+        self.assertTrue(any(event.get('job', {}).get('description') == 'A bounded detail result' for event in events))
 
     def test_glassdoor_reports_incomplete_coverage_without_claiming_offset_continuation(self):
         result, events, requests, _ = self.collect(source='glassdoor')
@@ -147,7 +148,7 @@ class FreshnessRegression(unittest.TestCase):
             with ThreadPoolExecutor(max_workers=1) as executor:
                 executor.submit(observed_request, lambda: response, 'search', _measurement=measurement).result()
             observed_request(lambda: response, 'detail')
-        self.assertEqual(counts, {'search': 2, 'detail': 2})
+        self.assertEqual((counts['search'], counts['detail']), (2, 2))
         self.assertEqual(events[-1], (2, 2))
 
     def test_arbeitnow_keeps_safe_listings_and_quarantines_bad_urls_without_losing_pagination(self):
@@ -175,7 +176,6 @@ class FreshnessRegression(unittest.TestCase):
         self.assertEqual(kwargs['coverage'], 'incomplete')
         progress.finish_page(1, False)
         self.assertEqual(kwargs['coverage'], 'exhausted')
-        self.assertTrue(any(event.get('job', {}).get('description') == 'A bounded detail result' for event in events))
 
     def test_blocked_empty_head_does_not_discard_backfill(self):
         result, events, requests, enrichment = self.collect(blocked=True)
@@ -353,6 +353,19 @@ class LinkedInHttpRegression(unittest.TestCase):
             self.assertNotIn('user-agent', {key.lower() for key in options['headers']})
             self.assertNotIn('authority', {key.lower() for key in options['headers']})
         self.assertEqual([call[3]['timeout'] for call in self.calls], [15, 20, 15])
+
+    def test_effective_search_parameters_and_response_status_are_recorded_without_secrets(self):
+        self.replies = [self.search_page()]
+        result = collector.run_task(self.task(fetch_description=False, location='Saudi Arabia', hours_old=48), 60)
+        self.assertEqual((result['http_status'], result['search_requests'], result['detail_requests']), (200, 1, 0))
+        request = [event for event in self.events if event['type'] == 'http_request'][0]
+        self.assertEqual(request['params']['keywords'], 'SAP CAP')
+        self.assertEqual(request['params']['location'], 'Saudi Arabia')
+        self.assertEqual(request['params']['f_TPR'], 'r172800')
+        self.assertEqual(request['http_status'], 200)
+        self.assertTrue(request['requested_at'])
+        self.assertNotIn('example:test', str(request))
+        self.assertNotIn('trusted.pem', str(request))
 
     def test_a_429_keeps_search_records_and_latches_future_tasks_without_another_request(self):
         self.replies = [self.search_page(), self.response(status=429, headers={'Retry-After': '1200'})]

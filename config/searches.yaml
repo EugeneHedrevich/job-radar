@@ -517,6 +517,7 @@ rotation:
 # A job collected without a description stays incomplete - it is never given an
 # invented assessment.
 description_budget:
+  pending_ttl_hours: 168 # retire old untracked automatic queue slots, retaining their history
   max_tasks_per_run: 2
   max_pending_candidates: 40 # hidden cards awaiting SAP context; reuse description slots
   # Global persistent source cursor; independent batch keyword/location cursors.

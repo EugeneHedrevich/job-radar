@@ -15,9 +15,10 @@ export class CollectionBusyError extends Error {
 async function expireLease(tx: any, lease: any, now: Date): Promise<void> {
   if (!lease?.token || new Date(lease.expiresAt).getTime() > now.getTime()) return;
   const operation = await tx.run(SELECT.one.from(db().CollectionOperations).where({ ID: lease.operation_ID }));
-  await tx.run(UPDATE(db().CollectionOperations).set({ stage: 'Error', outcome: 'Failed',
-    finishedAt: now.toISOString(), updatedAt: now.toISOString(),
-    message: 'The local process stopped or lost its lease. Start collection to continue.' })
+  const automatic = operation?.weeklyState && JSON.parse(operation.weeklyState).automatic;
+  await tx.run(UPDATE(db().CollectionOperations).set({ stage: automatic ? 'Waiting' : 'Error', outcome: automatic ? 'Running' : 'Failed',
+    finishedAt: automatic ? null : now.toISOString(), resumeAt: automatic ? now.toISOString() : null, updatedAt: now.toISOString(),
+    message: automatic ? 'Interrupted cycle; committed progress retained. Waiting for scheduled recovery.' : 'The local process stopped or lost its lease. Start collection to continue.' })
     .where({ ID: lease.operation_ID, outcome: 'Running' }));
   if (operation?.run_ID) {
     const changed = await tx.run(UPDATE(db().CollectionRuns).set({ status: 'Failed', finishedAt: now.toISOString() })
@@ -29,7 +30,7 @@ async function expireLease(tx: any, lease: any, now: Date): Promise<void> {
 }
 
 /** SQLite's writer lock makes repeated clicks and independent processes atomic. */
-export async function claimCollection(trigger: string, now = new Date(), resumeId?: string): Promise<
+export async function claimCollection(trigger: string, now = new Date(), resumeId?: string, dueOnly = false): Promise<
   { acquired: true; claim: CollectionClaim } | { acquired: false; operationId: string }> {
   return cds.tx(async (tx: any) => {
     await tx.run('UPDATE sap_jobradar_Jobs SET ID = ID WHERE 0 = 1');
@@ -41,13 +42,15 @@ export async function claimCollection(trigger: string, now = new Date(), resumeI
     const operationId = resumeId ?? randomUUID(), token = randomUUID();
     if (resumeId) {
       const prior = await tx.run(SELECT.one.from(db().CollectionOperations).where({ ID: resumeId }));
-      if (!prior?.weeklyState || !weeklyProgress(JSON.parse(prior.weeklyState) as WeeklyState).canContinue)
+      if (dueOnly && (!prior || prior.stage !== 'Waiting' || !prior.resumeAt || Date.parse(prior.resumeAt) > now.getTime() ||
+        !JSON.parse(prior.weeklyState ?? '{}').automatic)) return { acquired: false as const, operationId };
+      if (!prior?.weeklyState || !weeklyProgress(JSON.parse(prior.weeklyState) as WeeklyState).canContinue && !JSON.parse(prior.weeklyState).automatic)
         throw new Error('No pending weekly search to continue');
       await tx.run(UPDATE(db().CollectionOperations).set({ stage: 'Preparing', outcome: 'Running', finishedAt: null,
-        updatedAt: now.toISOString(), currentSource: null, tasksDone: 0, tasksTotal: 0, tasksFailed: 0,
+        updatedAt: now.toISOString(), resumeAt: null, currentSource: null, tasksDone: 0, tasksTotal: 0, tasksFailed: 0,
         tasksSkipped: 0, tasksSucceeded: 0, jobsFound: 0, jobsNew: 0, jobsUpdated: 0, jobsAssessed: 0,
         aiCalls: 0, cachedAssessments: 0, rulesAssessments: 0, aiSucceeded: 0, aiFailures: 0,
-        aiFailureReasons: '[]', jobsAccepted: null, jobsFiltered: null, exclusionReasons: '{}',
+        aiFailureReasons: '[]', jobsAccepted: null, jobsFiltered: null, jobsDeferred: 0, exclusionReasons: '{}',
         assessmentRemaining: null, aiBacklog: 0, aiBudgetExhausted: false, message: null }).where({ ID: operationId }));
     } else await tx.run(INSERT.into(db().CollectionOperations).entries({ ID: operationId, trigger,
       stage: 'Preparing', outcome: 'Running', startedAt: now.toISOString(), updatedAt: now.toISOString() }));
@@ -83,7 +86,7 @@ export function startLeaseHeartbeat(claim: CollectionClaim): () => Promise<void>
 }
 
 export async function finishOperation(claim: CollectionClaim, patch: Partial<CollectionOperation>): Promise<void> {
-  await updateOperation(claim, { ...patch, finishedAt: new Date().toISOString() });
+  await updateOperation(claim, { ...patch, finishedAt: patch.stage === 'Waiting' ? null : new Date().toISOString() });
   await cds.run(UPDATE(db().CollectionLease).set({ token: null, expiresAt: null })
     .where({ name: NAME, token: claim.token, operation_ID: claim.operationId }));
 }

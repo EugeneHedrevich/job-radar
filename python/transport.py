@@ -12,7 +12,7 @@ from email.utils import parsedate_to_datetime
 from functools import lru_cache
 from pathlib import Path
 from types import SimpleNamespace
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import urlsplit, urlunsplit, parse_qsl
 
 
 @lru_cache(maxsize=1)
@@ -76,13 +76,29 @@ class SourceStopped(RuntimeError):
 
 
 class LinkedInTransport:
-    def __init__(self, detail_limit: int = 5, search_limit: int = 3, report=None):
+    def __init__(self, detail_limit: int = 5, search_limit: int = 3, report=None, observe=None):
         self.detail_limit = detail_limit
         self.search_limit = search_limit
         self.search_requests = 0
         self.detail_requests = 0
         self.failure = None
         self.report = report
+        self.observe = observe
+        self.last_http_status = None
+        self.last_response_at = None
+
+    def observed(self, method, url, options, status, at):
+        self.last_http_status, self.last_response_at = status, datetime.now(timezone.utc).isoformat()
+        if self.observe:
+            parsed = urlsplit(url)
+            params = dict(parse_qsl(parsed.query))
+            extra = options.get('params') or {}
+            params.update(dict(parse_qsl(extra)) if isinstance(extra, str) else dict(extra))
+            allowed = {'keywords', 'location', 'geoId', 'f_TPR', 'f_WT', 'f_JT', 'start', 'pageNum', 'distance'}
+            self.observe({'method': method.upper(), 'host': parsed.hostname, 'path': parsed.path,
+                'params': {key: str(value) for key, value in params.items() if key in allowed and value is not None},
+                'kind': 'detail' if '/jobPosting/' in parsed.path or '/jobs/view/' in parsed.path else 'search',
+                'http_status': status, 'requested_at': at})
 
     def before(self, kind: str) -> None:
         if self.failure:
@@ -156,7 +172,14 @@ class LinkedInHttpClient:
             if key.lower() not in {'user-agent', 'authority', 'host'} and not key.lower().startswith('sec-ch-ua')}
         options.setdefault('timeout', 15)
         options.update(self._network, impersonate=self.FINGERPRINT, default_headers=True, allow_redirects=False)
-        response = self.session.request(method, url, **options)
+        at = datetime.now(timezone.utc).isoformat()
+        guard = transport or active_transport.get() or self._guard
+        try:
+            response = self.session.request(method, url, **options)
+        except Exception:
+            guard.observed(method, url, options, None, at)
+            raise
+        guard.observed(method, url, options, response.status_code, at)
         try:
             self.check(response, transport, headers_only=bool(options.get('stream')))
         except SourceStopped:

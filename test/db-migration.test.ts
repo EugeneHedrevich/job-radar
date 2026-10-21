@@ -63,12 +63,28 @@ async function createLegacyTemplate(): Promise<string> {
       ALTER TABLE sap_jobradar_CollectionTasks DROP COLUMN coverageReason;
       ALTER TABLE sap_jobradar_CollectionRuns DROP COLUMN operationId;
       ALTER TABLE sap_jobradar_CollectionRuns DROP COLUMN diagnostics;
+      ALTER TABLE sap_jobradar_CollectionRuns DROP COLUMN deferredKeys;
+      ALTER TABLE sap_jobradar_CollectionRuns DROP COLUMN jobsDeferred;
+      ALTER TABLE sap_jobradar_Jobs DROP COLUMN enrichmentDeferredAt;
+      ALTER TABLE sap_jobradar_CollectionOperations DROP COLUMN resumeAt;
+      ALTER TABLE sap_jobradar_CollectionOperations DROP COLUMN aiCallsReserved;
+      ALTER TABLE sap_jobradar_CollectionOperations DROP COLUMN aiCallLimit;
+      ALTER TABLE sap_jobradar_CollectionOperations DROP COLUMN jobsDeferred;
+      ALTER TABLE sap_jobradar_SourceHealth DROP COLUMN lastRequestAt;
+      ALTER TABLE sap_jobradar_SourceHealth DROP COLUMN lastFailureStatus;
+      ALTER TABLE sap_jobradar_SourceHealth DROP COLUMN lastFailureAt;
+      ALTER TABLE sap_jobradar_SourceHealth DROP COLUMN lastFailureKind;
+      ALTER TABLE sap_jobradar_SourceHealth DROP COLUMN lastFailureMessage;
+      ALTER TABLE sap_jobradar_SourceHealth DROP COLUMN lastRateLimitAt;
+      ALTER TABLE sap_jobradar_SourceHealth DROP COLUMN recoverySuccesses;
       ALTER TABLE sap_jobradar_CollectionOperations DROP COLUMN weeklyState;
       ALTER TABLE sap_jobradar_CollectionOperations DROP COLUMN currentSource;
       ALTER TABLE sap_jobradar_CollectionOperations DROP COLUMN assessmentRemaining;
       ALTER TABLE sap_jobradar_SourceHealth DROP COLUMN rateLimitStreak;
       DROP TABLE sap_jobradar_AiAssessmentQueue;
       DROP TABLE sap_jobradar_ListingActivityEvents;
+      INSERT INTO sap_jobradar_SourceHealth (source, lastStatus, lastHttpStatus, updatedAt)
+        VALUES ('linkedin', 'ok', 429, '2026-10-21T10:38:00Z');
       INSERT INTO sap_jobradar_Jobs
         (ID, fingerprint, title, description, primaryUrl, firstSeenAt, lastSeenAt)
         VALUES ('legacy-job', 'legacy-fingerprint', 'Original vacancy', 'Original description',
@@ -139,6 +155,11 @@ describe('serialized legacy database migrations', () => {
         try {
             const columns = migrated.prepare('PRAGMA table_info(sap_jobradar_Notifications)').all();
             expect(columns.map((column) => column.name)).toEqual(expect.arrayContaining(['claimToken', 'claimUntil']));
+            for (const [table, expected] of Object.entries({ CollectionOperations: ['resumeAt', 'aiCallsReserved', 'aiCallLimit', 'jobsDeferred'],
+              CollectionRuns: ['deferredKeys', 'jobsDeferred'], Jobs: ['enrichmentDeferredAt'], SourceHealth: ['lastRequestAt', 'lastFailureAt', 'lastFailureStatus', 'lastRateLimitAt', 'recoverySuccesses'] }))
+              expect(migrated.prepare(`PRAGMA table_info(sap_jobradar_${table})`).all().map(column => column.name)).toEqual(expect.arrayContaining(expected));
+            expect(migrated.prepare('SELECT lastHttpStatus, lastRequestAt, lastFailureStatus, lastFailureAt, recoveryPending, rateLimitStreak FROM sap_jobradar_SourceHealth').get())
+              .toEqual({ lastHttpStatus: null, lastRequestAt: null, lastFailureStatus: 429, lastFailureAt: null, recoveryPending: 1, rateLimitStreak: 1 });
             expect(migrated.prepare('PRAGMA table_info(sap_jobradar_Assessments)').all().map((column) => column.name)).toContain('mandatoryGapEvidence');
             expect(migrated.prepare('PRAGMA table_info(sap_jobradar_CollectionTasks)').all().map((column) => column.name))
                 .toEqual(expect.arrayContaining(['searchRequests', 'detailRequests', 'coverage', 'coverageReason']));

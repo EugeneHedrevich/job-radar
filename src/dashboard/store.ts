@@ -264,7 +264,8 @@ export async function readCollectionStatus(): Promise<CollectionStatus> {
   const cutoff = Date.now() - coverage.freshnessHours * 3_600_000;
   const config = loadConfig();
   const pendingJobs = (await query<any>(SELECT.from(db().Jobs).where({ isDemo: false }))).filter((job) =>
-    job.status !== 'Ignored' && !jobText(job).hasDescription && vacancyRelevance(config, job).state !== 'irrelevant');
+    job.status !== 'Ignored' && (!job.enrichmentDeferredAt || job.manuallyImportedAt || hasPersonalTracking(job)) &&
+    !jobText(job).hasDescription && vacancyRelevance(config, job).state !== 'irrelevant');
   const pendingListings = pendingJobs.length ? await query<any>(SELECT.from(db().SourceListings)
     .where({ job_ID: { in: pendingJobs.map((job) => job.ID) } })) : [];
   const sourceNames = [...new Set([...sources.map((row) => row.source), ...pendingListings.map((row) => row.source)])].sort();
@@ -285,6 +286,8 @@ export async function readCollectionStatus(): Promise<CollectionStatus> {
       searchRequests: row.searchRequests ?? 0, detailRequests: row.detailRequests ?? 0,
       reservedSearch: row.reservedSearch ?? 0, reservedDetail: row.reservedDetail ?? 0,
       windowStartedAt: row.windowStartedAt ?? null, lastHttpStatus: row.lastHttpStatus ?? null,
+      lastRequestAt: row.lastRequestAt ?? null, lastFailureStatus: row.lastFailureStatus ?? null,
+      lastFailureAt: row.lastFailureAt ?? null, recoveryPending: Boolean(row.recoveryPending),
       lastRetryAfterSeconds: row.lastRetryAfterSeconds ?? null,
       successfulChecks: headRows.filter((head) => head.taskKey.split(':')[1] === row.source && head.headCheckedAt &&
         new Date(head.headCheckedAt).getTime() >= Date.now() - (config.searches.sources[row.source]?.hours_old ?? config.searches.defaults.hours_old) * 3_600_000).length,

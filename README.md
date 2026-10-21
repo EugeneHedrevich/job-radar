@@ -233,17 +233,29 @@ use the same finalisation, including saved AI failure reasons.
 
 **Last 7 days** starts a weekly review operation with an exact frozen UTC interval
 (the preceding 168 hours). It walks the enabled, deduplicated query/geography
-catalogue, rather than claiming that one rotation batch covers the week. Each
-click runs one bounded cycle: at most 18 search tasks, two description tasks and
-five AI calls, with the existing LinkedIn allowances, cooldowns and source leases.
-There are no notifications. **Continue weekly search** resumes the same interval
-and saved pages in a later cycle; it does not reset cooldowns or request budgets.
-The weekly result remains reachable after an intervening scheduled collection.
+catalogue. It continues automatically through bounded cycles of at most 18 search
+tasks and two description tasks, with the existing LinkedIn allowances, cooldowns
+and source leases. **Five AI calls is a ceiling for the entire period operation**,
+reserved durably before each attempt, including interrupted attempts. Cached AI
+and local rules remain available after that allowance is spent.
+
+The existing scheduler checks persisted continuations each minute in both the
+dashboard and watch processes. It releases execution leases while waiting, records
+the next eligible resume time, and recovers interrupted operations after their
+lease expires. Available sources continue while LinkedIn is paused. Regular watch
+cycles defer to an active period operation; automatic continuations never deliver
+notifications. Keep the application running for scheduled continuation; restarting
+it recovers saved work. Older manually stepped searches opt in using **Continue
+weekly search automatically**. Dates, committed cursors and aggregate counters
+survive continuation. Capped/unsupported scopes stop automatically; three failed
+visits also cap a scope for review. A local startup error requires repair and an
+explicit resume rather than repeated automatic worker starts.
 Results and weekly continuation commit together, so an interrupted import can be
 replayed without losing results or personal tracking. New or changed records use
 the ordinary assessment cache and pending AI queue; there is no forced rescore.
 
-Progress separates combinations checked, exhaustive scans, deferred combinations
+Progress shows the actual interval (including shorter periods), cycle execution,
+waiting reason/resume time and operation totals. It separates combinations checked, exhaustive scans, deferred combinations
 and adapter-limited scans. Glassdoor has no reliable persisted continuation in the
 pinned adapter, so it remains limited. Other adapters' moving offset pages and
 provider retention can also prevent exhaustive historical coverage. Continuing
@@ -264,12 +276,29 @@ Credentials, tokens, proxy authentication and secret configuration are redacted.
 Detailed diagnostics stay collapsed in the UI. Starting the server or exporting
 a report does not launch collection, paid AI requests or notifications.
 
+LinkedIn prioritizes primary BTP, CAP, UI5/Fiori and CPI/Integration first pages
+across EU and GCC scopes before overlapping variants or backfill. Each unchecked
+head receives one HTTP request. Diagnostics record allowlisted parameters from
+actual client calls, response statuses and timestamps; unrelated titles alone do
+not establish that the provider ignored a query. Browser transport is unchanged.
+Latest request status is separate from historical failures. After a rate limit,
+one successful probe retains the streak and cautious one-request recovery mode;
+reset requires two successful visits and a full shared window since the last 429.
+Retry-After and immediate stopping on 429/403/challenges still apply.
+
 Relevant cards without enough description evidence show **Awaiting description**
 instead of a negative recommendation. SAP Integration/Integratie Consultant and
 SAP-context BTP/WorkZone/Berater titles are retained; ambiguous technical SAP cards
 remain in the bounded description queue. Target-family cards receive priority over
 generic architecture, and unrelated Pega roles are filtered. Generic CI/CI-CD is
-not an alias for SAP CPI. The shared parser handles employment/location labels,
+not an alias for SAP CPI. Generic functional PP/QM/FI/CO consultant titles no longer
+occupy unresolved slots; technical SAP ambiguity remains eligible. Untracked,
+automatically queued candidates expire after `pending_ttl_hours` (168 by default)
+or yield to higher priority candidates, retaining saved facts and assessment history.
+Manual imports and personal tracking are protected. Capacity overflow is deferred,
+stored with the results/cursor in the diagnostic ledger and replayed in bounded
+slices as space becomes available, without refetching search pages. It is reported
+separately from relevance filtering. The shared parser handles employment/location labels,
 preferred headings and negation, excluding privacy/legal/company marketing sections.
 Contract testing and SAP Payroll integration are technical references, and ASAP
 does not establish a zero-day deadline. AI receives the same cleaned vacancy content.
@@ -296,7 +325,7 @@ Preparation diagnostics include database-lock wait, cursor/rotation reads, plann
 description-candidate reads and analysis timings. Preparation examines only the
 selected sources and a bounded priority slice; unchanged analysis is reused under
 an input/profile/scoring key. Repeated cards remain separate from measured HTTP
-request counts. Changed analysis uses cache revision 22 and preserves prior assessments.
+request counts. Changed analysis uses cache revision 23 and preserves prior assessments.
 `refreshSavedVacancies()` performs an idempotent local rules refresh and can recover
 relevant candidates from saved filtered observations, with no source or AI requests.
 

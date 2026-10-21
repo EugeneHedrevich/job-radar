@@ -5,6 +5,8 @@ import { detectEngagement, detectWorkMode, jobText, positiveEmploymentMatches, r
 import type { MandatoryGapEvidence, MatchableJob } from './types.js';
 
 export interface MatchingConstraints {
+  languageRequirements: Array<{ code: string; kind: 'mandatory' | 'preferred' | 'unclear'; quote: string;
+    proficiency: string | null; profileEvidence: 'confirmed' | 'unknown' | 'not_held' }>;
   hardRejectReasons: string[];
   evidence: MandatoryGapEvidence[];
   preferredGaps: string[];
@@ -107,7 +109,7 @@ export function nonSkillConstraintClause(clause: string): boolean {
 /** Only explicit requirements can demonstrate a contradiction. Unknown facts
  * and proficiency levels are retained independently of a model's answer. */
 export function matchingConstraints(config: AppConfig, job: MatchableJob, context?: { engagement: Engagement; workMode: WorkMode }): MatchingConstraints {
-  const result: MatchingConstraints = { hardRejectReasons: [], evidence: [], preferredGaps: [], missing: [], requiresReview: false };
+  const result: MatchingConstraints = { languageRequirements: [], hardRejectReasons: [], evidence: [], preferredGaps: [], missing: [], requiresReview: false };
   const source = requirementSource(job);
   const mentionFor = (block: string, term: string) => requirementMentions(config, source, term)
     .find((item) => normalizeText(item.quote).endsWith(normalizeText(block)) && item.clause.includes(term));
@@ -141,14 +143,18 @@ export function matchingConstraints(config: AppConfig, job: MatchableJob, contex
       const after = mention.clause.slice(mention.end);
       if (/^\s+(?:company|client|office|market|customer|branch|citizens?|residents?|nationality|nationals?)\b/.test(after)) continue;
       const speaking = /^[- ]speaking\b/.test(after);
-      const kind = speaking && mention.kind === 'unclear' ? 'mandatory' : mention.kind;
+      const communication = /\b(?:excellent|fluent|strong|good)\b.*\b(?:communication|language)\s+skills\b/.test(mention.clause) &&
+        !/\b(?:no|not|without|or|oder)\b/.test(mention.clause);
+      const kind = (speaking || communication) && mention.kind === 'unclear' ? 'mandatory' : mention.kind;
       const distance = (start: number, end: number) => Math.max(mention.start - end, start - mention.end, 0);
       const level = [...mention.clause.matchAll(/\b(A[12]|B[12]|C[12])\b/gi)]
         .sort((a, b) => distance(a.index, a.index + a[0].length) - distance(b.index, b.index + b[0].length))[0]?.[0].toUpperCase();
-      const proficiency = [...mention.clause.matchAll(/\b(?:fluent|fluency|native|business|professional|verhandlungssicher\w*|sehr gute|gute|biegł\w*|courant|vloeiend)\b/g)]
+      const proficiency = [...mention.clause.matchAll(/\b(?:excellent|fluent|fluency|native|business|professional|verhandlungssicher\w*|sehr gute|gute|biegł\w*|courant|vloeiend)\b/g)]
         .sort((a, b) => distance(a.index, a.index + a[0].length) - distance(b.index, b.index + b[0].length))[0]?.[0];
       const fluency = Boolean(proficiency);
       if (kind === 'unclear' && !fluency && !/(?:\b(?:language|jezyk|język|langue|taal)\b|kenntnisse\b)/.test(mention.clause)) continue;
+      result.languageRequirements.push({ code, kind, quote: mention.quote, proficiency: level ?? proficiency ?? null,
+        profileEvidence: !held ? 'not_held' : proficiency || level ? 'unknown' : 'confirmed' });
       if (!held) {
         if (kind === 'mandatory') reject(`${language.name} language is mandatory and is not held in profile.languages.`,
           language.name, mention.quote, 'languages', config.profile.languages);
@@ -320,6 +326,8 @@ export function matchingConstraints(config: AppConfig, job: MatchableJob, contex
   result.hardRejectReasons = [...new Set(result.hardRejectReasons)];
   result.missing = [...new Set(result.missing)];
   result.preferredGaps = [...new Set(result.preferredGaps)];
+  result.languageRequirements = result.languageRequirements.filter((item, index, all) => all.findIndex(other =>
+    other.code === item.code && other.kind === item.kind && other.quote === item.quote && other.proficiency === item.proficiency) === index);
   result.evidence = result.evidence.filter((item, index, all) =>
     all.findIndex((other) => other.requirement === item.requirement && other.profilePath === item.profilePath && other.vacancyQuote === item.vacancyQuote) === index);
   return result;

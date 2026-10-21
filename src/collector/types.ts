@@ -40,6 +40,9 @@ export const listingActivitySchema = z.object({
 export type ListingActivity = z.infer<typeof listingActivitySchema>;
 
 export const collectorLineSchema = z.discriminatedUnion('type', [
+  z.object({ type: z.literal('http_request'), task_id: z.string(), source: z.string(), method: z.string(),
+    host: z.string().nullable(), path: z.string(), params: z.record(z.string(), z.string()), kind: z.enum(['search', 'detail']),
+    http_status: z.number().int().nullable(), requested_at: z.string() }),
   z.object({ type: z.literal('candidate_rejected'), task_id: z.string(), source: z.string(), job: collectorJobSchema, reason: z.string() }),
   z.object({ type: z.literal('meta'), jobspy_version: z.string(), tasks: z.number() }),
   z.object({ type: z.literal('task_started'), task_id: z.string() }),
@@ -73,6 +76,8 @@ export const collectorLineSchema = z.discriminatedUnion('type', [
     search_requests: z.number().int().nonnegative().nullable().optional(),
     detail_requests: z.number().int().nonnegative().nullable().optional(),
     retry_after_seconds: z.number().nonnegative().optional(),
+    http_status: z.number().int().nullable().optional(),
+    http_status_at: z.string().nullable().optional(),
   }),
   z.object({ type: z.literal('done'), tasks: z.number() }),
 ]);
@@ -111,6 +116,7 @@ export interface CollectorTask {
 export interface TaskOutcome {
   quarantinedCandidates?: number;
   httpStatus?: number;
+  httpStatusAt?: string;
   taskId: string;
   source: string;
   searchTerm: string;
@@ -135,6 +141,7 @@ export interface TaskOutcome {
 export interface SearchCursor { offset?: number; page?: number; index?: number }
 
 export interface CollectorOutput {
+  requests?: Array<Extract<CollectorLine, { type: 'http_request' }>>;
   rejectedCandidates?: Array<{ taskId: string; source: string; job: CollectorJob; reason: string }>;
   jobspyVersion: string | undefined;
   jobs: Array<{ taskId: string; source: string; job: CollectorJob }>;

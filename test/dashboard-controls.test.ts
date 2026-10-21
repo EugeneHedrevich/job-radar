@@ -1,7 +1,7 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { claimCollection, readOperation, updateOperation } from '../src/collector/lease.js';
+import { claimCollection, finishOperation, readOperation, updateOperation } from '../src/collector/lease.js';
 import { runCollector } from '../src/collector/run.js';
 import { loadConfig, PROJECT_ROOT, resetConfigCache } from '../src/config/index.js';
 import { cds, connectDb, db, disconnectDb, INSERT, query, queryOne, SELECT, UPDATE } from '../src/db/index.js';
@@ -9,7 +9,8 @@ import { importVacancy, type ImportMetadata } from '../src/dashboard/import.js';
 import { listReminders, updateReminder } from '../src/dashboard/reminders.js';
 import { listJobs, readCollectionStatus, readJob, updateTracking } from '../src/dashboard/store.js';
 import { collect } from '../src/pipeline/collect.js';
-import { withCollectionOperation } from '../src/pipeline/collection-operation.js';
+import { resumePeriodCollection, withCollectionOperation } from '../src/pipeline/collection-operation.js';
+import { claimAiAttempt } from '../src/pipeline/ai-queue.js';
 import { rank } from '../src/pipeline/rank.js';
 import { claimImportSource, claimSourceRequests, recordOutcomes, settleSourceRequests } from '../src/collector/health.js';
 import { planBatch, searchQueryKey } from '../src/collector/plan.js';
@@ -38,6 +39,92 @@ afterEach(() => { for (const worker of workers.splice(0)) if (worker.child.exitC
 afterAll(async () => { vi.unstubAllEnvs(); vi.unstubAllGlobals(); resetConfigCache(); await closeTempDb(); });
 
 describe('local dashboard controls', () => {
+  it('automatically resumes the same period after restart, waits without leases, and leaves capped scopes alone', async () => {
+    const config = loadConfig(), weekly = createWeeklyState(config);
+    weekly.start = new Date(Date.parse(weekly.end) - 48 * 3_600_000).toISOString(); weekly.automatic = true; weekly.unsupported = [];
+    weekly.searches = ['linkedin', 'indeed', 'glassdoor'].map(source => weekly.searches.find(s => s.task.source === source)!);
+    const pause = new Date(Date.now() + 3_600_000).toISOString();
+    await cds.run(INSERT.into(db().SourceHealth).entries({ source: 'linkedin', cooldownUntil: pause, lastStatus: 'rate_limit', recoveryPending: true }));
+    let indeedVisits = 0;
+    vi.mocked(runCollector).mockImplementation(async (_config, { tasks }) => {
+      const source = tasks[0]!.source; if (source === 'indeed') indeedVisits++;
+      return { jobspyVersion: 'offline', activities: [], malformedLines: 0,
+        jobs: source === 'indeed' ? [{ taskId: tasks[0]!.task_id, source, job: reviewRecord }] : [],
+        outcomes: tasks.map(task => ({ taskId: task.task_id, source, searchTerm: task.search_term, location: task.location, countryIndeed: task.country_indeed,
+          status: 'Succeeded', executed: true, resultCount: source === 'indeed' ? 1 : 0, durationMs: 1, searchRequests: 1, detailRequests: 0,
+          headChecked: true, coverage: source === 'glassdoor' || source === 'indeed' && indeedVisits === 1 ? 'incomplete' : 'exhausted',
+          ...(source === 'indeed' ? { nextCursor: { offset: indeedVisits === 1 ? 10 : 0 } } : {}) })) };
+    });
+    const first = await claimCollection('dashboard'); if (!first.acquired) throw new Error('Expected lease');
+    await updateOperation(first.claim, { weeklyState: JSON.stringify(weekly) });
+    await withCollectionOperation(first.claim, () => collect({ claim: first.claim, weekly }),
+      (summary, onProgress) => rank({ jobIds: summary.ingest.jobIds, rulesOnly: true, onProgress }), true);
+    const waiting = (await readOperation(first.claim.operationId))!;
+    expect(waiting).toMatchObject({ stage: 'Waiting', outcome: 'Running', finishedAt: null, weekly: { cycles: 1, totals: { received: 1, created: 1 } } });
+    expect(Date.parse(waiting.resumeAt!)).toBeLessThan(Date.parse(pause)); // available sources continue while LinkedIn waits
+    expect(await queryOne(SELECT.from(db().CollectionLease))).toMatchObject({ token: null, expiresAt: null });
+    const markup = renderToStaticMarkup(createElement((await import(`${PROJECT_ROOT}/frontend/src/CollectionControls.tsx`)).CollectionProgress,
+      { operation: waiting, error: null, onContinue: () => {} }));
+    expect(markup).toContain('Waiting to resume'); expect(markup).toContain('Next eligible resume');
+    expect(markup).not.toContain('Last 7 days'); expect(markup).not.toContain('Continue weekly search');
+    await disconnectDb(); await connectDb(file);
+    // Simulate a restart after a worker lost its lease, without losing committed cursors.
+    const interrupted = await claimCollection('period-continuation', new Date(), first.claim.operationId);
+    if (!interrupted.acquired) throw new Error('Expected restart lease');
+    await cds.run(UPDATE(db().CollectionLease).set({ expiresAt: '2000-01-01T00:00:00Z' }));
+    expect(await Promise.all([resumePeriodCollection(), resumePeriodCollection()])).toContain(true);
+    expect(vi.mocked(runCollector).mock.calls.map(([, options]) => options.tasks[0]!.source)).toEqual(['indeed', 'glassdoor', 'indeed']);
+    expect(await readOperation(first.claim.operationId)).toMatchObject({ stage: 'Waiting', resumeAt: pause,
+      weekly: { start: weekly.start, end: weekly.end, cycles: 2, totals: { received: 2, created: 1 }, limited: 1 } });
+    await cds.run(UPDATE(db().SourceHealth).set({ cooldownUntil: null }).where({ source: 'linkedin' }));
+    await cds.run(UPDATE(db().CollectionOperations).set({ resumeAt: '2000-01-01T00:00:00Z' }).where({ ID: first.claim.operationId }));
+    expect(await resumePeriodCollection()).toBe(true);
+    expect(await readOperation(first.claim.operationId)).toMatchObject({ stage: 'Finished', outcome: 'Partial', resumeAt: null,
+      weekly: { cycles: 3, limited: 1, canContinue: false } });
+    expect(await resumePeriodCollection()).toBe(false); expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('keeps one durable AI allowance across period cycles and interrupted attempts', async () => {
+    const ids = [];
+    for (let i = 0; i < 6; i++) ids.push(...(await ingestReview({ id: `ai-${i}`, company: `Client ${i}`, job_url: `https://example.com/ai/${i}` })).jobIds);
+    await rank({ jobIds: ids, rulesOnly: true });
+    const queue = await query<any>(SELECT.from(db().AiAssessmentQueue)); expect(queue).toHaveLength(6);
+    const reserved = await claimCollection('dashboard'); if (!reserved.acquired) throw new Error('Expected lease');
+    const weekly = createWeeklyState(loadConfig()); weekly.automatic = true;
+    await updateOperation(reserved.claim, { weeklyState: JSON.stringify(weekly), stage: 'Assessing', aiCallLimit: 5 });
+    for (const row of queue.slice(0, 5)) expect(await claimAiAttempt(row.cacheKey, false, reserved.claim.operationId)).toBe(1);
+    await finishOperation(reserved.claim, { stage: 'Waiting', outcome: 'Running', resumeAt: '2000-01-01T00:00:00Z' });
+    await disconnectDb(); await connectDb(file);
+    const next = await claimCollection('period-continuation', new Date(), reserved.claim.operationId, true);
+    expect(next.acquired).toBe(true);
+    expect(await claimAiAttempt(queue[5].cacheKey, false, reserved.claim.operationId)).toBeNull();
+    expect(await readOperation(reserved.claim.operationId)).toMatchObject({ aiCallsReserved: 5, aiCallLimit: 5 });
+    expect(await queryOne(SELECT.from(db().AiAssessmentQueue).where({ cacheKey: queue[5].cacheKey }))).toMatchObject({ attempts: 0, status: 'Pending' });
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('retains LinkedIn failure history through cautious probes and resets backoff after sustained recovery', async () => {
+    const config = loadConfig(), at = new Date('2026-10-21T12:00:00Z');
+    const failed = { taskId: 'probe', source: 'linkedin', searchTerm: 'SAP', location: undefined, countryIndeed: undefined,
+      status: 'Failed' as const, executed: true, resultCount: 0, durationMs: 1, errorKind: 'rate_limit' as const, httpStatus: 429 };
+    const success = { ...failed, status: 'Succeeded' as const, resultCount: 1, errorKind: undefined, httpStatus: 200 };
+    await recordOutcomes(config, [failed], at);
+    await recordOutcomes(config, [{ ...success, resultCount: 0 }], new Date(at.getTime() + 2 * 3_600_000 - 1));
+    expect(await queryOne(SELECT.from(db().SourceHealth).where({ source: 'linkedin' }))).toMatchObject({ rateLimitStreak: 1, recoverySuccesses: 0, recoveryPending: true });
+    await recordOutcomes(config, [success], new Date(at.getTime() + 2 * 3_600_000));
+    expect(await queryOne(SELECT.from(db().SourceHealth).where({ source: 'linkedin' }))).toMatchObject({ lastStatus: 'ok', lastHttpStatus: 200,
+      lastFailureStatus: 429, lastFailureAt: at.toISOString(), rateLimitStreak: 1, recoveryPending: true });
+    await recordOutcomes(config, [failed], new Date(at.getTime() + 3 * 3_600_000));
+    expect(await queryOne(SELECT.from(db().SourceHealth).where({ source: 'linkedin' }))).toMatchObject({ rateLimitStreak: 2,
+      cooldownUntil: new Date(at.getTime() + 7 * 3_600_000).toISOString() });
+    await recordOutcomes(config, [success], new Date(at.getTime() + 7 * 3_600_000));
+    await recordOutcomes(config, [success], new Date(at.getTime() + 8 * 3_600_000));
+    expect(await queryOne(SELECT.from(db().SourceHealth).where({ source: 'linkedin' }))).toMatchObject({ rateLimitStreak: 0, recoveryPending: false,
+      lastHttpStatus: 200, lastFailureStatus: 429, lastFailureAt: new Date(at.getTime() + 3 * 3_600_000).toISOString() });
+    await recordOutcomes(config, [{ ...failed, errorKind: 'parse', httpStatus: undefined, searchRequests: 0, detailRequests: 0 }], new Date(at.getTime() + 9 * 3_600_000));
+    expect(await queryOne(SELECT.from(db().SourceHealth).where({ source: 'linkedin' }))).toMatchObject({ lastHttpStatus: 200,
+      lastRequestAt: new Date(at.getTime() + 8 * 3_600_000).toISOString() });
+  });
   it('shows missing descriptions separately from negative recommendations and enriches target roles first', async () => {
     const ids = [];
     for (const [index, title] of ['SAP BTP Architect', 'SAP BTP / WorkZone / Fiori Developer - IT Contracting',
@@ -69,6 +156,15 @@ describe('local dashboard controls', () => {
       .map((date) => publicationRange(date, weekly))).toEqual(['unknown', 'unknown', 'outside', 'boundary-day', 'inside', 'outside']);
     expect(redactDiagnostics({ password: 'private', max_output_tokens: 123, text: 'https://user:pass@proxy:8080/?token=abc' }))
       .toEqual({ max_output_tokens: 123, text: 'https://[redacted]@proxy:8080/?token=[redacted]' });
+    const heads = [];
+    for (let cycle = 0; cycle < 8; cycle++) for (const task of weeklyTasks(config, weekly, new Map()).filter(t => t.source === 'linkedin')) {
+      heads.push(task); expect(task).toMatchObject({ search_request_limit: 1, offset: 0, results_wanted: 10 });
+      weekly.searches.find(s => s.task.task_id === task.task_id)!.checked = true;
+    }
+    expect(heads.every(task => !/CAPM|Developer|Cloud Application Programming/.test(task.search_term))).toBe(true);
+    expect(heads.slice(0, 8).some(task => /Integration|CPI/.test(task.search_term))).toBe(true);
+    expect(heads.some(task => task.location === 'United Arab Emirates')).toBe(true);
+    expect(heads.some(task => task.location === 'Saudi Arabia')).toBe(true);
   });
 
   it('exports weekly candidates, retains continuation across restart, and rolls it back with failed ingestion', async () => {
@@ -126,7 +222,8 @@ describe('local dashboard controls', () => {
   it.each(['head-probe', 'budget-skipped', 'rate-limit'] as const)('retains weekly backfill after %s', async (scenario) => {
     const weekly = createWeeklyState(loadConfig());
     weekly.searches = [weekly.searches.find((s) => s.task.source === 'linkedin')!];
-    const search = weekly.searches[0]!; search.task.offset = 30; search.visits = 1; search.checked = true;
+    const search = weekly.searches[0]!; search.task.offset = 30; search.visits = 1; search.checked = scenario !== 'head-probe';
+    if (scenario === 'head-probe') expect(weeklyTasks(loadConfig(), weekly, new Map())[0]).toMatchObject({ offset: 30, head_only: true, search_request_limit: 1 });
     const reservation = await claimCollection('dashboard'); if (!reservation.acquired) throw new Error('Expected lease');
     await updateOperation(reservation.claim, { weeklyState: JSON.stringify(weekly) });
     await cds.tx((tx: any) => commitWeeklyProgress(reservation.claim.operationId, weekly, [{
@@ -338,7 +435,7 @@ describe('local dashboard controls', () => {
     const cards = ['Senior Full Stack Developer', 'CAP Developer', 'Cloud Engineer', 'SAP CAP Internship', 'Sales Manager']
       .map((title, index) => normalizeJob({ ...reviewRecord, title, description: null, id: `candidate-${index}`,
         company: `Candidate ${index}`, job_url: `https://www.linkedin.com/jobs/view/${991400 + index}` }, 'linkedin')!);
-    expect(await ingestion.ingestJobs(cards, { runId: null, automatic: true })).toMatchObject({ created: 2, pendingEnrichment: 2, filtered: 3 });
+    expect(await ingestion.ingestJobs(cards, { runId: null, automatic: true })).toMatchObject({ created: 2, pendingEnrichment: 2, filtered: 2, deferred: 1 });
     expect((await listJobs()).total).toBe(0);
     await rank({ rulesOnly: true });
     expect(await query(SELECT.from(db().AiAssessmentQueue))).toEqual([]);
@@ -350,6 +447,50 @@ describe('local dashboard controls', () => {
       { runId: null, automatic: true })).toMatchObject({ created: 1, pendingEnrichment: 1 });
     expect((await listJobs()).items.map(row => row.title)).toEqual(['Senior Full Stack Developer']);
     expect((await readCollectionStatus()).sources.find(source => source.source === 'linkedin')?.pendingEnrichment).toBe(2);
+  });
+
+  it('replays capacity deferrals from committed diagnostics without refetching or losing the search cursor', async () => {
+    loadConfig().searches.description_budget.max_pending_candidates = 1;
+    const cards = ['SAP Cloud Technical Consultant', 'Cloud Engineer', 'SAP PP Consultant', 'SAP FI/CO Consultant'].map((title, i) => ({ ...reviewRecord,
+      id: `overflow-${i}`, title, company: `Overflow ${i}`, description: null, job_url: `https://www.linkedin.com/jobs/view/${991800 + i}` }));
+    vi.mocked(runCollector).mockImplementation(async (_config, { tasks }) => ({ jobspyVersion: 'offline', activities: [], malformedLines: 0,
+      jobs: cards.map(job => ({ taskId: tasks[0]!.task_id, source: 'linkedin', job })),
+      outcomes: tasks.map((task, index) => ({ taskId: task.task_id, source: 'linkedin', searchTerm: task.search_term, location: task.location,
+        countryIndeed: task.country_indeed, status: index ? 'Skipped' : 'Succeeded', executed: !index, resultCount: index ? 0 : cards.length,
+        durationMs: 1, searchRequests: index ? 0 : 1, detailRequests: 0, ...(!index ? { nextCursor: { offset: 10 } } : {}) })) }));
+    const first = await collect({ batchKey: 'cap-broad', onlySources: ['linkedin'] });
+    expect(first.ingest).toMatchObject({ created: 1, filtered: 2, deferred: 1 });
+    expect(await queryOne(SELECT.from(db().CollectionRuns).where({ ID: first.runId }))).toMatchObject({ jobsDeferred: 1 });
+    expect(JSON.parse((await queryOne<any>(SELECT.from(db().SearchProgress)))!.state)).toEqual({ offset: 10 });
+    await ingestion.ingestJobs([normalizeJob({ ...cards[0], description: reviewRecord.description }, 'linkedin')!], { runId: null, automatic: true });
+    const second = await collect({ fixture: [] });
+    expect(second.ingest.created).toBe(1);
+    expect(await queryOne(SELECT.from(db().CollectionRuns).where({ ID: first.runId }))).toMatchObject({ jobsDeferred: 0, deferredKeys: '[]' });
+    expect((await collect({ fixture: [] })).ingest.created).toBe(0);
+    expect(await query(SELECT.from(db().Jobs))).toHaveLength(2); expect(runCollector).toHaveBeenCalledTimes(1);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('expires and replaces old automatic enrichment slots while retaining manual and personal history', async () => {
+    const config = loadConfig(); config.searches.description_budget.max_pending_candidates = 1;
+    const records = ['Cloud Engineer', 'Manual Technical Consultant', 'Tracked Technical Consultant'].map((title, i) => normalizeJob({ ...reviewRecord,
+      title, company: `Expiry ${i}`, description: null, id: `expiry-${i}`, job_url: `https://example.com/expiry/${i}` }, 'linkedin')!);
+    const stored = await ingestion.ingestJobs(records, { runId: null, seenAt: new Date(Date.now() - 200 * 3_600_000) });
+    const jobs = await query<any>(SELECT.from(db().Jobs));
+    const manual = jobs.find(j => j.title === records[1]!.title)!, tracked = jobs.find(j => j.title === records[2]!.title)!;
+    await cds.run(UPDATE(db().Jobs).set({ manuallyImportedAt: new Date().toISOString() }).where({ ID: manual.ID }));
+    await updateTracking(tracked.ID, { personalNotes: 'Retain queue history', status: 'Interested' });
+    await rank({ jobIds: stored.jobIds, rulesOnly: true });
+    await cds.tx(tx => ingestion.maintainPendingCandidates(tx));
+    expect(await queryOne(SELECT.from(db().Jobs).where({ ID: manual.ID }))).toMatchObject({ enrichmentDeferredAt: null });
+    expect(await queryOne(SELECT.from(db().Jobs).where({ ID: tracked.ID }))).toMatchObject({ enrichmentDeferredAt: null, personalNotes: 'Retain queue history' });
+    expect((await query<any>(SELECT.from(db().Jobs))).find(j => j.title === 'Cloud Engineer')!.enrichmentDeferredAt).toBeTruthy();
+    expect(await query(SELECT.from(db().Assessments))).toHaveLength(3);
+    const generic = await ingestion.ingestJobs([normalizeJob({ ...reviewRecord, id: 'generic-new', title: 'Cloud Engineer', description: null,
+      company: 'New Generic', job_url: 'https://example.com/new-generic' }, 'linkedin')!], { runId: null, automatic: true });
+    expect(await ingestion.ingestJobs([normalizeJob({ ...reviewRecord, id: 'replacement', title: 'SAP Cloud Technical Consultant', description: null,
+      company: 'New Queue', job_url: 'https://example.com/replacement' }, 'linkedin')!], { runId: null, automatic: true })).toMatchObject({ created: 1, deferred: 0 });
+    expect((await queryOne<any>(SELECT.from(db().Jobs).where({ ID: generic.jobIds[0] })))!.enrichmentDeferredAt).toBeTruthy();
   });
 
   it('rolls back results and cursors when ingestion fails, then replays idempotently', async () => {

@@ -15,7 +15,8 @@ export function useCollection(onFinished: () => void) {
     if (previous.current && (!next || next.updatedAt < previous.current.updatedAt)) return;
     if (previous.current && next && (next.ID === previous.current.ID && next.updatedAt < previous.current.updatedAt ||
       previous.current.outcome === 'Running' && next.ID !== previous.current.ID && next.updatedAt <= previous.current.updatedAt)) return;
-    if (previous.current?.outcome === 'Running' && next && next.outcome !== 'Running') refresh.current();
+    if (previous.current?.outcome === 'Running' && next && (next.outcome !== 'Running' ||
+      next.stage === 'Waiting' && previous.current.stage !== 'Waiting')) refresh.current();
     previous.current = next;
     setOperation(next);
   }, []);
@@ -45,7 +46,9 @@ export function useCollection(onFinished: () => void) {
     } catch (failure) { setError(failure instanceof Error ? failure.message : 'Unable to start collection'); }
     finally { setStarting(false); }
   }
-  return { operation, weeklyOperation, starting, error, start, running: operation?.outcome === 'Running' };
+  return { operation, weeklyOperation, starting, error, start,
+    periodActive: weeklyOperation?.outcome === 'Running' || Boolean(operation?.weekly && operation.outcome === 'Running'),
+    running: operation?.outcome === 'Running' && operation.stage !== 'Waiting' };
 }
 
 const stages = ['Preparing', 'Collecting', 'Saving', 'Assessing', 'Finished'];
@@ -54,28 +57,35 @@ export function CollectionProgress({ operation, error, children, onContinue, sta
   onContinue?: () => void; starting?: boolean;
 }) {
   if (!operation && !error) return <details className="collection-idle"><summary>Collection diagnostics</summary>{children}</details>;
-  const running = operation?.outcome === 'Running';
-  const title = operation ? running ? operation.stage : {
+  const waiting = operation?.stage === 'Waiting';
+  const running = operation?.outcome === 'Running' && !waiting;
+  const title = operation ? waiting ? 'Waiting to resume' : running ? operation.stage : {
     Completed: 'Collection finished', Empty: 'Searches returned no vacancies', Partial: 'Partial coverage / results saved',
     Failed: 'Collection failed', NoSources: 'No sources available', Running: 'Collecting',
   }[operation.outcome] : 'Collection unavailable';
   const weekly = operation?.weekly;
   const range = weekly && <div className="weekly-progress">
-    <p className="small"><strong>Last 7 days · frozen requested interval</strong><br />
+    <p className="small"><strong>{Date.parse(weekly.end) - Date.parse(weekly.start) === 168 * 3_600_000 ? 'Last 7 days' : 'Period search'} · frozen requested interval</strong><br />
       <time dateTime={weekly.start}>{weekly.start}</time> → <time dateTime={weekly.end}>{weekly.end}</time> (UTC)</p>
     <p className="small"><strong>Overall coverage:</strong> {weekly.checked}/{weekly.total} combinations checked · {weekly.exhaustive} exhaustive ·
       {' '}{weekly.deferred - (weekly.failed ?? 0) - (weekly.cooldown ?? 0)} pending · {weekly.limited} capped · {weekly.failed ?? 0} failed · {weekly.cooldown ?? 0} on cooldown
       {weekly.cycles ? ` · ${weekly.cycles} saved cycles` : ''}</p>
     <p className="small">{weekly.relevantVacancies ?? 0} relevant saved vacancies · {weekly.pendingDescriptions ?? 0} awaiting descriptions
+      {weekly.deferredCandidates ? ` · ${weekly.deferredCandidates} candidates deferred for capacity` : ''}
       {weekly.unsupported ? ` · ${weekly.unsupported} unsupported source/geography scopes` : ''}</p>
-    {(weekly.deferred > 0 || weekly.limited > 0) && <p className="warning small">Weekly coverage is partial. Successful checks do not establish exhaustive coverage.</p>}
-    {!running && weekly.canContinue && onContinue && <button disabled={starting} onClick={onContinue}>Continue weekly search</button>}
+    {weekly.totals && <p className="small">Overall: {weekly.totals.received ?? 0} received · {weekly.totals.created ?? 0} new ·
+      {' '}{weekly.totals.updated ?? 0} updated · {weekly.totals.assessed ?? 0} assessed · {operation?.aiCallsReserved ?? 0}/{operation?.aiCallLimit ?? 5} AI allowance used</p>}
+    {(weekly.deferred > 0 || weekly.limited > 0) && <p className="warning small">Coverage is partial. Successful checks do not establish exhaustive coverage.</p>}
+    {waiting && <p className="small"><strong>Cycle finished; waiting to resume.</strong> {operation?.resumeAt && <>Next eligible resume: <time dateTime={operation.resumeAt}>{new Date(operation.resumeAt).toLocaleString(undefined, { timeZone: 'Europe/Sofia' })} (Europe/Sofia)</time>.</>} {operation?.message}</p>}
+    {!running && (!weekly.automatic || operation?.outcome !== 'Running') && weekly.canContinue && onContinue && <button disabled={starting} onClick={onContinue}>
+      {weekly.automatic ? 'Resume period search' : 'Continue weekly search automatically'}</button>}
   </div>;
   const download = operation && <a className="small" href={`/api/collection/${encodeURIComponent(operation.ID)}/diagnostics`} download>
     Export diagnostics JSON{running ? ' (in progress)' : ''}</a>;
   const counts = operation && <>
     {operation.jobsAccepted != null && <p className="small">{operation.jobsFound} received · {operation.jobsAccepted} accepted · {operation.jobsFiltered ?? 0} filtered
-      {operation.jobsFound - operation.jobsAccepted - (operation.jobsFiltered ?? 0) > 0 ? ` · ${operation.jobsFound - operation.jobsAccepted - (operation.jobsFiltered ?? 0)} ${weekly ? 'outside interval / unusable' : 'unusable'}` : ''}</p>}
+      {' '}{operation.jobsDeferred ?? 0} deferred for enrichment
+      {operation.jobsFound - operation.jobsAccepted - (operation.jobsFiltered ?? 0) - (operation.jobsDeferred ?? 0) > 0 ? ` · ${operation.jobsFound - operation.jobsAccepted - (operation.jobsFiltered ?? 0) - (operation.jobsDeferred ?? 0)} ${weekly ? 'outside interval / unusable' : 'unusable'}` : ''}</p>}
     {Object.entries(operation.exclusionReasons ?? {}).map(([reason, count]) => <p className="muted small" key={reason}>{count} filtered: {reason}</p>)}
     <p className="small progress-counts">{operation.tasksDone}/{operation.tasksTotal} tasks reported · {operation.jobsFound} records found · {operation.jobsNew} new jobs · {operation.jobsUpdated} updated jobs</p>
     {operation.cachedAssessments !== null && operation.cachedAssessments !== undefined ? <p className="small">

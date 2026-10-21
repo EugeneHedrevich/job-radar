@@ -20,6 +20,13 @@ export interface SourceHealthRow {
   reservedDetail: number;
   recoveryPending: boolean;
   lastHttpStatus: number | null;
+  lastRequestAt?: string | null;
+  lastFailureStatus?: number | null;
+  lastFailureAt?: string | null;
+  lastFailureKind?: string | null;
+  lastFailureMessage?: string | null;
+  lastRateLimitAt?: string | null;
+  recoverySuccesses?: number;
   lastRetryAfterSeconds: number | null;
   importToken: string | null;
   importUntil: string | null;
@@ -27,6 +34,17 @@ export interface SourceHealthRow {
 
 export async function readHealth(): Promise<SourceHealthRow[]> {
   return query<SourceHealthRow>(SELECT.from(db().SourceHealth));
+}
+
+/** Structured availability for the existing continuation scheduler; no reservations. */
+export async function sourceResumeTimes(config: AppConfig, at = new Date()): Promise<Map<string, number>> {
+  return new Map((await readHealth()).map((row) => {
+    const limits = config.searches.linkedin_limits;
+    const windowEnd = Date.parse(row.windowStartedAt ?? '') + limits.window_minutes * 60_000;
+    return [row.source, Math.max(at.getTime(), Date.parse(row.cooldownUntil ?? '') || 0,
+      row.importToken ? Date.parse(row.importUntil ?? '') || 0 : 0,
+      row.source === 'linkedin' && (row.searchRequests ?? 0) + (row.reservedSearch ?? 0) >= limits.max_search_requests_per_window ? windowEnd || 0 : 0)];
+  }));
 }
 
 /** Sources that must not be queried right now, with the reason why. */
@@ -78,14 +96,26 @@ export async function recordOutcomes(config: AppConfig, outcomes: TaskOutcome[],
     for (const [source, sourceOutcomes] of bySource) {
       const previous = existing.get(source);
       const failures = sourceOutcomes.filter((outcome) => outcome.status === 'Failed');
+      const latestRequest = [...sourceOutcomes].reverse().find(outcome => outcome.httpStatus !== undefined || outcome.httpStatusAt ||
+        outcome.searchRequests === undefined || outcome.detailRequests === undefined || outcome.searchRequests + outcome.detailRequests > 0);
       const succeeded = sourceOutcomes.some((outcome) => outcome.status === 'Succeeded');
       const recovered = succeeded && !failures.length;
       // A collection started before an import was blocked must not clear that newer failure.
       if (recovered && previous?.updatedAt && new Date(previous.updatedAt) > startedAt && previous.lastStatus !== 'ok') continue;
       const limited = failures.some((outcome) => outcome.errorKind === 'rate_limit');
+      const validResponse = source !== 'linkedin' || sourceOutcomes.some(outcome => outcome.status === 'Succeeded' &&
+        (outcome.resultCount > 0 || outcome.coverage === 'exhausted'));
+      const verifiedVisit = recovered && validResponse && Boolean(latestRequest && (latestRequest.httpStatus && latestRequest.httpStatus >= 200 && latestRequest.httpStatus < 400 ||
+        (latestRequest.searchRequests ?? 0) + (latestRequest.detailRequests ?? 0) > 0));
+      const recoverySuccesses = recovered ? (previous?.recoverySuccesses ?? 0) + Number(verifiedVisit) : 0;
+      const lastRateLimitAt = previous?.lastRateLimitAt ?? (previous?.lastStatus === 'rate_limit' ? previous.updatedAt : null);
+      // One probe demonstrates availability, not sustained recovery. Retain the
+      // streak until two visits succeed and a full shared window has passed.
+      const stable = recovered && (source !== 'linkedin' || verifiedVisit && recoverySuccesses >= 2 &&
+        now.getTime() - Date.parse(lastRateLimitAt ?? '1970-01-01') >= config.searches.linkedin_limits.window_minutes * 60_000);
       const rateLimitStreak = limited ? Math.max(previous?.rateLimitStreak ?? 0,
         previous?.lastStatus === 'rate_limit' ? 1 : 0) + 1
-        : recovered ? 0 : previous?.rateLimitStreak ?? 0;
+        : stable ? 0 : previous?.rateLimitStreak ?? 0;
 
       let consecutiveFailures = recovered ? 0 : (previous?.consecutiveFailures ?? 0) + failures.length;
       let cooldownUntil: string | null = recovered ? null : (previous?.cooldownUntil ?? null);
@@ -123,8 +153,18 @@ export async function recordOutcomes(config: AppConfig, outcomes: TaskOutcome[],
         lastStatus,
         lastMessage: lastMessage ? lastMessage.slice(0, 1900) : null,
         updatedAt: now.toISOString(),
-        recoveryPending: recovered ? false : Boolean(previous?.recoveryPending || worstKind === 'rate_limit' || worstKind === 'blocked'),
-        lastHttpStatus: failures.find((outcome) => outcome.httpStatus)?.httpStatus ?? previous?.lastHttpStatus ?? null,
+        recoveryPending: stable ? false : Boolean(previous?.recoveryPending || worstKind === 'rate_limit' || worstKind === 'blocked'),
+        recoverySuccesses,
+        lastRateLimitAt: limited ? now.toISOString() : lastRateLimitAt,
+        lastHttpStatus: latestRequest ? latestRequest.httpStatus ?? null : previous?.lastRequestAt ? previous.lastHttpStatus : null,
+        lastRequestAt: latestRequest ? latestRequest.httpStatusAt ?? now.toISOString() : previous?.lastRequestAt ?? null,
+        lastFailureStatus: previous?.lastFailureStatus ?? (previous?.lastHttpStatus && previous.lastHttpStatus >= 400 ? previous.lastHttpStatus : null),
+        lastFailureAt: previous?.lastFailureAt ?? (previous?.lastStatus && previous.lastStatus !== 'ok' ? previous.updatedAt : null),
+        lastFailureKind: previous?.lastFailureKind ?? (previous?.lastStatus !== 'ok' ? previous?.lastStatus : null),
+        lastFailureMessage: previous?.lastFailureMessage ?? (previous?.lastStatus !== 'ok' ? previous?.lastMessage : null),
+        ...(failures.length ? { lastFailureStatus: failures.at(-1)?.httpStatus ?? null,
+          lastFailureAt: failures.at(-1)?.httpStatusAt ?? now.toISOString(), lastFailureKind: worstKind ?? 'error',
+          lastFailureMessage: failures.at(-1)?.message?.slice(0, 1900) ?? null } : {}),
         lastRetryAfterSeconds: failures.find((outcome) => outcome.retryAfterSeconds !== undefined)?.retryAfterSeconds ?? previous?.lastRetryAfterSeconds ?? null,
       };
       if (previous) {

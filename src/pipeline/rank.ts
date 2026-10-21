@@ -19,6 +19,7 @@ export interface RankedJob {
 }
 
 export interface RankOptions {
+  operationId?: string;
   /** Restrict to these job ids (e.g. the ones a collection run just touched). */
   jobIds?: string[];
   /** Include stored AI candidates in the same call and request budget. */
@@ -174,7 +175,7 @@ export async function rank(options: RankOptions = {}): Promise<RankedJob[]> {
       await append({ job, assessment: rowToAssessment(cachedLlm), assessmentId: cachedLlm.ID, cached: true }, 'cached');
       continue;
     }
-    const attempt = eligibleForLlm && llmBudget > 0 ? await claimAiAttempt(preparedJob.llmKey, options.force) : null;
+    const attempt = eligibleForLlm && llmBudget > 0 ? await claimAiAttempt(preparedJob.llmKey, options.force, options.operationId) : null;
     const shouldUseLlm = attempt !== null;
     if (!shouldUseLlm && cachedLlm && !options.force) {
       await append({ job, assessment: rowToAssessment(cachedLlm), assessmentId: cachedLlm.ID, cached: true }, 'cached');

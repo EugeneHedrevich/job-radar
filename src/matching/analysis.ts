@@ -42,7 +42,7 @@ export interface VacancyAnalysis {
   requiresReview: boolean;
 }
 
-export const ANALYSIS_REVISION = 22;
+export const ANALYSIS_REVISION = 23;
 const analysisCache = new Map<string, VacancyAnalysis>();
 export const analysisCacheStats = { hits: 0, misses: 0 };
 
@@ -129,7 +129,7 @@ export function finalAssessmentPolicy(config: AppConfig, analysis: VacancyAnalys
   const byScore: Recommendation = fitScore >= config.scoring.thresholds.apply ? 'Apply' :
     fitScore >= config.scoring.thresholds.review ? 'Review' : 'Skip';
   const selected = recommendation ?? byScore;
-  return { fitScore, recommendation: hardReject ? 'Skip' as const : analysis.awaitingDescription ? 'Review' as const : selected === 'Apply' && byScore !== 'Apply' ? 'Review' as const : selected,
+  return { fitScore, recommendation: hardReject ? 'Skip' as const : analysis.requiresReview || forceReview ? 'Review' as const : selected === 'Apply' && byScore !== 'Apply' ? 'Review' as const : selected,
     hardReject, hardRejectReason: reasons.length ? [...new Set(reasons)].join(' ') : null };
 }
 

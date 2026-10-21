@@ -5,6 +5,7 @@ import { analyzeVacancy } from '../matching/analysis.js';
 import { normalizeJob } from '../normalize/index.js';
 import { readJob } from './store.js';
 import { ApiError } from './errors.js';
+import { jobText } from '../matching/signals.js';
 import { codeRevision, readWeeklyState, reviewConfiguration, weeklyProgress } from '../pipeline/weekly.js';
 
 export async function patchRunDiagnostics(runId: string, patch: Record<string, unknown>) {
@@ -111,11 +112,12 @@ export async function exportCollectionDiagnostics(operationId: string) {
   }
   const countStages = ['received', 'normalized', 'withinInterval', 'unusable', 'outsideInterval', 'unknownDates', 'boundaryDates', 'described'];
   const counts: Record<string, number> = Object.fromEntries(countStages.map((key) => [key, sum(runs.map((r) => r.diagnostics.counts ?? {}), key)]));
-  for (const key of ['created', 'updated', 'uniqueListings', 'mergedAcrossSources', 'filtered', 'pendingEnrichment'])
+  for (const key of ['created', 'updated', 'uniqueListings', 'mergedAcrossSources', 'filtered', 'deferred', 'pendingEnrichment'])
     counts[key] = sum(runs.map((r) => r.diagnostics.ingest ?? {}), key);
   counts.distinctSavedVacancies = vacancies.length;
   counts.pendingAi = vacancies.filter((v) => v.aiPending).length;
-  counts.pendingDescriptions = vacancies.filter((v) => !v.description).length;
+  counts.pendingDescriptions = vacancies.filter((v) => !jobText(v).hasDescription && v.analysis.relevance.state !== 'irrelevant').length;
+  counts.pendingCapacityReplay = sum(rows, 'jobsDeferred');
   counts.quarantinedCandidates = runs.reduce((sum, run) => sum + (run.diagnostics.quarantinedCandidates?.length ?? 0), 0);
   const exclusionReasons: Record<string, number> = {};
   for (const run of runs) for (const [reason, count] of Object.entries(run.diagnostics.ingest?.exclusionReasons ?? {}))

@@ -70,7 +70,7 @@ export function aiPriority(row: AiQueueRow, at: Date): number {
 }
 
 /** A short SQLite claim prevents repeated retry clicks or overlapping ranks paying twice. */
-export async function claimAiAttempt(cacheKey: string, force = false): Promise<number | null> {
+export async function claimAiAttempt(cacheKey: string, force = false, operationId?: string): Promise<number | null> {
   return cds.tx(async (tx: any) => {
     await tx.run('UPDATE sap_jobradar_Jobs SET ID = ID WHERE 0 = 1');
     const row = await tx.run(SELECT.one.from(db().AiAssessmentQueue).where({ cacheKey }));
@@ -78,6 +78,12 @@ export async function claimAiAttempt(cacheKey: string, force = false): Promise<n
       !force && !PENDING_AI_STATUSES.includes(row.status) || row.retryAfter && new Date(row.retryAfter) > new Date()) return null;
     const job = await tx.run(SELECT.one.from(db().Jobs).columns('status').where({ ID: row.job_ID }));
     if (!job || job.status === 'Ignored') return null;
+    if (operationId) {
+      const operation = await tx.run(SELECT.one.from(db().CollectionOperations).where({ ID: operationId, outcome: 'Running' }));
+      if (!operation || operation.aiCallsReserved >= operation.aiCallLimit) return null;
+      // Reserve before I/O; a crash cannot refund an unknown paid attempt.
+      await tx.run(UPDATE(db().CollectionOperations).set({ aiCallsReserved: (operation.aiCallsReserved ?? 0) + 1 }).where({ ID: operationId }));
+    }
     const attempt = (row.attempts ?? 0) + 1;
     await tx.run(UPDATE(db().AiAssessmentQueue).set({ status: 'Attempting', attempts: attempt,
       attemptedAt: new Date().toISOString() }).where({ cacheKey }));

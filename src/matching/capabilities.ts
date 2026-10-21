@@ -49,7 +49,8 @@ export function unknownCapabilityFragments(config: AppConfig, fragment: string):
       .replace(/[():.!?]/g, ' ').replace(/\s+/g, ' ').trim();
     if (!certification) residual = residual.replace(/^(?:(?:experience|knowledge|understanding|proficiency|expert|advanced|strong|basic|working|deep|extensive|in|of|with|at|least|either|both|the)\s+)+/, '')
       .replace(/\s+(?:(?:experience|knowledge|understanding|proficiency|development|in|of|with|at|level)\s*)+$/, '').trim();
-    if (!residual || /^(?:experience|knowledge|understanding|proficiency|development|expert|advanced|strong|basic|working|in|of|with|and|or|either|both|the|to|for|you|will|we|our|your|mit|und|oder|der|die|das)(?:\s+(?:of|in|with|and|or|the|will))*$/.test(residual)) return [];
+    if (!residual || /^(?:including|delivery|design|practical|proven expertise)$/.test(residual) ||
+      /^(?:experience|knowledge|understanding|proficiency|development|expert|advanced|strong|basic|working|in|of|with|and|or|either|both|the|to|for|you|will|we|our|your|mit|und|oder|der|die|das)(?:\s+(?:of|in|with|and|or|the|will))*$/.test(residual)) return [];
     return [residual];
   });
 }

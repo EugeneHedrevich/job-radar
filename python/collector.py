@@ -456,7 +456,9 @@ def run_task(task: dict[str, Any], timeout_seconds: int, detail_cache=None) -> d
               'job': {key: clean_value(value) for key, value in row.items() if key in FORWARDED_COLUMNS},
               'reason': safe_message(reason)[:1000]})
     kwargs['on_candidate_error'] = candidate_error
-    transport = LinkedInTransport(int(kwargs.get("detail_request_limit", 5)), int(kwargs.get("search_request_limit", 3)), stats if source == 'linkedin' else None)
+    transport = LinkedInTransport(int(kwargs.get("detail_request_limit", 5)), int(kwargs.get("search_request_limit", 3)),
+        stats if source == 'linkedin' else None,
+        lambda request: emit({'type': 'http_request', 'task_id': task_id, 'source': source, **request}))
     kwargs["transport"] = transport
     # Synchronous source work: the Node parent kills this entire process at
     # the task deadline and waits for close before starting any retry.
@@ -489,6 +491,8 @@ def run_task(task: dict[str, Any], timeout_seconds: int, detail_cache=None) -> d
         "duration_ms": int((time.monotonic() - started) * 1000),
         "search_requests": transport.search_requests if source == "linkedin" else measured['search'],
         "detail_requests": transport.detail_requests if source == "linkedin" else measured['detail'],
+        "http_status": transport.last_http_status if source == 'linkedin' else measured.get('http_status'),
+        "http_status_at": transport.last_response_at if source == 'linkedin' else measured.get('http_status_at'),
     }
 
 

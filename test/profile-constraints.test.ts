@@ -256,6 +256,12 @@ describe('deterministic constraints survive a positive AI answer', () => {
     // One matrix verifies the final policy for both engines. Model output is
     // deliberately optimistic and includes a capability with no profile fact.
     it.each([
+        ['Excellent German and English communication skills.', 'Skip'],
+        ['Excellent German or English communication skills.', 'Review'],
+        ['Excellent German and English communication skills are preferred.', 'Apply'],
+        ['German and English communication skills are not required.', 'Apply'],
+        ['Find more [German Speaking Jobs](https://www.arbeitnow.com/german-speaking-jobs) on Arbeitnow', 'Apply'],
+        ['Requirements:\n- including\n- delivery\n- practical\n- SAP BTP Integration Suite', 'Apply'],
         ['Nice-to-haves:\n- ABAP OO development\n- RAP ownership', 'Apply'],
         ['No ABAP OO development is required. CAP is mandatory.', 'Apply'],
         ['This role is not suitable for candidates with only ABAP OO development experience.', 'Apply'],
@@ -335,6 +341,13 @@ describe('deterministic constraints survive a positive AI answer', () => {
         vi.stubGlobal('fetch', vi.fn(async () => reviewAiResponse('Apply', 99, { strong_matches: ['CAP', 'Kafka', 'SAP CAP certification'] })));
         const job = reviewJob(condition), analysis = analyzeVacancy(config, job);
         const rules = assessWithRules(config, job, analysis), ai = await assessWithLlm(config, job, analysis);
+        if (condition.startsWith('Excellent German and English communication skills')) for (const code of ['en', 'de'])
+            expect(analysis.constraints.languageRequirements).toContainEqual(expect.objectContaining({ code,
+                kind: condition.includes('preferred') ? 'preferred' : 'mandatory', quote: expect.stringContaining('Excellent German and English communication skills') }));
+        if (condition.includes('SAP BTP Integration Suite')) {
+            expect(analysis.requirements).toContainEqual(expect.objectContaining({ name: 'SAP Integration Suite', profileEvidence: 'confirmed' }));
+            expect(analysis.requirements.some(item => ['including', 'delivery', 'practical'].includes(item.name))).toBe(false);
+        }
         expect(rules.recommendation).toBe(recommendation);
         expect(ai.recommendation).toBe(recommendation);
         expect(ai.hardReject).toBe(rules.hardReject);

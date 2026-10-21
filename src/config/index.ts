@@ -150,6 +150,7 @@ export const searchesSchema = z.object({
       .min(1),
   }),
   description_budget: z.object({
+    pending_ttl_hours: z.number().positive().default(168),
     max_tasks_per_run: z.number().int().nonnegative(),
     max_pending_candidates: z.number().int().min(0).max(100).default(40),
     prefer_sources: z.array(z.string()).default([]),

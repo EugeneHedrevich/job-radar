@@ -6,7 +6,8 @@ import { analyzeVacancy } from '../matching/analysis.js';
 import { cds, db, INSERT, SELECT, UPDATE } from '../db/index.js';
 import { planBatch, searchQueryKey, type PlanOptions, type PlannedBatch } from './plan.js';
 import { expireListingDeadlines, listingIsClosed } from '../persist/activity.js';
-import { descriptionPriority } from '../matching/relevance.js';
+import { descriptionPriority, hasPersonalTracking } from '../matching/relevance.js';
+import { maintainPendingCandidates } from '../persist/ingest.js';
 import { jobText } from '../matching/signals.js';
 
 const ACTIVITY_REFRESH_MS = 24 * 3_600_000;
@@ -31,6 +32,7 @@ export async function reserveBatchPlan(config: AppConfig, options: PlanOptions =
     // Acquire the SQLite write lock before reading cursors in another process.
     await tx.run('UPDATE sap_jobradar_Jobs SET ID = ID WHERE 0 = 1');
     timings.acquirePlanningLock = Math.round(performance.now() - waitingAt);
+    await maintainPendingCandidates(tx, options.at ?? new Date());
     const globalKey = '__all_batches__';
     checkpoint = performance.now();
     const existing = await tx.run(SELECT.one.from(db().DescriptionRotation).where({ batchKey: globalKey }));
@@ -137,7 +139,7 @@ async function reserveEnrichment(tx: any, config: AppConfig, plan: PlannedBatch,
   const ids = [...new Set(allListings.map((listing: any) => listing.job_ID))];
   if (!ids.length) return;
   const stored = await tx.run(SELECT.from(db().Jobs).where({ ID: { in: ids }, isDemo: false, status: { '!=': 'Ignored' } }));
-  const jobs = new Map<string, any>(stored.map((job: any) => [job.ID, job]));
+  const jobs = new Map<string, any>(stored.filter((job: any) => !job.enrichmentDeferredAt || job.manuallyImportedAt || hasPersonalTracking(job)).map((job: any) => [job.ID, job]));
   const described = new Map<string, boolean>(stored.map((job: any) => [job.ID, jobText(job).hasDescription]));
   const eligible = new Map<string, boolean>();
   const pending = new Set<string>();

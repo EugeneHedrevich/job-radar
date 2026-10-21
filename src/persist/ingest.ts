@@ -4,11 +4,12 @@ import type { NormalizedJob } from '../normalize/index.js';
 import { canonicalizeUrl, normalizeText, tokenSimilarity } from '../util/text.js';
 import { log } from '../util/log.js';
 import { loadConfig } from '../config/index.js';
-import { hasPersonalTracking, vacancyRelevance } from '../matching/relevance.js';
+import { descriptionPriority, hasPersonalTracking, vacancyRelevance } from '../matching/relevance.js';
 import { closedJobIds } from './activity.js';
 
 export interface IngestResult {
-  decisions: Array<{ key: string; action: 'created' | 'updated' | 'unchanged' | 'merged' | 'filtered'; jobId?: string; reason?: string }>;
+  decisions: Array<{ key: string; action: 'created' | 'updated' | 'unchanged' | 'merged' | 'filtered' | 'deferred'; jobId?: string; reason?: string }>;
+  deferred: number;
   uniqueListings: number;
   created: number;
   updated: number;
@@ -79,15 +80,13 @@ async function ingestWithin(normalized: NormalizedJob[],
     newJobIds: [],
     updatedJobIds: [],
     accepted: normalized.length,
-    filtered: 0,
+    filtered: 0, deferred: 0,
     pendingEnrichment: 0,
     exclusionReasons: {},
   };
   const config = loadConfig();
-  const closed = context.automatic ? await closedJobIds(connection) : new Set<string>();
-  const pending = new Set<string>(context.automatic ? (await connection.run(SELECT.from(db().Jobs))).filter((job: any) =>
-    !closed.has(job.ID) && !job.isDemo && !job.manuallyImportedAt && !hasPersonalTracking(job) &&
-    vacancyRelevance(config, job).state === 'unresolved').map((job: any) => job.ID) : []);
+  const pendingRows = context.automatic ? await maintainPendingCandidates(connection, context.seenAt ?? new Date()) : [];
+  const pending = new Set<string>(pendingRows.map((job: any) => job.ID));
   const refreshPending = async (jobId: string) => {
     if (!pending.has(jobId)) return;
     const saved = await connection.run(SELECT.one.from(db().Jobs).where({ ID: jobId }));
@@ -121,7 +120,7 @@ async function ingestWithin(normalized: NormalizedJob[],
   }
 
   result.uniqueListings = combined.size;
-  for (const [key, job] of combined) {
+  for (const [key, job] of [...combined].sort(([, a], [, b]) => descriptionPriority(config, a) - descriptionPriority(config, b))) {
 
     const existingListing = await findListing(job, connection);
     if (existingListing) {
@@ -149,11 +148,28 @@ async function ingestWithin(normalized: NormalizedJob[],
     // Existing listings and cross-source matches were handled first, preserving their history.
     const relevance = context.automatic ? vacancyRelevance(config, job) : null;
     const waiting = relevance?.state === 'unresolved';
-    if (relevance?.state === 'irrelevant' || waiting && pending.size >= config.searches.description_budget.max_pending_candidates) {
+    if (waiting && pending.size >= config.searches.description_budget.max_pending_candidates) {
+      const retire = pendingRows.filter((row: any) => pending.has(row.ID)).sort((a: any, b: any) =>
+        descriptionPriority(config, b) - descriptionPriority(config, a) || a.firstSeenAt.localeCompare(b.firstSeenAt))
+        .find((row: any) => descriptionPriority(config, row) > descriptionPriority(config, job) ||
+          descriptionPriority(config, row) === descriptionPriority(config, job) &&
+          Date.parse(seenAt) - Date.parse(row.firstSeenAt) >= config.searches.description_budget.pending_ttl_hours * 1_800_000);
+      if (retire) {
+        await connection.run(UPDATE(db().Jobs).set({ enrichmentDeferredAt: seenAt }).where({ ID: retire.ID }));
+        pending.delete(retire.ID);
+      }
+    }
+    if (waiting && pending.size >= config.searches.description_budget.max_pending_candidates) {
+      const count = occurrences.get(key)!;
+      result.deferred += count; result.accepted -= count;
+      result.decisions.push({ key, action: 'deferred', reason: 'Pending enrichment capacity reached; retained for replay' });
+      continue;
+    }
+    if (relevance?.state === 'irrelevant') {
       const count = occurrences.get(key)!;
       result.filtered += count;
       result.accepted -= count;
-      const reason = waiting ? 'Pending enrichment capacity reached' : relevance!.reason!;
+      const reason = relevance!.reason!;
       result.exclusionReasons[reason] = (result.exclusionReasons[reason] ?? 0) + count;
       result.decisions.push({ key, action: 'filtered', reason });
       continue;
@@ -195,6 +211,56 @@ async function ingestWithin(normalized: NormalizedJob[],
   result.jobIds = [...new Set(result.jobIds)];
   result.updatedJobIds = [...new Set(result.updatedJobIds)].filter((id) => !result.newJobIds.includes(id));
   return result;
+}
+
+/** Retire only automatic, untracked queue slots. Facts, assessments and tracking survive. */
+export async function maintainPendingCandidates(connection: any, at = new Date()): Promise<any[]> {
+  const config = loadConfig(), closed = await closedJobIds(connection);
+  const rows = (await connection.run(SELECT.from(db().Jobs))).filter((job: any) => !closed.has(job.ID) &&
+    !job.isDemo && !job.manuallyImportedAt && !hasPersonalTracking(job) && !job.enrichmentDeferredAt && vacancyRelevance(config, job).state === 'unresolved');
+  const pending = [];
+  for (const job of rows) {
+    if (at.getTime() - Date.parse(job.firstSeenAt) >= config.searches.description_budget.pending_ttl_hours * 3_600_000)
+      await connection.run(UPDATE(db().Jobs).set({ enrichmentDeferredAt: at.toISOString() }).where({ ID: job.ID }));
+    else pending.push(job);
+  }
+  return pending;
+}
+
+/** Replay a bounded slice of the existing diagnostic ledger, in the results transaction. */
+export async function replayDeferredCandidates(connection: any, excludeRunId: string, at = new Date()): Promise<{ jobIds: string[]; created: number; deferred: number }> {
+  const { normalizeJob } = await import('../normalize/index.js');
+  const config = loadConfig(), jobIds: string[] = [];
+  let created = 0, deferred = 0;
+  const runs = await connection.run(`SELECT ID, startedAt, diagnostics, deferredKeys FROM sap_jobradar_CollectionRuns
+    WHERE ID <> ? AND (jobsDeferred > 0 OR (deferredKeys IS NULL AND diagnostics LIKE ?))
+    ORDER BY coalesce(json_extract(diagnostics, '$.deferredLastCheckedAt'), startedAt) ASC LIMIT 20`, [excludeRunId, '%Pending enrichment capacity reached%']);
+  const ledgers = runs.map((run: any) => {
+    const diagnostic = JSON.parse(run.diagnostics ?? '{}');
+    const keys = new Set<string>(run.deferredKeys ? JSON.parse(run.deferredKeys) : (diagnostic.ingest?.decisions ?? [])
+      .filter((decision: any) => /Pending enrichment capacity reached/.test(decision.reason ?? '')).map((decision: any) => decision.key));
+    return { run, diagnostic, keys };
+  });
+  const candidates = ledgers.flatMap((ledger: any) => (ledger.diagnostic.candidates ?? []).filter((item: any) => !item.exclusion && item.job)
+    .map((item: any) => normalizeJob(item.job, item.source)).filter(Boolean)
+    .filter((job: NormalizedJob) => ledger.keys.has(`${job.listing.source}|${job.listing.sourceJobId ?? job.listing.canonicalUrl}`))
+    .map((job: NormalizedJob) => ({ ledger, job })))
+    .sort((a: any, b: any) => descriptionPriority(config, a.job) - descriptionPriority(config, b.job) || a.ledger.run.startedAt.localeCompare(b.ledger.run.startedAt))
+    .slice(0, config.searches.description_budget.max_pending_candidates);
+  for (const { ledger, job } of candidates) {
+    const key = `${job.listing.source}|${job.listing.sourceJobId ?? job.listing.canonicalUrl}`;
+    const saved = await ingestJobs([job], { runId: ledger.run.ID, seenAt: at, automatic: true, connection });
+    if (saved.deferred) { deferred++; continue; }
+    ledger.keys.delete(key); created += saved.created; jobIds.push(...saved.jobIds);
+    (ledger.diagnostic.deferredReplay ??= {})[key] = { at: at.toISOString(), action: saved.decisions[0]?.action,
+      jobId: saved.jobIds[0], reason: saved.decisions[0]?.reason };
+  }
+  for (const { run, keys, diagnostic } of ledgers) {
+    diagnostic.deferredLastCheckedAt = at.toISOString();
+    await connection.run(UPDATE(db().CollectionRuns).set({ deferredKeys: JSON.stringify([...keys]), jobsDeferred: keys.size,
+      diagnostics: JSON.stringify(diagnostic) }).where({ ID: run.ID }));
+  }
+  return { jobIds: [...new Set(jobIds)], created, deferred };
 }
 
 async function findListing(job: NormalizedJob, connection: any): Promise<{ ID: string; job_ID: string } | undefined> {

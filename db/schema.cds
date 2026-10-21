@@ -34,6 +34,7 @@ entity Jobs : cuid {
   cvSent            : Boolean default false; // independent of application status
   cvSentAt          : Timestamp;             // actual send instant; legacy unknown stays null
   manuallyImportedAt : Timestamp;
+  enrichmentDeferredAt : Timestamp; // retired automatic queue slot; history is retained
   sentCvLabel       : String(500);           // actual filename/version, not the AI suggestion
   isDemo            : Boolean default false;   // fixture data is never delivered live
 
@@ -70,6 +71,8 @@ entity SourceListings : cuid {
 entity CollectionRuns : cuid {
   operationId : String(36);
   diagnostics : LargeString;
+  deferredKeys : LargeString; // candidate keys retained in diagnostics until replayed
+  jobsDeferred : Integer default 0;
   startedAt    : Timestamp not null;
   heartbeatAt  : Timestamp;
   finishedAt   : Timestamp;
@@ -132,6 +135,13 @@ entity SourceHealth {
   reservedDetail : Integer default 0;
   recoveryPending : Boolean default false;
   lastHttpStatus : Integer;
+  lastRequestAt : Timestamp;
+  lastFailureStatus : Integer;
+  lastFailureAt : Timestamp;
+  lastFailureKind : String(50);
+  lastFailureMessage : String(2000);
+  lastRateLimitAt : Timestamp;
+  recoverySuccesses : Integer default 0;
   lastRetryAfterSeconds : Double;
 }
 
@@ -166,9 +176,12 @@ entity CollectionOperations : cuid {
   weeklyState : LargeString; // frozen interval, catalogue and committed continuation
   currentSource : String(50);
   assessmentRemaining : Integer;
+  resumeAt : Timestamp;
+  aiCallsReserved : Integer default 0; // durable operation-wide spending, including interrupted calls
+  aiCallLimit : Integer default 5;
   run : Association to CollectionRuns;
   trigger : String(50);
-  stage : String(20); // Preparing | Collecting | Saving | Assessing | Finished | Error
+  stage : String(20); // Preparing | Collecting | Saving | Assessing | Waiting | Finished | Error
   outcome : String(30); // Running | Completed | Empty | Partial | Failed | NoSources
   startedAt : Timestamp;
   updatedAt : Timestamp;
@@ -183,6 +196,7 @@ entity CollectionOperations : cuid {
   jobsUpdated : Integer default 0;
   jobsAccepted : Integer;
   jobsFiltered : Integer;
+  jobsDeferred : Integer default 0;
   exclusionReasons : LargeString;
   jobsAssessed : Integer default 0;
   aiCalls : Integer default 0;

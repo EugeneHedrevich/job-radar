@@ -3,6 +3,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from contextvars import ContextVar
 import re
+from datetime import datetime, timezone
 
 
 _measurements = ContextVar('request_measurements', default=None)
@@ -51,6 +52,8 @@ def observed_request(call, kind, *args, _measurement=None, **kwargs):
             report(counts['search'], counts['detail'])
     count(1)
     response = call(*args, **kwargs)
+    if measurement:
+        measurement[0].update(http_status=getattr(response, 'status_code', None), http_status_at=datetime.now(timezone.utc).isoformat())
     redirects = getattr(response, 'history', None)
     if isinstance(redirects, (list, tuple)) and redirects:
         count(len(redirects))

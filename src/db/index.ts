@@ -89,6 +89,7 @@ async function ensurePersonalTracking(connection: any): Promise<void> {
     ['personalNotes', 'TEXT'], ['applicationDate', 'DATE'],
     ['cvSent', 'BOOLEAN DEFAULT 0'], ['sentCvLabel', 'VARCHAR(500)'],
     ['cvSentAt', 'TIMESTAMP'], ['manuallyImportedAt', 'TIMESTAMP'],
+    ['enrichmentDeferredAt', 'TIMESTAMP'],
     ['viewedAt', 'TIMESTAMP'],
   ]) {
     if (!columns.some((column) => column.name === name)) {
@@ -114,6 +115,10 @@ async function ensureLocalControls(connection: any): Promise<void> {
 
 async function ensureRecoveryFields(connection: any): Promise<void> {
   for (const [table, fields] of [
+    ['CollectionRuns', [['deferredKeys', 'TEXT'], ['jobsDeferred', 'INTEGER DEFAULT 0']]],
+    ['CollectionOperations', [['resumeAt', 'TIMESTAMP'], ['aiCallsReserved', 'INTEGER DEFAULT 0'], ['aiCallLimit', 'INTEGER DEFAULT 5'], ['jobsDeferred', 'INTEGER DEFAULT 0']]],
+    ['SourceHealth', [['lastRequestAt', 'TIMESTAMP'], ['lastFailureStatus', 'INTEGER'], ['lastFailureAt', 'TIMESTAMP'],
+      ['lastFailureKind', 'VARCHAR(50)'], ['lastFailureMessage', 'VARCHAR(2000)'], ['lastRateLimitAt', 'TIMESTAMP'], ['recoverySuccesses', 'INTEGER DEFAULT 0']]],
     ['CollectionRuns', [['operationId', 'VARCHAR(36)'], ['diagnostics', 'TEXT']]],
     ['CollectionOperations', [['weeklyState', 'TEXT'], ['currentSource', 'VARCHAR(50)'], ['assessmentRemaining', 'INTEGER']]],
     ['Assessments', [['aiOutcome', 'VARCHAR(30)'], ['aiReason', 'VARCHAR(2000)']]],
@@ -135,6 +140,18 @@ async function ensureRecoveryFields(connection: any): Promise<void> {
     for (const [field, type] of fields) if (!columns.some((column) => column.name === field))
       await connection.run(`ALTER TABLE sap_jobradar_${table} ADD COLUMN ${field} ${type}`);
   }
+  // Older versions retained a failure's HTTP status after successful visits.
+  // Preserve that history without inventing a latest-response timestamp.
+  await connection.run(`UPDATE sap_jobradar_SourceHealth SET
+    lastFailureStatus = CASE WHEN lastHttpStatus >= 400 THEN coalesce(lastFailureStatus, lastHttpStatus) ELSE lastFailureStatus END,
+    lastFailureAt = CASE WHEN (lastHttpStatus = 429 AND lastStatus = 'rate_limit') OR (lastHttpStatus = 403 AND lastStatus = 'blocked')
+      THEN coalesce(lastFailureAt, updatedAt) ELSE lastFailureAt END,
+    lastFailureKind = coalesce(lastFailureKind, CASE WHEN lastHttpStatus = 429 THEN 'rate_limit' WHEN lastHttpStatus = 403 THEN 'blocked' END),
+    lastFailureMessage = coalesce(lastFailureMessage, lastMessage),
+    lastRateLimitAt = CASE WHEN lastHttpStatus = 429 AND lastStatus = 'rate_limit' THEN coalesce(lastRateLimitAt, updatedAt) ELSE lastRateLimitAt END,
+    recoveryPending = CASE WHEN source = 'linkedin' AND lastHttpStatus = 429 THEN 1 ELSE recoveryPending END,
+    rateLimitStreak = CASE WHEN source = 'linkedin' AND lastHttpStatus = 429 THEN max(coalesce(rateLimitStreak, 0), 1) ELSE rateLimitStreak END,
+    lastHttpStatus = NULL WHERE lastRequestAt IS NULL AND lastHttpStatus IS NOT NULL`);
 }
 
 async function ensureMatchingState(connection: any): Promise<void> {

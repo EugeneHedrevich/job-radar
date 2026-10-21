@@ -98,9 +98,12 @@ export interface CollectionOperation {
   weekly?: WeeklyProgress | null;
   currentSource?: string | null;
   assessmentRemaining?: number | null;
+  resumeAt?: string | null;
+  aiCallsReserved?: number;
+  aiCallLimit?: number;
   ID: string;
   run_ID: string | null;
-  stage: 'Preparing' | 'Collecting' | 'Saving' | 'Assessing' | 'Finished' | 'Error';
+  stage: 'Preparing' | 'Collecting' | 'Saving' | 'Assessing' | 'Waiting' | 'Finished' | 'Error';
   outcome: 'Running' | 'Completed' | 'Empty' | 'Partial' | 'Failed' | 'NoSources';
   startedAt: string;
   updatedAt: string;
@@ -115,6 +118,7 @@ export interface CollectionOperation {
   jobsUpdated: number;
   jobsAccepted?: number | null;
   jobsFiltered?: number | null;
+  jobsDeferred?: number;
   exclusionReasons?: Record<string, number>;
   jobsAssessed: number;
   aiCalls: number;
@@ -129,6 +133,9 @@ export interface CollectionOperation {
 }
 
 export interface WeeklyProgress {
+  automatic?: boolean;
+  deferredCandidates?: number;
+  totals?: Record<string, number>;
   failed?: number; cooldown?: number; unsupported?: number;
   relevantVacancies?: number; pendingDescriptions?: number;
   start: string; end: string; total: number; checked: number; exhaustive: number;
@@ -189,6 +196,10 @@ export interface CollectionStatus {
     reservedDetail: number;
     windowStartedAt: string | null;
     lastHttpStatus: number | null;
+    lastRequestAt?: string | null;
+    lastFailureStatus?: number | null;
+    lastFailureAt?: string | null;
+    recoveryPending?: boolean;
     lastRetryAfterSeconds: number | null;
     successfulChecks: number;
     incompleteScans: number;

@@ -124,6 +124,8 @@ export async function runCollector(config: AppConfig, options: RunCollectorOptio
       armTaskTimer();
     } else if (record.type === 'request_stats' && pending.has(record.task_id)) {
       statistics.set(record.task_id, { searchRequests: record.search_requests, detailRequests: record.detail_requests });
+    } else if (record.type === 'http_request' && pending.get(record.task_id)?.source === record.source) {
+      (output.requests ??= []).push(record);
     } else if (record.type === 'search_progress' && pending.has(record.task_id)) {
       progress.set(record.task_id, record.cursor);
     } else if (record.type === 'search_head_checked' && pending.has(record.task_id)) {
@@ -172,6 +174,8 @@ export async function runCollector(config: AppConfig, options: RunCollectorOptio
         ...(record.search_requests != null ? { searchRequests: record.search_requests } : {}),
         ...(record.detail_requests != null ? { detailRequests: record.detail_requests } : {}),
         ...(record.retry_after_seconds !== undefined ? { retryAfterSeconds: record.retry_after_seconds } : {}),
+        ...(record.http_status != null ? { httpStatus: record.http_status } : {}),
+        ...(record.http_status_at ? { httpStatusAt: record.http_status_at } : {}),
         ...(progress.has(record.task_id) ? { nextCursor: progress.get(record.task_id) } : {}),
       });
       report(true);

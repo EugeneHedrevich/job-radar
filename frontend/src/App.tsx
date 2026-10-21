@@ -119,7 +119,9 @@ function CollectionArea({ data, loading, error, retry }: {
         {source.lastMessage && <span className="muted small">{source.lastMessage}</span>}
         {source.source === 'linkedin' && <span className="small">Shared window: {source.searchRequests} search / {source.detailRequests} detail requests
           {source.reservedSearch + source.reservedDetail > 0 ? ` · ${source.reservedSearch + source.reservedDetail} reserved` : ''}
-          {source.lastHttpStatus ? ` · Last HTTP ${source.lastHttpStatus}` : ''}
+          {source.lastRequestAt ? ` · Latest request ${source.lastHttpStatus ? `HTTP ${source.lastHttpStatus}` : 'without a verified response'} at ${date(source.lastRequestAt, true)}` : ''}
+          {source.recoveryPending ? ' · Cautious recovery' : ''}
+          {source.lastFailureStatus ? ` · Historical HTTP ${source.lastFailureStatus}${source.lastFailureAt ? ` at ${date(source.lastFailureAt, true)}` : ' (time unknown)'}` : ''}
           {source.lastRetryAfterSeconds != null ? ` · Retry-After ${source.lastRetryAfterSeconds}s` : ''}</span>}
       </div>)}</div> : <p className="muted small">No stored source health yet.</p>}
       {run?.errors.map((error, index) => <p className="warning small" key={index}>{error.source ?? 'Collection'} · {error.kind}: {error.message}</p>)}
@@ -412,7 +414,8 @@ export default function App() {
         <p className="muted">Vacancies, applications and your next steps.</p></div>
         <div className="primary-actions"><button className="primary" onClick={() => void collection.start()} disabled={collection.starting || collection.running}>
           {collection.running ? 'Collecting…' : collection.starting ? 'Starting…' : 'Collect vacancies'}</button>
-          <button onClick={() => void collection.start('weekly')} disabled={collection.starting || collection.running}>Last 7 days</button>
+          <button onClick={() => void collection.start('weekly')} disabled={collection.starting || collection.running || collection.periodActive}>
+            {collection.periodActive ? 'Period search active' : 'Last 7 days'}</button>
           <button onClick={() => { if (guard()) setAddOpen(true); }} disabled={saving}>Add vacancy</button></div>
       </div>
       {notice && <div className="notice" role="status">{notice}<button className="text-button" onClick={() => setNotice(null)} aria-label="Dismiss import result">×</button></div>}

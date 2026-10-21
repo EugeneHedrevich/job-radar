@@ -41,7 +41,7 @@ export function vacancyContent(description: string): string {
       excluded = true; return false;
     }
     if (/^(?:requirements|qualifications|nice[- ]to[- ]haves?|preferred|your (?:profile|role|responsibilities)|the role|job description|responsibilities|what you bring|contract|employment|type|location|work mode|anforderungen|aufgaben|profil)\b/.test(text)) excluded = false;
-    return !excluded && !/\b(?:by (?:applying|submitting)|privacy policy|personal data|gdpr|cookie policy|consent to (?:the )?processing|equal opportunity employer)\b/.test(text) &&
+    return !excluded && !/^find more\b.*\bjobs\b/.test(text) && !/\b(?:by (?:applying|submitting)|privacy policy|personal data|gdpr|cookie policy|consent to (?:the )?processing|equal opportunity employer)\b/.test(text) &&
       !/^(?:we are (?:a |the )?(?:leading|global|award-winning)|our (?:company|clients include|mission is))\b/.test(text);
   }).join('\n');
 }
