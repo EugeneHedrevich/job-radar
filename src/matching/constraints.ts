@@ -41,6 +41,9 @@ const COUNTRIES: Record<string, string[]> = {
   Spain: ['Spain', 'Spanien', 'Espagne'],
   Italy: ['Italy', 'Italien', 'Italie'],
   'United Arab Emirates': ['UAE', 'United Arab Emirates'],
+  'Saudi Arabia': ['Saudi Arabia', 'KSA', 'Riyadh', 'Jeddah', 'Dammam', 'Eastern Province'],
+  Qatar: ['Qatar'], Kuwait: ['Kuwait'], Bahrain: ['Bahrain'], Oman: ['Oman'],
+  Canada: ['Canada', 'Canadian'], Mexico: ['Mexico', 'Mexican'],
 };
 const EU_COUNTRIES = new Set(['Bulgaria', 'Germany', 'Netherlands', 'Poland', 'France', 'Austria', 'Ireland', 'Spain', 'Italy',
   'Belgium', 'Croatia', 'Cyprus', 'Czech Republic', 'Denmark', 'Estonia', 'Finland', 'Greece', 'Hungary', 'Latvia',
@@ -199,7 +202,8 @@ export function matchingConstraints(config: AppConfig, job: MatchableJob, contex
           reject('The profile is unavailable for the required start.', 'start availability', mention?.quote ?? block, 'availability.status', availability.status);
         } else {
           const days = /within\s+(\d+)\s+days?/.exec(start[0]);
-          const deadlineDays = days ? Number(days[1]) : /immediate|asap/.test(start[0]) ? 0 : null;
+          const vagueStart = /asap/.test(start[0]) && !days;
+          const deadlineDays = days ? Number(days[1]) : /immediate/.test(start[0]) ? 0 : null;
           const notice = number(availability.notice_period_days);
           if (deadlineDays !== null) {
             if (notice === null) addMissing('candidate notice period is unknown; required start needs confirmation');
@@ -211,6 +215,8 @@ export function matchingConstraints(config: AppConfig, job: MatchableJob, contex
             if (unknown(availability.status)) addMissing('candidate availability status is unknown');
             if (unknown(availability.earliest_start)) addMissing('candidate earliest start date is unknown; start readiness needs confirmation', false);
             else addMissing(`the calendar deadline for the relative start window needs confirmation against earliest start ${String(availability.earliest_start)}`);
+          } else if (vagueStart) {
+            addMissing('ASAP is not an exact start deadline; confirm the required start against the declared notice period');
           } else {
             const deadline = /\d{4}-\d{2}-\d{2}/.exec(start[0])?.[0];
             const earliest = availability.earliest_start;
@@ -304,7 +310,8 @@ export function matchingConstraints(config: AppConfig, job: MatchableJob, contex
       }
     }
   }
-  if (remote && !residencyFound) addMissing(`permission to perform this remote role from ${baseCountry ?? 'the declared base'} is not stated`, false);
+  if (remote && !residencyFound) addMissing(`permission to perform this remote role from ${baseCountry ?? 'the declared base'} is not stated`,
+    Boolean(job.locationCountry && !EU_COUNTRIES.has(job.locationCountry)));
   // EU contractor permission cannot establish local employment authorization.
   if (!authFound && (!remote || engagement !== 'contract') && job.locationCountry &&
     !(job.locationCountry === 'Bulgaria' && auth.bulgaria === 'authorized')) {

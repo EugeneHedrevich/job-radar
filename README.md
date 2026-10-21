@@ -231,6 +231,75 @@ Expanded diagnostics separate unique new/updated jobs, cached assessments, new r
 assessments, successful AI assessments and failed AI attempts. The CLI and scheduler
 use the same finalisation, including saved AI failure reasons.
 
+**Last 7 days** starts a weekly review operation with an exact frozen UTC interval
+(the preceding 168 hours). It walks the enabled, deduplicated query/geography
+catalogue, rather than claiming that one rotation batch covers the week. Each
+click runs one bounded cycle: at most 18 search tasks, two description tasks and
+five AI calls, with the existing LinkedIn allowances, cooldowns and source leases.
+There are no notifications. **Continue weekly search** resumes the same interval
+and saved pages in a later cycle; it does not reset cooldowns or request budgets.
+The weekly result remains reachable after an intervening scheduled collection.
+Results and weekly continuation commit together, so an interrupted import can be
+replayed without losing results or personal tracking. New or changed records use
+the ordinary assessment cache and pending AI queue; there is no forced rescore.
+
+Progress separates combinations checked, exhaustive scans, deferred combinations
+and adapter-limited scans. Glassdoor has no reliable persisted continuation in the
+pinned adapter, so it remains limited. Other adapters' moving offset pages and
+provider retention can also prevent exhaustive historical coverage. Continuing
+widens relative source filters to retain the original start, filters records after
+the frozen end locally, and preserves actual publication dates. Unknown dates
+remain explicitly unknown; date-only records on either boundary day have uncertain
+membership in the exact interval. They are retained and identified in the report.
+
+**Export diagnostics JSON** downloads a local report, including an in-progress or
+failed operation. It contains all recorded cycles, revision/configuration snapshots,
+queries, request attempts (including redirects where observable), 429s, deferred
+pages, collection/filter/deduplication decisions and filtered candidate descriptions,
+source facts/conflicts, shared analysis, saved assessments/cache state, AI outcomes,
+stage/source timings and Node memory samples. Unknown request usage stays unknown;
+task counts are never request counts. Current saved facts and assessment validity
+are evaluated at export time; per-cycle observations retain what was collected.
+Credentials, tokens, proxy authentication and secret configuration are redacted.
+Detailed diagnostics stay collapsed in the UI. Starting the server or exporting
+a report does not launch collection, paid AI requests or notifications.
+
+Relevant cards without enough description evidence show **Awaiting description**
+instead of a negative recommendation. SAP Integration/Integratie Consultant and
+SAP-context BTP/WorkZone/Berater titles are retained; ambiguous technical SAP cards
+remain in the bounded description queue. Target-family cards receive priority over
+generic architecture, and unrelated Pega roles are filtered. Generic CI/CI-CD is
+not an alias for SAP CPI. The shared parser handles employment/location labels,
+preferred headings and negation, excluding privacy/legal/company marketing sections.
+Contract testing and SAP Payroll integration are technical references, and ASAP
+does not establish a zero-day deadline. AI receives the same cleaned vacancy content.
+
+`geography_groups.gcc` configures UAE, Saudi Arabia, Qatar, Kuwait, Bahrain and Oman.
+Six broad families (BTP, CAP, Integration Suite, CPI, UI5 and Fiori) search the country
+group on LinkedIn/Indeed. `gulf-cities` adds one broad SAP query for Dubai, Abu Dhabi,
+Riyadh, Jeddah and the Eastern Province. Equivalent existing UAE/Dubai queries are
+deduplicated. Glassdoor's unsupported GCC scopes are reported without requests;
+existing global agency and public catalogue searches remain available. Preferred
+regions include GCC countries, preserving the Bulgaria base, remote preference,
+relocation restrictions and declared work permissions. An employer office location
+does not establish a candidate residency requirement or permission to work from Bulgaria.
+
+Weekly progress separates overall coverage from current-cycle counts, including
+failed, cooldown, pending, capped and exhausted work. Continuing an existing weekly
+operation adds newly configured scopes while preserving its interval and cursors.
+Invalid Arbeitnow URLs are validated separately from pagination, retained in
+diagnostics for review, and do not discard the rest of a valid page. Pages with
+quarantined candidates never establish exhaustive coverage. Whole-page parse
+failures retain their cursor and wait before retrying while other work can continue.
+
+Preparation diagnostics include database-lock wait, cursor/rotation reads, planning,
+description-candidate reads and analysis timings. Preparation examines only the
+selected sources and a bounded priority slice; unchanged analysis is reused under
+an input/profile/scoring key. Repeated cards remain separate from measured HTTP
+request counts. Changed analysis uses cache revision 22 and preserves prior assessments.
+`refreshSavedVacancies()` performs an idempotent local rules refresh and can recover
+relevant candidates from saved filtered observations, with no source or AI requests.
+
 The compact list opens with newest saved, unviewed vacancies and no score cutoff. Search covers
 title, company, location and personal notes. **My applications** includes personal
 tracking regardless of score, assessment age or listing closure. **Added manually**
@@ -371,7 +440,7 @@ A failed import rolls back its progress so replay is idempotent. No transaction 
 RED Global and Whitehall read at most three search pages per task; Eursap uses one filtered
 response from its public browser search. Page and within-page cursors resume capped results
 on subsequent runs instead of repeating the first results. Cursor expiry measures inactivity
-and allows at least two complete rotation periods; revisits at 108 hours retain pagination.
+and allows at least two complete rotation periods; successful head visits retain pagination.
 A failed search with no collected records preserves its previous cursor, while a successful
 empty search can finish the sweep. HTTP failures and access challenges
 are reported to the existing cooldown mechanism; they are not successful empty searches.
@@ -405,15 +474,15 @@ through a persisted catalogue cursor on subsequent available cycles, using spare
 capacity instead of waiting for their original batch to return. Broad “SAP CAP” and “SAPUI5”
 queries retain their skill wording; explicit Developer queries run separately. Identical
 effective queries, geographies and filters share a task. The configured sequence allows at most
-**66 LinkedIn search slots per 108 hours** before cooldowns/shared allowances, so some
+**80 LinkedIn search slots per 129 hours** before cooldowns/shared allowances, so some
 combinations wait beyond one sequence. Catalogue rotation avoids duplicate queries and repeats
 until the sweep wraps; diagnostics report observed first-page coverage rather than promising
 complete coverage. The LinkedIn freshness window is 168 hours
 to accommodate its slower sweep; other source windows are unchanged. Larger custom batches
 also rotate their postponed tail. Collection outcomes distinguish successful empty searches,
 partial results, all executed tasks failing (even with skipped tasks), and no available sources.
-The explicit **36-cycle / 108-hour** sequence repeats the broad priority and public catalogue
-batches every **36 hours**, inside the 120-hour freshness window. Rate limits and small caps
+The explicit **43-cycle / 129-hour** sequence repeats the broad priority and public catalogue
+batches within **57 hours**, inside the 120-hour freshness window. Rate limits and small caps
 can delay individual combinations and pages; complete vacancy coverage is not guaranteed.
 A global, persisted source cursor gives
 each of the five eligible description sources a slot within three priority cycles
@@ -635,7 +704,7 @@ history. Legacy fallback caches are recognised without invalidating successful c
 ### Expanded public SAP coverage
 
 The `sap-public` batch searches six additional providers with a broad `SAP` query.
-It runs every 36 hours in the rotation and uses 12 of the 18 allowed tasks.
+It recurs within 57 hours in the rotation and uses 12 of the 18 allowed tasks.
 
 | Provider | Coverage | Descriptions |
 | -------- | -------- | ------------ |

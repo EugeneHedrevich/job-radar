@@ -3,7 +3,7 @@ import { loadConfig, type AppConfig } from '../config/index.js';
 import { cds, db, SELECT, INSERT, UPDATE, query, queryOne } from '../db/index.js';
 import { assessWithLlm, LlmProviderError, LlmRejectedOutputError } from '../matching/llm.js';
 import { assessWithRules, prescreen } from '../matching/rules.js';
-import { analyzeVacancy } from '../matching/analysis.js';
+import { ANALYSIS_REVISION, analyzeVacancy } from '../matching/analysis.js';
 import type { AssessmentResult, MatchableJob } from '../matching/types.js';
 import { normalizeText, sha256 } from '../util/text.js';
 import { log } from '../util/log.js';
@@ -32,6 +32,7 @@ export interface RankOptions {
 }
 
 export interface RankProgress {
+  remaining?: number;
   assessed: number;
   cachedAssessments: number;
   rulesAssessments: number;
@@ -55,7 +56,7 @@ export function assessmentCacheKey(
   engine: 'rules' | 'llm',
 ): string {
   return sha256(JSON.stringify({
-    revision: 20,
+    revision: ANALYSIS_REVISION,
     job: {
       ID: job.ID, title: job.title, company: job.company,
       location: job.location, locationCountry: job.locationCountry,
@@ -108,16 +109,22 @@ export async function rank(options: RankOptions = {}): Promise<RankedJob[]> {
 
   let queryBuilder = SELECT.from(Jobs);
   if (options.jobIds?.length && !options.includePendingAi) queryBuilder = queryBuilder.where({ ID: { in: options.jobIds } });
-  const stored = await query<MatchableJob>(queryBuilder);
+  let stored = await query<MatchableJob>(queryBuilder);
+  if (options.jobIds && options.includePendingAi) {
+    const waiting = await query<any>(SELECT.from(db().AiAssessmentQueue).columns('job_ID')
+      .where({ status: { in: ['Pending', 'RetryPending', 'Attempting'] } }));
+    const selected = new Set([...options.jobIds, ...waiting.map((row) => row.job_ID)]);
+    stored = stored.filter((job) => selected.has(job.ID));
+  }
   const closed = await closedJobIds();
   const prepared = stored.filter((job) => !closed.has(job.ID)).map((job) => {
     const analysis = analyzeVacancy(config, job);
     const screen = prescreen(config, job, analysis);
     let assessment = assessWithRules(config, job, analysis);
-    if (!screen.passed) assessment = { ...assessment,
+    if (!screen.passed && !analysis.awaitingDescription) assessment = { ...assessment,
       fitScore: Math.min(assessment.fitScore, config.scoring.hard_rejects.score_cap),
       recommendation: 'Skip', explanation: `Pre-screen: ${screen.reason}.` };
-    const eligible = job.status !== 'Ignored' && !job.isDemo && screen.passed && Boolean(job.description?.trim()) &&
+    const eligible = job.status !== 'Ignored' && !job.isDemo && screen.passed && analysis.text.hasDescription &&
       assessment.fitScore >= config.scoring.thresholds.llm_screen_gate && !assessment.hardReject;
     return { job, analysis, assessment, eligible, llmKey: assessmentCacheKey(config, job, 'llm') };
   });
@@ -137,9 +144,12 @@ export async function rank(options: RankOptions = {}): Promise<RankedJob[]> {
   let llmBudget = useLlm ? Math.min(5, config.settings.llm.max_jobs_per_run) : 0;
   const ranked: RankedJob[] = [];
   const progress = emptyRankProgress();
-  const report = async () => options.onProgress?.({ ...progress, assessed: ranked.length, failureReasons: [...progress.failureReasons] });
+  let processed = 0;
+  const report = async () => options.onProgress?.({ ...progress, remaining: prepared.length - processed,
+    assessed: ranked.length, failureReasons: [...progress.failureReasons] });
   const append = async (result: RankedJob, category: 'cached' | 'rules' | AiOutcome) => {
     ranked.push(result);
+    processed += 1;
     if (category === 'cached') progress.cachedAssessments += 1;
     else if (category === 'rules') progress.rulesAssessments += 1;
     else if (category === 'Succeeded') progress.aiSucceeded += 1;
@@ -147,9 +157,10 @@ export async function rank(options: RankOptions = {}): Promise<RankedJob[]> {
     await report();
   };
 
+  await report();
   for (const preparedJob of prepared) {
     const { job } = preparedJob;
-    if (await isJobClosed(job.ID)) continue;
+    if (await isJobClosed(job.ID)) { processed += 1; await report(); continue; }
     let engine: 'rules' | 'llm' = 'rules';
     let assessment = preparedJob.assessment;
     const work = queue.get(preparedJob.llmKey);
@@ -188,6 +199,7 @@ export async function rank(options: RankOptions = {}): Promise<RankedJob[]> {
         await suppressIgnoredWork(cds, job.ID);
         await cds.run(UPDATE(db().AiAssessmentQueue).set({ status: 'Superseded', attempts: attempt! - 1 })
           .where({ cacheKey: preparedJob.llmKey, status: 'Attempting', attempts: attempt }));
+        processed += 1; await report();
         continue;
       }
       llmBudget -= 1;

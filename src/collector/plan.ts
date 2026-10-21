@@ -15,6 +15,7 @@ export interface PlannedBatch {
 }
 
 export interface DescriptionRotation {
+  enrichmentScanByScope?: Record<string, string>;
   lastSource: string | null;
   lastTaskBySource: Record<string, string>;
   lastSearchByScope?: Record<string, string>;
@@ -35,6 +36,9 @@ export function selectBatchIndex(config: AppConfig, at: Date = new Date()): numb
 }
 
 export interface PlanOptions {
+  preparationTimings?: Record<string, number>;
+  /** Frozen weekly catalogue slice; selected outside the ordinary rotation. */
+  searchTasks?: CollectorTask[];
   /** Enrich/refresh stored listings without issuing searches. */
   enrichOnly?: boolean;
   /** Persisted per-batch description cursors; planning itself is side-effect free. */
@@ -83,7 +87,7 @@ export function planBatch(config: AppConfig, options: PlanOptions = {}): Planned
   }
   const tasksBySource = new Map<string, CollectorTask[]>();
 
-  for (const [source, geoIds] of Object.entries(batch.targets)) {
+  for (const [source, references] of Object.entries(batch.targets)) {
     const sourceConfig = searches.sources[source];
     if (!sourceConfig) continue;
     if (!sourceConfig.enabled) {
@@ -98,6 +102,7 @@ export function planBatch(config: AppConfig, options: PlanOptions = {}): Planned
     }
 
     const tasks: CollectorTask[] = [];
+    const geoIds = sourceGeographies(config, source, references, skipped);
     for (const geoId of geoIds) {
       if (sourceConfig.queries?.geos && !sourceConfig.queries.geos.includes(geoId)) continue;
       const geo = sourceConfig.geos[geoId];
@@ -112,7 +117,19 @@ export function planBatch(config: AppConfig, options: PlanOptions = {}): Planned
   const searchCursors = { ...options.descriptionRotation?.lastSearchByScope };
   const linkedinPending = [...(options.descriptionRotation?.linkedinPending ?? [])];
   const searchRotation: PlannedBatch['searchRotation'] = {};
-  if (!options.enrichOnly) applySearchBudget(config, batch.key, tasksBySource, searchCursors, skipped, linkedinPending, options, searchRotation);
+  if (options.searchTasks) {
+    tasksBySource.clear();
+    const requests = new Set<string>();
+    for (const task of options.searchTasks) {
+      if (!searches.sources[task.source]?.enabled || options.skipSources?.has(task.source)) continue;
+      const key = task.enrich_only ? task.task_id : searchRequestKey(task);
+      if (requests.has(key)) continue;
+      requests.add(key);
+      const group = tasksBySource.get(task.source) ?? [];
+      group.push({ ...task, fetch_description: false });
+      tasksBySource.set(task.source, group);
+    }
+  } else if (!options.enrichOnly) applySearchBudget(config, batch.key, tasksBySource, searchCursors, skipped, linkedinPending, options, searchRotation);
   const descriptionRotation = applyDescriptionBudget(config, tasksBySource, options.descriptionRotation);
   descriptionRotation.lastSearchByScope = searchCursors;
   descriptionRotation.linkedinPending = linkedinPending;
@@ -122,6 +139,8 @@ export function planBatch(config: AppConfig, options: PlanOptions = {}): Planned
     task.detail_request_limit = Math.ceil(remainingDetails / (details.length - index));
     remainingDetails -= task.detail_request_limit;
   });
+  for (const tasks of tasksBySource.values()) for (const task of tasks) if (task.fetch_description)
+    task.detail_title_patterns = Object.values(config.scoring.relevance.target_role_families).flat();
   if (options.enrichOnly) {
     for (const [source, tasks] of tasksBySource) {
       const selected = tasks.filter((task) => task.fetch_description);
@@ -129,7 +148,7 @@ export function planBatch(config: AppConfig, options: PlanOptions = {}): Planned
       else tasksBySource.delete(source);
     }
   }
-  return { batchKey: batch.key, keywords: batch.keywords, tasksBySource, skipped, descriptionRotation, searchRotation };
+  return { batchKey: options.searchTasks ? 'weekly' : batch.key, keywords: batch.keywords, tasksBySource, skipped, descriptionRotation, searchRotation };
 }
 
 /** Rotate capped combinations, including a batch's tail, across persisted runs. */
@@ -186,6 +205,7 @@ function applyDescriptionBudget(
   config: AppConfig, tasksBySource: Map<string, CollectorTask[]>, previous?: DescriptionRotation,
 ): DescriptionRotation {
   const state: DescriptionRotation = {
+    ...(previous?.enrichmentScanByScope ? { enrichmentScanByScope: { ...previous.enrichmentScanByScope } } : {}),
     lastSource: previous?.lastSource ?? null,
     lastTaskBySource: { ...previous?.lastTaskBySource },
   };
@@ -264,10 +284,19 @@ export function sourceQuery(config: AppConfig, source: string, keyword: string):
 
 export function linkedinCatalogue(config: AppConfig): CollectorTask[] {
   if (!config.searches.sources.linkedin) return [];
-  const tasks = config.searches.rotation.batches.flatMap((batch) => (batch.targets.linkedin ?? []).filter((geo) =>
+  const tasks = config.searches.rotation.batches.flatMap((batch) => sourceGeographies(config, 'linkedin', batch.targets.linkedin ?? []).filter((geo) =>
     !config.searches.sources.linkedin?.queries?.geos || config.searches.sources.linkedin.queries.geos.includes(geo)).flatMap((geo) =>
     batch.keywords.map((keyword) => makeTask(config, batch.key, 'linkedin', geo, keyword))));
   return distinctTasks(tasks);
+}
+
+/** The enabled effective query/geography catalogue, without rotation or I/O. */
+export function searchCatalogue(config: AppConfig): CollectorTask[] {
+  return distinctTasks(config.searches.rotation.batches.flatMap((batch) => Object.entries(batch.targets)
+    .flatMap(([source, geos]) => !config.searches.sources[source]?.enabled ? [] : sourceGeographies(config, source, geos).filter((geo) =>
+      config.searches.sources[source]!.geos[geo] && (!config.searches.sources[source]!.queries?.geos ||
+        config.searches.sources[source]!.queries!.geos!.includes(geo)))
+      .flatMap((geo) => batch.keywords.map((keyword) => makeTask(config, batch.key, source, geo, keyword))))));
 }
 
 /** Only identical effective queries and filters share a task; broad skills
@@ -275,6 +304,27 @@ export function linkedinCatalogue(config: AppConfig): CollectorTask[] {
 export function searchQueryKey(task: CollectorTask): string {
   return JSON.stringify([task.source, normalizeText(task.search_term), normalizeText(task.location),
     normalizeText(task.country_indeed), task.is_remote, normalizeText(task.job_type)]);
+}
+
+export function searchRequestKey(task: CollectorTask): string {
+  return JSON.stringify([searchQueryKey(task), task.offset ?? 0, task.search_cursor?.page ?? 1, task.search_cursor?.index ?? 0,
+    task.requested_start, task.requested_end, task.hours_old, task.results_wanted, task.head_only ?? null, Boolean(task.enrich_only)]);
+}
+
+export function sourceGeographies(config: AppConfig, source: string, references: string[], skipped?: PlannedBatch['skipped']): string[] {
+  const ids = references.flatMap((ref) => ref.startsWith('@') ? config.searches.geography_groups[ref.slice(1)] ?? [] : [ref]);
+  return [...new Set(ids)].filter((id) => {
+    if (config.searches.sources[source]?.geos[id]) return true;
+    skipped?.push({ source, reason: `Geography ${id} is unsupported by the configured ${source} adapter` });
+    return false;
+  });
+}
+
+export function catalogueLimitations(config: AppConfig): PlannedBatch['skipped'] {
+  const skipped: PlannedBatch['skipped'] = [];
+  for (const batch of config.searches.rotation.batches) for (const [source, refs] of Object.entries(batch.targets))
+    if (config.searches.sources[source]?.enabled) sourceGeographies(config, source, refs, skipped);
+  return [...new Map(skipped.map((row) => [`${row.source}:${row.reason}`, row])).values()];
 }
 
 function distinctTasks(tasks: CollectorTask[]): CollectorTask[] {
@@ -290,7 +340,7 @@ export function linkedinCoverage(config: AppConfig) {
   const slotsPerSequence = sequence.reduce((slots, key) => {
     const batch = searches.rotation.batches.find((row) => row.key === key)!;
     const otherTasks = Object.entries(batch.targets).reduce((sum, [source, geos]) => sum +
-      (source !== 'linkedin' && searches.sources[source]?.enabled ? geos.filter((geo) =>
+      (source !== 'linkedin' && searches.sources[source]?.enabled ? sourceGeographies(config, source, geos).filter((geo) =>
         !searches.sources[source]?.queries?.geos || searches.sources[source]!.queries!.geos!.includes(geo)).length * batch.keywords.length : 0), 0);
     return slots + (searches.sources.linkedin?.enabled ? Math.min(2, searches.linkedin_limits.max_search_tasks_per_run,
       Math.max(0, limit - otherTasks)) : 0);

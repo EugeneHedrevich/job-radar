@@ -19,6 +19,9 @@ import { reserveBatchPlan } from '../src/collector/rotation.js';
 import { closeTempDb, resetTestDb, useTempDb } from './helpers/db.js';
 import { enableReviewAi, ingestReview, reviewRecord } from './helpers/review.js';
 import { startTestWorker, type TestWorker } from './helpers/worker.js';
+import { commitWeeklyProgress, createWeeklyState, publicationRange, readWeeklyState, weeklyProgress, weeklyTasks } from '../src/pipeline/weekly.js';
+import { exportCollectionDiagnostics, redactDiagnostics } from '../src/dashboard/diagnostics.js';
+import { searchCatalogue } from '../src/collector/plan.js';
 
 vi.mock('../src/collector/run.js', async (original) => ({
   ...await original<typeof import('../src/collector/run.js')>(), runCollector: vi.fn(),
@@ -35,6 +38,113 @@ afterEach(() => { for (const worker of workers.splice(0)) if (worker.child.exitC
 afterAll(async () => { vi.unstubAllEnvs(); vi.unstubAllGlobals(); resetConfigCache(); await closeTempDb(); });
 
 describe('local dashboard controls', () => {
+  it('shows missing descriptions separately from negative recommendations and enriches target roles first', async () => {
+    const ids = [];
+    for (const [index, title] of ['SAP BTP Architect', 'SAP BTP / WorkZone / Fiori Developer - IT Contracting',
+      'SAP Integration Consultant', 'SAP Integratie Consultant', 'SAP Berater – Basis, BTP & S/4HANA'].entries()) {
+      const result = await ingestReview({ title, id: `weekly-card-${index}`, description: null,
+        job_url: `https://www.linkedin.com/jobs/view/${993000 + index}` }); ids.push(...result.jobIds);
+    }
+    await rank({ jobIds: ids, rulesOnly: true });
+    for (const id of ids) expect(await readJob(id)).toMatchObject({ assessmentState: 'awaiting-description', fitScore: null, recommendation: null });
+    const plan = await reserveBatchPlan(loadConfig(), { batchKey: 'cap-broad', onlySources: ['linkedin'] });
+    expect(plan.tasksBySource.get('linkedin')!.flatMap((task) => task.detail_jobs ?? []).every((row) => /SAP/.test(row.title!))).toBe(true);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+  it('plans the full weekly catalogue in bounded cycles with fixed dates and explicit date uncertainty', () => {
+    const config = loadConfig(), began = new Date('2026-10-19T12:00:00Z');
+    const weekly = createWeeklyState(config, began);
+    expect(weekly.searches).toHaveLength(searchCatalogue(config).length);
+    expect(new Set(weekly.searches.map((s) => searchQueryKey(s.task))).size).toBe(weekly.searches.length);
+    expect(new Set(weekly.searches.map((s) => s.task.source))).toEqual(new Set(Object.entries(config.searches.sources)
+      .filter(([, source]) => source.enabled).map(([name]) => name)));
+    const tasks = weeklyTasks(config, weekly, new Map(), new Date('2026-10-20T12:00:00Z'));
+    expect(tasks.length).toBeLessThanOrEqual(18);
+    expect(tasks.filter((task) => task.source === 'linkedin').length).toBeLessThanOrEqual(2);
+    expect(tasks.every((task) => task.hours_old === 192 && task.requested_start === '2026-10-12T12:00:00.000Z' &&
+      task.requested_end === began.toISOString())).toBe(true);
+    expect(weeklyTasks(config, weekly, new Map([['linkedin', '429 cooldown']])).some((t) => t.source === 'linkedin')).toBe(false);
+    expect(weeklyProgress(weekly)).toMatchObject({ checked: 0, exhaustive: 0, canContinue: true });
+    expect([null, 'bad date', '2026-10-11', '2026-10-12', '2026-10-15', '2026-10-19T13:00:00Z']
+      .map((date) => publicationRange(date, weekly))).toEqual(['unknown', 'unknown', 'outside', 'boundary-day', 'inside', 'outside']);
+    expect(redactDiagnostics({ password: 'private', max_output_tokens: 123, text: 'https://user:pass@proxy:8080/?token=abc' }))
+      .toEqual({ max_output_tokens: 123, text: 'https://[redacted]@proxy:8080/?token=[redacted]' });
+  });
+
+  it('exports weekly candidates, retains continuation across restart, and rolls it back with failed ingestion', async () => {
+    const weekly = createWeeklyState(loadConfig());
+    weekly.searches = ['linkedin', 'indeed', 'glassdoor'].map((source) => weekly.searches.find((s) => s.task.source === source)!);
+    vi.mocked(runCollector).mockImplementation(async (_config, { tasks }) => ({ jobspyVersion: 'offline', activities: [], malformedLines: 0,
+      jobs: tasks[0]!.source === 'linkedin' ? [reviewRecord, { ...reviewRecord, id: 'intern', title: 'SAP CAP Internship',
+        job_url: 'https://www.linkedin.com/jobs/view/992211' }, { ...reviewRecord, id: 'old', date_posted: '2000-01-01',
+        job_url: 'https://www.linkedin.com/jobs/view/992222' }].map((job) => ({ taskId: tasks[0]!.task_id, source: 'linkedin', job })) : [],
+      outcomes: tasks.map((task) => ({ taskId: task.task_id, source: task.source, searchTerm: task.search_term,
+        location: task.location, countryIndeed: task.country_indeed, status: 'Succeeded', executed: true,
+        resultCount: task.source === 'linkedin' ? 3 : 0, durationMs: 1, searchRequests: 1, detailRequests: 0, headChecked: true,
+        coverage: task.source === 'indeed' ? 'exhausted' : 'incomplete',
+        ...(task.source === 'linkedin' ? { nextCursor: { offset: 10 } } : {}),
+        ...(task.source === 'glassdoor' ? { coverageReason: 'No reliable persisted continuation' } : {}) })) }));
+    const first = await claimCollection('dashboard'); if (!first.acquired) throw new Error('Expected weekly lease');
+    await updateOperation(first.claim, { weeklyState: JSON.stringify(weekly) });
+    await withCollectionOperation(first.claim, () => collect({ claim: first.claim, weekly }),
+      (summary, report) => rank({ jobIds: summary.ingest.jobIds, rulesOnly: true, onProgress: report }));
+    expect(await readOperation(first.claim.operationId)).toMatchObject({ outcome: 'Partial', aiCalls: 0,
+      weekly: { checked: 3, exhaustive: 1, limited: 1, deferred: 1 } });
+    await disconnectDb(); await connectDb(file);
+    const saved = (await readWeeklyState(first.claim.operationId))!;
+    expect(saved.start).toBe(weekly.start);
+    expect(saved.searches[0]!.task.offset).toBe(10);
+    const report = await exportCollectionDiagnostics(first.claim.operationId) as any;
+    expect(report).toMatchObject({ requestedInterval: { start: weekly.start, end: weekly.end },
+      counts: { received: 3, outsideInterval: 1, filtered: 1, distinctSavedVacancies: 1 },
+      assessmentTotals: { aiCalls: 0, rulesAssessments: 1 } });
+    expect(report.runs[0].diagnostics.candidates.map((c: any) => c.decision.action)).toEqual(['created', 'filtered', 'excluded']);
+    expect(report.vacancies[0]).toMatchObject({ description: reviewRecord.description, assessmentState: 'rules', publicationDateKnown: false });
+    expect(JSON.stringify(report)).not.toContain('openaiApiKey');
+    const module = await import(`${PROJECT_ROOT}/frontend/src/CollectionControls.tsx`);
+    const markup = renderToStaticMarkup(createElement(module.CollectionProgress, { operation: await readOperation(first.claim.operationId), error: null,
+      onContinue: () => {} }));
+    expect(markup).toContain('Continue weekly search');
+    expect(markup).toContain('Export diagnostics JSON');
+    expect(markup).toContain(weekly.start);
+    const second = await claimCollection('dashboard', new Date(), first.claim.operationId);
+    if (!second.acquired) throw new Error('Expected continuation lease');
+    const original = ingestion.ingestJobs;
+    const failing = vi.spyOn(ingestion, 'ingestJobs').mockImplementationOnce(async (jobs, context) => {
+      await original(jobs, context); throw new Error('Offline weekly ingestion failure');
+    });
+    try {
+      await expect(withCollectionOperation(second.claim, () => collect({ claim: second.claim, weekly: saved }),
+        async () => [])).rejects.toThrow('Offline weekly ingestion failure');
+    } finally { failing.mockRestore(); }
+    expect(await readWeeklyState(first.claim.operationId)).toEqual(saved);
+    expect(await query(SELECT.from(db().Jobs))).toHaveLength(1);
+    expect(await query(SELECT.from(db().SearchProgress))).toEqual([]);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it.each(['head-probe', 'budget-skipped', 'rate-limit'] as const)('retains weekly backfill after %s', async (scenario) => {
+    const weekly = createWeeklyState(loadConfig());
+    weekly.searches = [weekly.searches.find((s) => s.task.source === 'linkedin')!];
+    const search = weekly.searches[0]!; search.task.offset = 30; search.visits = 1; search.checked = true;
+    const reservation = await claimCollection('dashboard'); if (!reservation.acquired) throw new Error('Expected lease');
+    await updateOperation(reservation.claim, { weeklyState: JSON.stringify(weekly) });
+    await cds.tx((tx: any) => commitWeeklyProgress(reservation.claim.operationId, weekly, [{
+      taskId: search.task.task_id, source: 'linkedin', searchTerm: search.task.search_term,
+      location: search.task.location, countryIndeed: search.task.country_indeed,
+      status: scenario === 'head-probe' ? 'Succeeded' : scenario === 'budget-skipped' ? 'Skipped' : 'Failed',
+      executed: scenario !== 'budget-skipped', headChecked: scenario === 'head-probe', coverage: 'incomplete',
+      resultCount: 0, durationMs: 1, ...(scenario === 'rate-limit' ? { errorKind: 'rate_limit' } : {}),
+    }], tx));
+    if (scenario === 'rate-limit') await recordOutcomes(loadConfig(), [{ taskId: search.task.task_id, source: 'linkedin',
+      searchTerm: search.task.search_term, location: search.task.location, countryIndeed: undefined,
+      status: 'Failed', resultCount: 0, durationMs: 1, errorKind: 'rate_limit' }]);
+    const saved = (await readWeeklyState(reservation.claim.operationId))!;
+    expect(saved.searches[0]).toMatchObject({ state: scenario === 'rate-limit' ? 'cooldown' : 'pending', visits: scenario === 'budget-skipped' ? 1 : 2, task: { offset: 30 } });
+    expect(saved.start).toBe(weekly.start); expect(saved.end).toBe(weekly.end);
+    expect(weeklyProgress(saved)).toMatchObject({ canContinue: true, limited: 0, exhaustive: 0 });
+  });
+
   it('checks canonical URLs across sources before lookup and retains personal notes', async () => {
     const existing = await ingestReview({}, 'indeed');
     const id = existing.jobIds[0]!;

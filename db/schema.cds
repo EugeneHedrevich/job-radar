@@ -68,6 +68,8 @@ entity SourceListings : cuid {
 
 /** One invocation of the collector (manual or scheduled). */
 entity CollectionRuns : cuid {
+  operationId : String(36);
+  diagnostics : LargeString;
   startedAt    : Timestamp not null;
   heartbeatAt  : Timestamp;
   finishedAt   : Timestamp;
@@ -161,6 +163,9 @@ entity CollectionLease {
 }
 
 entity CollectionOperations : cuid {
+  weeklyState : LargeString; // frozen interval, catalogue and committed continuation
+  currentSource : String(50);
+  assessmentRemaining : Integer;
   run : Association to CollectionRuns;
   trigger : String(50);
   stage : String(20); // Preparing | Collecting | Saving | Assessing | Finished | Error

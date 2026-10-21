@@ -136,6 +136,9 @@ export async function runCollector(config: AppConfig, options: RunCollectorOptio
       if (position === undefined) { positions.set(key, output.jobs.length); output.jobs.push(value); }
       else output.jobs[position] = value;
       report();
+    } else if (record.type === 'candidate_rejected') {
+      if (pending.get(record.task_id)?.source === record.source) (output.rejectedCandidates ??= []).push({
+        taskId: record.task_id, source: record.source, job: record.job, reason: redactProxy(record.reason) });
     } else if (record.type === 'listing_activity') {
       const task = pending.get(record.task_id);
       if (task?.source === record.activity.source) output.activities.push(record.activity);
@@ -158,6 +161,7 @@ export async function runCollector(config: AppConfig, options: RunCollectorOptio
         resultCount: record.count,
         headChecked: Boolean(record.head_checked || checkedHeads.has(record.task_id)),
         coverage: record.coverage ?? 'unknown',
+        quarantinedCandidates: record.candidate_errors ?? 0,
         ...(record.coverage_reason ? { coverageReason: redactProxy(record.coverage_reason) } : {}),
         durationMs: record.duration_ms,
         ...(record.error_kind ? { errorKind: record.error_kind } : {}),
@@ -206,6 +210,7 @@ export async function runCollector(config: AppConfig, options: RunCollectorOptio
   output.jobs = output.jobs.filter((record) => {
     const task = taskById.get(record.taskId);
     const posted = record.job.date_posted;
+    if (task?.requested_start) return true; // Preserve all observations for the weekly range diagnostics.
     if (!task || !posted || !/^\d{4}-\d{2}-\d{2}/.test(posted) ||
       task.detail_jobs?.some((row) => row.activity_refresh && row.job_url === record.job.job_url)) return true;
     return posted.slice(0, 10) >= new Date(Date.now() - task.hours_old * 3_600_000).toISOString().slice(0, 10);

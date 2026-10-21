@@ -38,6 +38,7 @@ const COUNTRY_CODES: Record<string, string> = {
   ae: 'United Arab Emirates', at: 'Austria', be: 'Belgium', bg: 'Bulgaria', ch: 'Switzerland', cz: 'Czech Republic',
   de: 'Germany', dk: 'Denmark', ee: 'Estonia', es: 'Spain', fi: 'Finland', fr: 'France',
   gb: 'United Kingdom', gr: 'Greece', hr: 'Croatia', hu: 'Hungary', ie: 'Ireland',
+  ca: 'Canada', mx: 'Mexico',
   it: 'Italy', lt: 'Lithuania', lu: 'Luxembourg', lv: 'Latvia', nl: 'Netherlands',
   no: 'Norway', pl: 'Poland', pt: 'Portugal', ro: 'Romania', se: 'Sweden',
   si: 'Slovenia', sk: 'Slovakia', uk: 'United Kingdom', us: 'United States',
@@ -68,7 +69,13 @@ export function extractCountry(location: string | null | undefined): string | nu
   const last = parts.at(-1);
   if (!last) return null;
   const lower = last.toLowerCase();
+  const named = [...COUNTRY_NAMES].filter((country) => new RegExp(`\\b${country.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i').test(location));
+  if (named.length > 1) return null; // A candidate scope can contain several countries.
+  if (named.length === 1) return Object.values(COUNTRY_CODES).find((country) => country.toLowerCase() === named[0]) ?? null;
+  if (/\b(?:dubai|abu dhabi)\b/i.test(location)) return 'United Arab Emirates';
+  if (/\b(?:riyadh|jeddah|eastern province|dammam|khobar)\b/i.test(location)) return 'Saudi Arabia';
   if (['uae', 'u.a.e.'].includes(lower)) return 'United Arab Emirates';
+  if (lower === 'ca' && parts.length > 1) return null; // Could be the US state California.
   if (lower.length === 2 && COUNTRY_CODES[lower]) return COUNTRY_CODES[lower];
   if (COUNTRY_NAMES.has(lower)) {
     return Object.values(COUNTRY_CODES).find((name) => name.toLowerCase() === lower) ?? null;

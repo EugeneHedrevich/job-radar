@@ -40,6 +40,7 @@ export const listingActivitySchema = z.object({
 export type ListingActivity = z.infer<typeof listingActivitySchema>;
 
 export const collectorLineSchema = z.discriminatedUnion('type', [
+  z.object({ type: z.literal('candidate_rejected'), task_id: z.string(), source: z.string(), job: collectorJobSchema, reason: z.string() }),
   z.object({ type: z.literal('meta'), jobspy_version: z.string(), tasks: z.number() }),
   z.object({ type: z.literal('task_started'), task_id: z.string() }),
   z.object({ type: z.literal('search_head_checked'), task_id: z.string() }),
@@ -67,6 +68,7 @@ export const collectorLineSchema = z.discriminatedUnion('type', [
     head_checked: z.boolean().optional(),
     coverage: z.enum(['exhausted', 'incomplete', 'unknown']).optional(),
     coverage_reason: z.string().optional(),
+    candidate_errors: z.number().int().nonnegative().optional(),
     duration_ms: z.number(),
     search_requests: z.number().int().nonnegative().nullable().optional(),
     detail_requests: z.number().int().nonnegative().nullable().optional(),
@@ -80,6 +82,9 @@ export type ErrorKind = 'rate_limit' | 'blocked' | 'timeout' | 'network' | 'erro
 export interface SourceFailure { kind: ErrorKind; message: string; httpStatus?: number; retryAfterSeconds?: number }
 
 export interface CollectorTask {
+  detail_title_patterns?: string[];
+  requested_start?: string;
+  requested_end?: string;
   task_id: string;
   source: string;
   search_term: string;
@@ -104,6 +109,7 @@ export interface CollectorTask {
 }
 
 export interface TaskOutcome {
+  quarantinedCandidates?: number;
   httpStatus?: number;
   taskId: string;
   source: string;
@@ -129,6 +135,7 @@ export interface TaskOutcome {
 export interface SearchCursor { offset?: number; page?: number; index?: number }
 
 export interface CollectorOutput {
+  rejectedCandidates?: Array<{ taskId: string; source: string; job: CollectorJob; reason: string }>;
   jobspyVersion: string | undefined;
   jobs: Array<{ taskId: string; source: string; job: CollectorJob }>;
   activities: ListingActivity[];

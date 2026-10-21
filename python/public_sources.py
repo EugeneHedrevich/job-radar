@@ -15,7 +15,7 @@ from urllib.parse import urlencode, urljoin, urlparse, urlunparse, parse_qsl
 import requests
 from markdownify import markdownify
 from activity import expired, http_closure, observe, page_closure
-from progress import SearchProgress
+from progress import SearchProgress, observed_request, request_kind, detail_phase, selected_detail
 from transport import request_kwargs
 
 from sap_sources import (MAX_DETAIL_REQUESTS_PER_TASK, MAX_SEARCH_PAGES, REQUEST_TIMEOUT_SECONDS,
@@ -47,8 +47,11 @@ def safe_public_url(source: str, href: str, base: str | None = None) -> str:
     allowed = {urlparse(value).hostname for value in MICHAEL_MARKETS.values()} if source == "michaelpage" else {urlparse(root).hostname}
     if source == "arbeitnow":
         allowed |= {"www.arbeitnow.co.uk", "www.arbeitnow.ch", "www.arbeitnow.fr"}
+        allowed |= {host.removeprefix('www.') for host in tuple(allowed)}
     if parsed.scheme != "https" or parsed.hostname not in allowed or parsed.username or parsed.password or parsed.port not in {None, 443}:
-        raise ValueError(f"Unexpected {source} listing URL")
+        raise ValueError(f"Unexpected {source} listing URL (host={parsed.hostname}, path={parsed.path})")
+    if source == 'arbeitnow' and not parsed.path.startswith('/jobs/'):
+        raise ValueError('Unexpected arbeitnow listing path; API pagination URLs are not listing URLs')
     query = urlencode([(key, value) for key, value in parse_qsl(parsed.query)
                        if not key.lower().startswith("utm_") and key.lower() not in {"tracking", "trk", "newsletter", "source"}])
     return urlunparse(parsed._replace(query=query, fragment=""))
@@ -56,7 +59,7 @@ def safe_public_url(source: str, href: str, base: str | None = None) -> str:
 
 @lru_cache(maxsize=64)
 def fetch(url: str) -> str:
-    response = requests.get(url, timeout=REQUEST_TIMEOUT_SECONDS, **request_kwargs())
+    response = observed_request(requests.get, request_kind.get(), url, timeout=REQUEST_TIMEOUT_SECONDS, **request_kwargs())
     response.raise_for_status()
     return response.text
 
@@ -228,13 +231,16 @@ def api_url(source: str, keyword: str, page: int) -> str:
     return root + "/api"
 
 
-def parse_api(source: str, payload: Any, keyword: str, description_format: str) -> tuple[list[dict[str, Any]], bool]:
+def parse_api(source: str, payload: Any, keyword: str, description_format: str, on_invalid=None) -> tuple[list[dict[str, Any]], bool]:
     records = payload if source == "remoteok" and isinstance(payload, list) else payload.get("data" if source == "arbeitnow" else "jobs") if isinstance(payload, dict) else None
     if not isinstance(records, list) or isinstance(payload, dict) and (payload.get("success") is False or payload.get("error")):
         raise ValueError(f"{source} API returned an invalid response")
     rows = []
     for record in records:
         if not isinstance(record, dict):
+            if on_invalid:
+                on_invalid({'title': 'Malformed API listing', 'description': str(record)}, f'{source} API returned an invalid listing')
+                continue
             raise ValueError(f"{source} API returned an invalid listing")
         if source == "remoteok" and "legal" in record:
             continue
@@ -249,6 +255,10 @@ def parse_api(source: str, payload: Any, keyword: str, description_format: str) 
             posted = record.get("publication_date" if source == "remotive" else "date" if source == "remoteok" else "created_at")
             engagement = record.get("job_type", record.get("job_types"))
         if not isinstance(title, str) or not isinstance(body, str) or not isinstance(record.get("url"), str):
+            if on_invalid:
+                on_invalid({'title': str(title or 'Incomplete API listing'), 'description': str(body or ''),
+                    'job_url': str(record.get('url') or '')}, f'{source} API listing is missing title, description or URL')
+                continue
             raise ValueError(f"{source} API listing is missing title, description or URL")
         plain = page_soup(body).get_text(" ", strip=True)
         tokens = re.findall(r"\w+", keyword)
@@ -259,10 +269,17 @@ def parse_api(source: str, payload: Any, keyword: str, description_format: str) 
         if isinstance(posted, (int, float)):
             posted = datetime.fromtimestamp(posted, timezone.utc).date().isoformat()
         row = {"site": source, "id": str(record.get("id", record.get("slug")) or record["url"]),
-               "job_url": safe_public_url(source, record["url"]), "title": title, "company": company,
+               "job_url": record['url'], "title": title, "company": company,
                "location": place or None, "job_type": stated_type(engagement), "date_posted": published_date(posted),
                "is_remote": record.get("remote") if source == "arbeitnow" else True,
                "description": markdownify(body).strip() if description_format == "markdown" else body}
+        try:
+            row['job_url'] = safe_public_url(source, record['url'])
+        except ValueError as exc:
+            if on_invalid is None:
+                raise
+            on_invalid(row, str(exc))
+            continue
         # Keep API eligibility and unstructured pay visible to matching and review.
         if source == "remotive":
             row["description"] = f"Candidate required location: {place or 'not stated'}\nSalary: {record.get('salary') or 'not stated'}\n\n" + row["description"]
@@ -276,6 +293,20 @@ def parse_api(source: str, payload: Any, keyword: str, description_format: str) 
         else:
             rows.append(observe(row, "active", "Public API returned the listing with a description", valid_through=record.get("validThrough")))
     more = source == "arbeitnow" and bool(payload.get("links", {}).get("next"))
+    if more:
+        try:
+            next_url = urlparse(urljoin(PUBLIC_SOURCES[source][0], payload['links']['next']))
+            params = parse_qsl(next_url.query)
+            valid_next = (next_url.scheme == 'https' and next_url.hostname in {'www.arbeitnow.com', 'arbeitnow.com'} and
+                not next_url.username and not next_url.password and next_url.port in {None, 443} and
+                next_url.path == '/api/job-board-api' and len(params) == 1 and params[0][0] == 'page' and params[0][1].isdigit() and int(params[0][1]) > 0)
+        except (TypeError, ValueError):
+            valid_next = False
+        if not valid_next:
+            if on_invalid is None:
+                raise ValueError('Unexpected arbeitnow pagination URL')
+            on_invalid({'job_url': str(payload['links']['next']), 'title': 'Unprocessed pagination'}, 'Unexpected arbeitnow pagination URL')
+            more = False
     return rows, more
 
 
@@ -285,11 +316,18 @@ def scrape_public(kwargs: dict[str, Any]) -> tuple[list[dict[str, Any]], BaseExc
     progress = SearchProgress(kwargs)
     wanted = max(1, int(kwargs.get("results_wanted", 25)))
     cutoff = (datetime.now(timezone.utc) - timedelta(hours=int(kwargs.get("hours_old", 96)))).date().isoformat()
+    if kwargs.get('requested_start'):
+        cutoff = kwargs['requested_start'][:10]
     fmt = kwargs.get("description_format", "markdown")
     rows: list[dict[str, Any]] = []
     seen: set[str] = set()
     detail_requests = 0
     failure: BaseException | None = None
+    def invalid(row, reason):
+        kwargs['candidate_errors'] = kwargs.get('candidate_errors', 0) + 1
+        kwargs['coverage_reason'] = 'Invalid API candidates or pagination retained in diagnostics for review'
+        if kwargs.get('on_candidate_error'):
+            kwargs['on_candidate_error'](row, reason)
     closures: list[dict[str, Any]] = []
     def stream(row):
         if kwargs.get("on_record"):
@@ -305,7 +343,8 @@ def scrape_public(kwargs: dict[str, Any]) -> tuple[list[dict[str, Any]], BaseExc
         detail_requests += 1
         url = safe_public_url(source, row["job_url"])
         try:
-            return hydrate(source, row, fetch(url), fmt)
+            with detail_phase():
+                return hydrate(source, row, fetch(url), fmt)
         except requests.HTTPError as exc:
             closure = http_closure(row, exc)
             if closure:
@@ -330,7 +369,7 @@ def scrape_public(kwargs: dict[str, Any]) -> tuple[list[dict[str, Any]], BaseExc
     for page in progress.pages(MAX_SEARCH_PAGES):
         try:
             if source in API_SOURCES:
-                candidates, more = parse_api(source, json.loads(fetch(api_url(source, keyword, page))), keyword, fmt)
+                candidates, more = parse_api(source, json.loads(fetch(api_url(source, keyword, page))), keyword, fmt, invalid)
             else:
                 candidates, more = parse_search(source, fetch(search_url(source, keyword, kwargs.get("location"), page)), root)
         except Exception as exc:
@@ -342,7 +381,7 @@ def scrape_public(kwargs: dict[str, Any]) -> tuple[list[dict[str, Any]], BaseExc
             seen.add(row["job_url"])
             if row.get("activity_status") != "closed" and not (row.get("date_posted") and row["date_posted"] < cutoff):
                 stream(row)
-            if kwargs.get("fetch_description") and source not in API_SOURCES and detail_requests < MAX_DETAIL_REQUESTS_PER_TASK:
+            if kwargs.get("fetch_description") and source not in API_SOURCES and detail_requests < MAX_DETAIL_REQUESTS_PER_TASK and selected_detail(row.get('title'), kwargs):
                 try:
                     row = detail(row)
                 except ValueError as exc:

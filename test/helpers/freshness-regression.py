@@ -128,6 +128,42 @@ class FreshnessRegression(unittest.TestCase):
         self.assertEqual(result['coverage'], 'incomplete')
         self.assertIn('no reliable persisted cursor', result['coverage_reason'])
         self.assertFalse(any(event['type'] == 'search_progress' for event in events))
+        self.assertEqual(result['search_requests'], len(requests))
+        self.assertEqual(result['detail_requests'], 0)
+
+    def test_weekly_relative_window_keeps_the_frozen_start_and_measures_redirects(self):
+        from datetime import datetime, timezone, timedelta
+        from progress import measure_requests, observed_request, current_measurements
+        from concurrent.futures import ThreadPoolExecutor
+        start = datetime.now(timezone.utc) - timedelta(hours=192)
+        kwargs = collector.build_kwargs({'source': 'linkedin', 'hours_old': 168,
+            'requested_start': start.isoformat(), 'requested_end': (start + timedelta(hours=168)).isoformat()})
+        self.assertGreaterEqual(kwargs['hours_old'], 192)
+        self.assertEqual(kwargs['requested_start'], start.isoformat())
+        events = []
+        response = types.SimpleNamespace(history=[object()], status_code=200)
+        with measure_requests(lambda search, detail: events.append((search, detail))) as counts:
+            measurement = current_measurements()
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                executor.submit(observed_request, lambda: response, 'search', _measurement=measurement).result()
+            observed_request(lambda: response, 'detail')
+        self.assertEqual(counts, {'search': 2, 'detail': 2})
+        self.assertEqual(events[-1], (2, 2))
+
+    def test_arbeitnow_keeps_safe_listings_and_quarantines_bad_urls_without_losing_pagination(self):
+        from public_sources import parse_api, safe_public_url
+        rejected = []
+        row = {'title': 'SAP BTP Developer', 'description': 'SAP CAP and Node.js', 'company_name': 'Example', 'created_at': 1}
+        payload = {'data': [{**row, 'url': 'https://arbeitnow.com/jobs/companies/example/role'},
+            {**row, 'url': 'https://evil.example/jobs/role'}, {**row, 'url': 'https://www.arbeitnow.com/api/job-board-api?page=2'}],
+            'links': {'next': 'https://www.arbeitnow.com/api/job-board-api?page=2'}}
+        rows, more = parse_api('arbeitnow', payload, 'SAP', 'markdown', lambda row, reason: rejected.append((row, reason)))
+        self.assertEqual(len(rows), 1)
+        self.assertTrue(more)
+        self.assertEqual(len(rejected), 2)
+        self.assertIn('evil.example', rejected[0][1])
+        with self.assertRaises(ValueError):
+            safe_public_url('arbeitnow', 'https://arbeitnow.com.evil.example/jobs/role')
 
     def test_public_head_and_within_page_backfill_reuse_one_response(self):
         from progress import SearchProgress

@@ -17,6 +17,15 @@ export function vacancyRelevance(config: AppConfig, job: { title: string; descri
   for (const [family, patterns] of Object.entries(settings.target_role_families)) {
     if (matchesAny(text.title, patterns)) return { accepted: true, state: 'confirmed', reason: null, family };
   }
+  const sap = /\b(?:sap|sapui5|s\/4hana)\b/.test(text.title);
+  const technical = /\b(?:develop\w*|engineer\w*|architect\w*|technical|technisch\w*|entwickl\w*|berater\w*|consultant\w*|integrat\w*)\b/.test(text.title);
+  if (sap && technical) {
+    const alias = /\b(btp|capm?|cpi|hci|work\s?zone|integratie|integration\w*)\b/.exec(text.title)?.[1];
+    if (alias) return { accepted: true, state: 'confirmed', reason: null,
+      family: /integr|cpi|hci/.test(alias) ? 'integration' : /cap/.test(alias) ? 'cap' : 'btp' };
+  }
+  if (!sap && /\b(?:pega|salesforce|servicenow)\b/.test(text.title))
+    return { accepted: false, state: 'irrelevant', reason: 'Unrelated technology role', family: null };
 
   // CAP alone is ambiguous. A technical CAP title plus independently stated
   // SAP context establishes the intended role, unless it names another CAP.
@@ -24,14 +33,20 @@ export function vacancyRelevance(config: AppConfig, job: { title: string; descri
     return { accepted: true, state: 'confirmed', reason: null, family: 'cap' };
   }
   // General SAP technical titles need specific target technology in the description.
-  if (/\bsap\b/.test(text.all) && /\b(?:develop\w*|architect\w*|technical|technisch\w*|integration|engineer\w*)\b/.test(text.title)) {
+  if (/\bsap\b/.test(text.all) && technical) {
     for (const [family, patterns] of Object.entries(settings.target_role_families))
       if (matchesAny(text.body, patterns)) return { accepted: true, state: 'confirmed', reason: null, family };
   }
-  if (!text.hasDescription && /\b(?:develop\w*|engineer\w*|architect\w*|full[- ]?stack|technical|technisch\w*)\b/.test(text.title)) {
+  if (!text.hasDescription && (sap && technical || /\b(?:develop\w*|engineer\w*|architect\w*|full[- ]?stack|technical|technisch\w*)\b/.test(text.title))) {
     return { accepted: false, state: 'unresolved', reason: 'SAP context needs a description', family: null };
   }
   return { accepted: false, state: 'irrelevant', reason: 'Outside configured SAP target role families', family: null };
+}
+
+/** Lower ranks reserve scarce details for target SAP families before generic roles. */
+export function descriptionPriority(config: AppConfig, job: { title: string; description?: string | null }): number {
+  const relevance = vacancyRelevance(config, job);
+  return relevance.state === 'irrelevant' ? 9 : relevance.accepted ? 0 : /\bsap\b/i.test(job.title) ? 1 : 2;
 }
 
 /** Personal records stay accessible even when their vacancy is outside the target. */

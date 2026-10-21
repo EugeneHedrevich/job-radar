@@ -15,6 +15,7 @@ from urllib.parse import urljoin, urlparse
 from transport import active_transport, LinkedInTransport, RequestBudgetExhausted, linkedin_client, request_kwargs
 from markdownify import markdownify
 from activity import observe, page_closure
+from progress import selected_detail
 
 from sap_sources import REQUEST_TIMEOUT_SECONDS, applicant_location, job_posting, page_soup, published_date
 
@@ -107,9 +108,12 @@ def enrich_board(source: str, rows: list[dict[str, Any]], kwargs: dict[str, Any]
     # New search results remain visible even when that budget is exhausted.
     limit = max(0, min(int(kwargs.get("detail_request_limit", 5)), int(kwargs.get("results_wanted", 25))))
     cutoff = (datetime.now(timezone.utc) - timedelta(hours=int(kwargs.get("hours_old", 96)))).date()
+    if kwargs.get('requested_start'):
+        cutoff = date.fromisoformat(kwargs['requested_start'][:10])
     result = [dict(row) for row in rows]
     positions = {row.get("job_url"): index for index, row in enumerate(result)}
     candidates = [*kwargs.get("detail_jobs", []), *rows]
+    backlog = {row.get('job_url') for row in kwargs.get('detail_jobs', [])}
     seen = set()
     cache = kwargs.get("detail_cache", {}) if source == "linkedin" else {}
     requests_used = 0
@@ -117,6 +121,8 @@ def enrich_board(source: str, rows: list[dict[str, Any]], kwargs: dict[str, Any]
     for row in candidates:
         url = row.get("job_url")
         if not url or row.get("description") and not row.get("activity_refresh"):
+            continue
+        if url not in backlog and not selected_detail(row.get('title'), kwargs):
             continue
         try:
             identity = linkedin_job_id(url) if source == "linkedin" else url

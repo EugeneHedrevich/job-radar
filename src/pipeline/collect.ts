@@ -14,8 +14,12 @@ import { recoverInterruptedRuns, startRunHeartbeat } from '../collector/lifecycl
 import { claimCollection, CollectionBusyError, finishOperation, startLeaseHeartbeat, updateOperation,
   type CollectionClaim } from '../collector/lease.js';
 import type { CollectionOperation } from '../dashboard/types.js';
+import { codeRevision, commitWeeklyProgress, publicationRange, reviewConfiguration, weeklyTasks, type WeeklyState } from './weekly.js';
+import { vacancyRelevance } from '../matching/relevance.js';
+import { analysisCacheStats } from '../matching/analysis.js';
 
 export interface CollectOptions extends PlanOptions {
+  weekly?: WeeklyState;
   trigger?: 'manual' | 'scheduled';
   /** Use a fixture file instead of calling the live sources. */
   fixture?: Array<{ taskId: string; source: string; job: CollectorJob }>;
@@ -70,6 +74,7 @@ export function outcomeMessage(outcome: CollectionOperation['outcome']): string 
 }
 
 async function collectOwned(options: CollectOptions, claim: CollectionClaim): Promise<CollectSummary> {
+  const clock = performance.now();
   const config = loadConfig();
   const startedAt = new Date();
   const runId = randomUUID();
@@ -77,6 +82,10 @@ async function collectOwned(options: CollectOptions, claim: CollectionClaim): Pr
 
   const cooldowns = await activeCooldowns(startedAt, options.enrichOnly);
   const skipSources = new Map([...cooldowns, ...(options.skipSources ?? new Map())]);
+  const preparationTimings: Record<string, number> = {};
+  const analysisBefore = { ...analysisCacheStats };
+  options = { ...options, preparationTimings };
+  if (options.weekly) options = { ...options, searchTasks: weeklyTasks(config, options.weekly, skipSources, startedAt) };
   const plan = options.fixture
     ? planBatch(config, { ...options, skipSources })
     : await reserveBatchPlan(config, { ...options, skipSources });
@@ -84,6 +93,7 @@ async function collectOwned(options: CollectOptions, claim: CollectionClaim): Pr
   await cds.run(
     INSERT.into(db().CollectionRuns).entries({
       ID: runId,
+      operationId: claim.operationId,
       startedAt: startedAt.toISOString(),
       heartbeatAt: startedAt.toISOString(),
       trigger: options.trigger ?? 'manual',
@@ -97,14 +107,21 @@ async function collectOwned(options: CollectOptions, claim: CollectionClaim): Pr
   await updateOperation(claim, { stage: 'Collecting', run_ID: runId,
     tasksTotal: options.fixture ? 0 : [...plan.tasksBySource.values()].flat().length });
   const stopHeartbeat = startRunHeartbeat(runId);
+  const diagnostic: Record<string, any> = { revision: codeRevision(), configuration: reviewConfiguration(config),
+    requestedInterval: options.weekly ? { start: options.weekly.start, end: options.weekly.end } : null,
+    plannedTasks: [...plan.tasksBySource.values()].flat(), skipped: plan.skipped, attempts: [],
+    memoryStart: process.memoryUsage(), sourceDurationsMs: {}, stagesMs: { preparing: Math.round(performance.now() - clock) },
+    preparation: { timingsMs: preparationTimings, analysisCacheHits: analysisCacheStats.hits - analysisBefore.hits,
+      analyses: analysisCacheStats.misses - analysisBefore.misses }, committed: false };
+  const collected: Array<{ taskId: string; source: string; job: CollectorJob }> = [];
+  const searchProgress: TaskOutcome[] = [];
+  diagnostic.attempts = searchProgress;
   try {
     for (const skipped of plan.skipped) {
       log.warn(`Skipping source "${skipped.source}": ${skipped.reason}`);
     }
 
-    const collected: Array<{ taskId: string; source: string; job: CollectorJob }> = [];
     const activities: ListingActivity[] = [];
-    const searchProgress: TaskOutcome[] = [];
     // Keyed by task id so a successful retry replaces the earlier failure.
     const outcomeByTask = new Map<string, TaskOutcome>();
     let malformedLines = 0;
@@ -129,6 +146,7 @@ async function collectOwned(options: CollectOptions, claim: CollectionClaim): Pr
       // One subprocess per source keeps failures isolated: a blocked or hanging
       // board cannot take the other boards down with it.
       for (const [source, plannedTasks] of plan.tasksBySource) {
+        await updateOperation(claim, { currentSource: source });
         let tasks = plannedTasks;
         const cooling = (await activeCooldowns(new Date(), options.enrichOnly)).get(source);
         if (cooling) {
@@ -173,6 +191,7 @@ async function collectOwned(options: CollectOptions, claim: CollectionClaim): Pr
           }
           tasks = ready;
         }
+        const sourceStarted = performance.now();
         try {
           if (!tasks.length) continue;
           const output = await runCollector(config, {
@@ -184,6 +203,7 @@ async function collectOwned(options: CollectOptions, claim: CollectionClaim): Pr
           });
           malformedLines += output.malformedLines;
           sourceOutcomes = output.outcomes;
+          (diagnostic.quarantinedCandidates ??= []).push(...(output.rejectedCandidates ?? []));
           collected.push(...output.jobs);
           activities.push(...output.activities);
           for (const outcome of output.outcomes) outcomeByTask.set(outcome.taskId, outcome);
@@ -204,7 +224,8 @@ async function collectOwned(options: CollectOptions, claim: CollectionClaim): Pr
                 detail_jobs: fetchDescription ? task.detail_jobs : undefined,
                 ...(last?.offset !== undefined ? { offset: last.offset } : last ? { search_cursor: last } : {}) });
             }
-            const retried = await retryTasks(config, source, retryTasksPlan, retryable, collected, activities, progress);
+            const retried = await retryTasks(config, source, retryTasksPlan, retryable, collected, activities, progress,
+              diagnostic.quarantinedCandidates ??= []);
             searchProgress.push(...retried);
             for (const outcome of retried) outcomeByTask.set(outcome.taskId, outcome);
           }
@@ -234,6 +255,7 @@ async function collectOwned(options: CollectOptions, claim: CollectionClaim): Pr
           searchProgress.push(...sourceOutcomes);
           await recordOutcomes(config, sourceOutcomes, new Date(), startedAt);
         } finally {
+          diagnostic.sourceDurationsMs[source] = Math.round(performance.now() - sourceStarted);
           if (requestClaim?.token) await settleSourceRequests(source, requestClaim.token,
             sourceOutcomes && sourceOutcomes.every((row) => row.searchRequests !== undefined)
               ? sourceOutcomes.reduce((sum, row) => sum + row.searchRequests!, 0) : undefined,
@@ -244,18 +266,40 @@ async function collectOwned(options: CollectOptions, claim: CollectionClaim): Pr
     }
 
     const outcomes = [...outcomeByTask.values()];
-    await updateOperation(claim, { stage: 'Saving', jobsFound: collected.length, tasksDone: outcomes.length,
+    diagnostic.stagesMs.collecting = Math.round(performance.now() - clock) - diagnostic.stagesMs.preparing;
+    const normalizeStarted = performance.now();
+    await updateOperation(claim, { stage: 'Saving', currentSource: null, jobsFound: collected.length, tasksDone: outcomes.length,
       tasksSucceeded: outcomes.filter((row) => row.status === 'Succeeded').length,
       tasksFailed: outcomes.filter((row) => row.status === 'Failed').length,
       tasksSkipped: outcomes.filter((row) => row.status === 'Skipped').length });
 
     const normalized: NormalizedJob[] = [];
     let unusable = 0;
+    let outsideInterval = 0;
+    const candidates = [];
     for (const record of collected) {
       const job = normalizeJob(record.job, record.source);
-      if (job) normalized.push(job);
+      const range = options.weekly ? publicationRange(record.job.date_posted, options.weekly) : null;
+      candidates.push({ ...record, publicationRange: range, normalized: job,
+        relevance: job ? vacancyRelevance(config, job) : null,
+        exclusion: !job ? 'Normalization failed: missing valid title or URL' : range === 'outside' ? 'Outside requested interval' : null });
+      if (job && range !== 'outside') normalized.push(job);
+      else if (job) outsideInterval += 1;
       else unusable += 1;
     }
+    diagnostic.candidates = candidates;
+    diagnostic.attempts = searchProgress;
+    diagnostic.outcomes = outcomes;
+    diagnostic.activities = activities;
+    diagnostic.malformedLines = malformedLines;
+    diagnostic.stagesMs.normalizing = Math.round(performance.now() - normalizeStarted);
+    diagnostic.counts = { received: collected.length, normalized: collected.length - unusable, withinInterval: normalized.length, unusable, outsideInterval,
+      unknownDates: candidates.filter((c) => c.publicationRange === 'unknown').length,
+      boundaryDates: candidates.filter((c) => c.publicationRange === 'boundary-day').length,
+      described: normalized.filter((job) => Boolean(job.description?.trim())).length };
+    // Keep filtered observations even when saving later fails. No cursor moves here.
+    await cds.run(UPDATE(db().CollectionRuns).set({ diagnostics: JSON.stringify(diagnostic) }).where({ ID: runId }));
+    const savingStarted = performance.now();
 
     // All network work is complete. Results, activity and their continuation
     // commit together; a failed import rolls back cursors for idempotent replay.
@@ -263,10 +307,19 @@ async function collectOwned(options: CollectOptions, claim: CollectionClaim): Pr
       await tx.run('UPDATE sap_jobradar_Jobs SET ID = ID WHERE 0 = 1');
       const saved = await ingestJobs(normalized, { runId, seenAt: new Date(), demo: Boolean(options.fixture), automatic: true, connection: tx });
       await applyListingActivity(activities, tx);
-      await recordSearchProgress(searchProgress, new Date(), tx);
-      await recordQueryRotation(plan, outcomes, tx);
+      if (options.weekly) await commitWeeklyProgress(claim.operationId, options.weekly, outcomes, tx,
+        new Map([...skipSources, ...Object.entries(config.searches.sources)
+          .filter(([, settings]) => !settings.enabled).map(([source]) => [source, 'Source is currently disabled'] as const)]), saved.jobIds);
+      else {
+        await recordSearchProgress(searchProgress, new Date(), tx);
+        await recordQueryRotation(plan, outcomes, tx);
+      }
+      await tx.run(UPDATE(db().CollectionRuns).set({ diagnostics: JSON.stringify({ ...diagnostic, ingest: saved, committed: true }) }).where({ ID: runId }));
       return saved;
     });
+    diagnostic.ingest = ingest;
+    diagnostic.committed = true;
+    diagnostic.stagesMs.saving = Math.round(performance.now() - savingStarted);
     ingest.unusable = unusable;
 
     for (const outcome of outcomes) {
@@ -306,6 +359,7 @@ async function collectOwned(options: CollectOptions, claim: CollectionClaim): Pr
           jobsAccepted: ingest.accepted,
           jobsFiltered: ingest.filtered,
           exclusionReasons: JSON.stringify(ingest.exclusionReasons),
+          diagnostics: JSON.stringify({ ...diagnostic, totalMs: Math.round(performance.now() - clock), memoryEnd: process.memoryUsage() }),
         })
         .where({ ID: runId }),
     );
@@ -323,6 +377,9 @@ async function collectOwned(options: CollectOptions, claim: CollectionClaim): Pr
       outcome,
     };
   } catch (error) {
+    await cds.run(UPDATE(db().CollectionRuns).set({ diagnostics: JSON.stringify({ ...diagnostic,
+      candidates: diagnostic.candidates ?? collected, error: String(error),
+      totalMs: Math.round(performance.now() - clock), memoryEnd: process.memoryUsage() }) }).where({ ID: runId }));
     await cds.run(UPDATE(db().CollectionRuns).set({ status: 'Failed', finishedAt: new Date().toISOString() }).where({ ID: runId }));
     await recordError(runId, '', 'error', error instanceof Error ? error.message : String(error), new Date());
     throw error;
@@ -345,6 +402,7 @@ async function retryTasks(
   collected: Array<{ taskId: string; source: string; job: CollectorJob }>,
   activities: ListingActivity[],
   onProgress: (progress: { jobsFound: number; outcomes: TaskOutcome[] }) => Promise<void>,
+  quarantined: NonNullable<import('../collector/types.js').CollectorOutput['rejectedCandidates']>,
 ): Promise<TaskOutcome[]> {
   const sourceConfig = config.searches.sources[source]!;
   const retryTaskIds = new Set(failed.map((outcome) => outcome.taskId));
@@ -364,6 +422,7 @@ async function retryTasks(
   });
   collected.push(...output.jobs);
   activities.push(...output.activities);
+  quarantined.push(...(output.rejectedCandidates ?? []));
   return output.outcomes;
 }
 

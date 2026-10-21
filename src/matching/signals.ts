@@ -30,12 +30,26 @@ export interface JobText {
   hasDescription: boolean;
 }
 
+/** Preserve vacancy wording/boundaries while excluding non-vacancy sections. */
+export function vacancyContent(description: string): string {
+  const lines = description.replace(/<\/?(?:li|p|div|h[1-6])\b[^>]*>|<br\s*\/?\s*>/gi, '\n')
+    .replace(/<[^>]+>/g, '').replace(/\*\*|__|`/g, '').split(/\r?\n/);
+  let excluded = false;
+  return lines.filter((line) => {
+    const text = normalizeText(line).replace(/^[\s#*+-]+|[:\s]+$/g, '');
+    if (/^(?:privacy(?: policy| notice)?|data protection|legal(?: notice)?|terms (?:and conditions|of use)|equal opportunity|about (?:us|our company|the company)|who we are|our company|uber uns|datenschutz|impressum)\b/.test(text)) {
+      excluded = true; return false;
+    }
+    if (/^(?:requirements|qualifications|nice[- ]to[- ]haves?|preferred|your (?:profile|role|responsibilities)|the role|job description|responsibilities|what you bring|contract|employment|type|location|work mode|anforderungen|aufgaben|profil)\b/.test(text)) excluded = false;
+    return !excluded && !/\b(?:by (?:applying|submitting)|privacy policy|personal data|gdpr|cookie policy|consent to (?:the )?processing|equal opportunity employer)\b/.test(text) &&
+      !/^(?:we are (?:a |the )?(?:leading|global|award-winning)|our (?:company|clients include|mission is))\b/.test(text);
+  }).join('\n');
+}
+
 export function jobText(job: Pick<MatchableJob, 'title' | 'description'>): JobText {
   const title = normalizeText(job.title);
   // Keep list/paragraph boundaries for requirements and attendance schedules.
-  const body = (job.description ?? '')
-    .replace(/<\/?(?:li|p|div|h[1-6])\b[^>]*>|<br\s*\/?\s*>/gi, '\n')
-    .replace(/<[^>]+>/g, '')
+  const body = vacancyContent(job.description ?? '')
     .split(/\r?\n/).map(normalizeText).join('\n');
   return { title, body, all: `${title}\n${body}`, hasDescription: Boolean(body.trim()) };
 }
@@ -47,7 +61,7 @@ export function detectEngagement(config: AppConfig, job: MatchableJob, text: Job
     rule.id === 'contract_excluded' || rule.id === 'permanent_only',
   );
   if (exclusions.some((rule) => employmentRuleMatches(config, text.all, rule.any))) return 'permanent';
-  const clauses = sentences(text.all);
+  const clauses = sentences(text.hasDescription ? text.body : text.title);
   const permanent = clauses.some((clause) => positiveEmploymentMatches(clause, signals.permanent ?? []));
   const contract = clauses.some((clause) => {
     // Match each occurrence locally. Technical B2B/contract terminology is not an offer.
@@ -198,7 +212,7 @@ export interface RequirementMention {
 
 /** Original wording and list boundaries for evidence shared by both engines. */
 export function requirementSource(job: MatchableJob): string {
-  return `${job.title}\n${(job.description ?? '').replace(/<\/?(?:li|p|div|h[1-6])\b[^>]*>|<br\s*\/?\s*>/gi, '\n').replace(/<[^>]+>/g, '')}`;
+  return `${job.title}\n${vacancyContent(job.description ?? '')}`;
 }
 
 interface Marker<T> { start: number; end: number; kind: T }
@@ -341,6 +355,9 @@ export function requirementMentions(config: AppConfig, text: string, term: strin
           .filter((marker) => !compulsory.some((other) => marker.start < other.end && other.start < marker.end)),
         ...negated,
       ];
+      // An unsuitable audience is not a capability required of this role.
+      const unsuitable = /\b(?:not (?:an? |the )?(?:abap|rap)\b.*\b(?:role|position)|not suitable|unsuitable|not (?:a )?fit|not looking for|do not need|does not require|no need for)\b/.test(clause);
+      const without = /\b(?:not suitable|unsuitable)\b.*\b(?:without|lacking)\b/.test(clause);
       // A marker-only heading applies to subsequent list entries. Ordinary
       // headings end that section; inline markers apply to their own skill.
       const remainder = foundMarkers.reduce((value, marker) =>
@@ -369,8 +386,12 @@ export function requirementMentions(config: AppConfig, text: string, term: strin
         const leaf = expression ? scope(expression) : undefined;
         const local = nearestMarker(leaf ? foundMarkers.filter((marker) => marker.start >= leaf.start && marker.end <= leaf.end) : foundMarkers,
           occurrence.index, occurrence.index + needle.length);
-        const kind: Requirement = local?.kind ?? listKind ?? inheritedKind ??
+        const classified: Requirement = local?.kind ?? listKind ?? inheritedKind ??
           (leaf && foundMarkers.some((marker) => marker.kind === 'mandatory') ? 'mandatory' : 'unclear');
+        const noRequirement = /\bno\s+(?:(?:prior|previous|experience|knowledge|of|in|with)\s+)*$/.test(clause.slice(0, occurrence.index)) &&
+          /^\s+(?:(?:experience|knowledge|development|oo|objects|custom|is|are)\s+)*(?:required|necessary|needed)\b/.test(clause.slice(occurrence.index + needle.length));
+        const mixedScope = unsuitable && /\b(?:but|however|while)\b.*\b(?:required|mandatory|must)\b/.test(clause);
+        const kind: Requirement = noRequirement ? 'preferred' : without ? 'mandatory' : mixedScope ? 'unclear' : unsuitable ? 'preferred' : classified;
         const choice = alternativeGroup(config, clause, occurrence.index);
         const uncertainScope = expressionContext && !expression && foundMarkers.some((marker) => marker.kind === 'preferred');
         mentions.push({ kind: uncertainScope ? 'unclear' : kind, clause, start: occurrence.index, end: occurrence.index + needle.length,

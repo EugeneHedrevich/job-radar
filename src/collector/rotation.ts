@@ -6,10 +6,13 @@ import { analyzeVacancy } from '../matching/analysis.js';
 import { cds, db, INSERT, SELECT, UPDATE } from '../db/index.js';
 import { planBatch, searchQueryKey, type PlanOptions, type PlannedBatch } from './plan.js';
 import { expireListingDeadlines, listingIsClosed } from '../persist/activity.js';
+import { descriptionPriority } from '../matching/relevance.js';
+import { jobText } from '../matching/signals.js';
 
 const ACTIVITY_REFRESH_MS = 24 * 3_600_000;
 
 const stateSchema = z.object({
+  enrichmentScanByScope: z.record(z.string(), z.string()).optional(),
   lastSource: z.string().nullable(),
   lastTaskBySource: z.record(z.string(), z.string()),
   lastSearchByScope: z.record(z.string(), z.string()).default({}),
@@ -18,12 +21,18 @@ const stateSchema = z.object({
 
 /** Reserve description slots atomically, before any network calls. */
 export async function reserveBatchPlan(config: AppConfig, options: PlanOptions = {}): Promise<PlannedBatch> {
+  const timings = options.preparationTimings ?? {};
+  let checkpoint = performance.now();
   await expireListingDeadlines(options.at);
+  timings.expireListingDeadlines = Math.round(performance.now() - checkpoint);
   const batchKey = planBatch(config, options).batchKey;
+  const waitingAt = performance.now();
   return cds.tx(async (tx: any) => {
     // Acquire the SQLite write lock before reading cursors in another process.
     await tx.run('UPDATE sap_jobradar_Jobs SET ID = ID WHERE 0 = 1');
+    timings.acquirePlanningLock = Math.round(performance.now() - waitingAt);
     const globalKey = '__all_batches__';
+    checkpoint = performance.now();
     const existing = await tx.run(SELECT.one.from(db().DescriptionRotation).where({ batchKey: globalKey }));
     let previous = existing ? stateSchema.parse(JSON.parse(existing.state)) : undefined;
     if (!previous) {
@@ -36,9 +45,12 @@ export async function reserveBatchPlan(config: AppConfig, options: PlanOptions =
         }
       }
     }
-    const plan = planBatch(config, { ...options, batchKey, descriptionRotation: previous,
+    timings.readRotation = Math.round(performance.now() - checkpoint); checkpoint = performance.now();
+    const plan = planBatch(config, { ...options, ...(!options.searchTasks ? { batchKey } : {}), descriptionRotation: previous,
       globalLinkedin: options.globalLinkedin ?? (!options.batchKey && !options.onlySources?.length) });
+    timings.plan = Math.round(performance.now() - checkpoint); checkpoint = performance.now();
     for (const tasks of plan.tasksBySource.values()) for (const task of tasks) {
+      if (options.searchTasks) continue; // Weekly cursors belong to the frozen operation.
       if (task.enrich_only) continue;
       const saved = await tx.run(SELECT.one.from(db().SearchProgress).where({ taskKey: task.task_id }));
       const at = options.at ?? new Date();
@@ -51,6 +63,8 @@ export async function reserveBatchPlan(config: AppConfig, options: PlanOptions =
         saved.headCheckedAt ? new Date(saved.headCheckedAt).getTime() : 0) : 0;
       const queryKey = searchQueryKey(task);
       if (saved?.queryKey === queryKey) {
+        if (saved.headCheckedAt) task.hours_old = Math.max(task.hours_old, Math.min(task.hours_old + config.searches.coverage.catch_up_hours,
+          Math.ceil((at.getTime() - Date.parse(saved.headCheckedAt)) / 3_600_000)));
         if (saved.failedAt) task.hours_old += Math.min(config.searches.coverage.catch_up_hours,
           Math.max(0, Math.ceil((at.getTime() - new Date(saved.failedAt).getTime()) / 3_600_000)));
         if (((saved.successfulVisits ?? 0) + 1) % config.searches.coverage.older_scan_every === 0)
@@ -71,7 +85,8 @@ export async function reserveBatchPlan(config: AppConfig, options: PlanOptions =
           new Date(saved.headCheckedAt).getTime() <= new Date(saved.updatedAt).getTime();
       } else task.search_cursor = cursor;
     }
-    await reserveEnrichment(tx, config, plan, options.at ?? new Date());
+    timings.searchCursors = Math.round(performance.now() - checkpoint);
+    await reserveEnrichment(tx, config, plan, options.at ?? new Date(), timings);
     if (options.enrichOnly) {
       for (const [source, tasks] of plan.tasksBySource) {
         const ready = tasks.filter((task) => task.detail_jobs?.length);
@@ -112,32 +127,44 @@ export async function recordQueryRotation(plan: PlannedBatch, outcomes: TaskOutc
 /** Reuse the already selected description slots for enrichment and stale activity.
  * Reservations are persisted before I/O, so bad/missing detail pages cannot
  * monopolize the queue after a restart. No extra search or description task. */
-async function reserveEnrichment(tx: any, config: AppConfig, plan: PlannedBatch, at: Date): Promise<void> {
+async function reserveEnrichment(tx: any, config: AppConfig, plan: PlannedBatch, at: Date, timings: Record<string, number>): Promise<void> {
   const replaySources = new Set(Object.entries(config.searches.sources)
     .filter(([, source]) => source.supports_backlog_enrichment).map(([source]) => source));
   if (![...plan.tasksBySource].some(([source, tasks]) => replaySources.has(source) && tasks.some((task) => task.fetch_description))) return;
-  const stored = await tx.run(`SELECT * FROM sap_jobradar_Jobs WHERE COALESCE(isDemo, 0) = 0`);
-  const eligible = new Map<string, any>();
+  const began = performance.now();
+  const sources = [...plan.tasksBySource].filter(([source, tasks]) => replaySources.has(source) && tasks.some((t) => t.fetch_description)).map(([source]) => source);
+  const allListings = await tx.run(SELECT.from(db().SourceListings).where({ source: { in: sources } }));
+  const ids = [...new Set(allListings.map((listing: any) => listing.job_ID))];
+  if (!ids.length) return;
+  const stored = await tx.run(SELECT.from(db().Jobs).where({ ID: { in: ids }, isDemo: false, status: { '!=': 'Ignored' } }));
+  const jobs = new Map<string, any>(stored.map((job: any) => [job.ID, job]));
+  const described = new Map<string, boolean>(stored.map((job: any) => [job.ID, jobText(job).hasDescription]));
+  const eligible = new Map<string, boolean>();
   const pending = new Set<string>();
-  for (const job of stored) {
-    if (job.status === 'Ignored') continue;
-    const analysis = analyzeVacancy(config, job);
-    if (analysis.relevance.state === 'unresolved') pending.add(job.ID);
-    if (analysis.relevance.state === 'unresolved' ||
-      prescreen(config, job, analysis).passed && !assessWithRules(config, job, analysis).hardReject) eligible.set(job.ID, job);
-  }
-  if (!eligible.size) return;
+  timings.enrichmentReads = Math.round(performance.now() - began);
+  let analysisMs = 0;
   for (const [source, tasks] of plan.tasksBySource) {
     // Glassdoor descriptions use JobSpy's search-session GraphQL cookies.
     // Retain that integration rather than treating its public HTML as details.
     if (!replaySources.has(source)) continue;
     const selected = tasks.filter((task) => task.fetch_description);
     if (!selected.length) continue;
-    const listings = await tx.run(SELECT.from(db().SourceListings).where({ source, job_ID: { in: [...eligible.keys()] } }));
+    const listings = allListings.filter((listing: any) => listing.source === source && jobs.has(listing.job_ID) && !listingIsClosed(listing, at));
     const lastAttempt = (listing: any) => new Date(listing.activityAttemptedAt ?? listing.descriptionAttemptedAt ??
       listing.activityCheckedAt ?? listing.firstSeenAt).getTime();
     const reserved = (listing: any) => Number(Boolean(listing.activityAttemptedAt || listing.descriptionAttemptedAt));
-    listings.sort((a: any, b: any) => lastAttempt(a) - lastAttempt(b) || reserved(a) - reserved(b) || a.ID.localeCompare(b.ID));
+    const priority = (listing: any) => {
+      const job = jobs.get(listing.job_ID)!;
+      return Number(described.get(job.ID)) * 3 + descriptionPriority(config, { title: job.title });
+    };
+    const priorities = new Map<string, number>(listings.map((listing: any) => [listing.ID, priority(listing)]));
+    listings.sort((a: any, b: any) => priorities.get(a.ID)! - priorities.get(b.ID)! || lastAttempt(a) - lastAttempt(b) || reserved(a) - reserved(b) || a.ID.localeCompare(b.ID));
+    const scans = plan.descriptionRotation.enrichmentScanByScope ??= {};
+    const scanOrder = [...new Set<number>(priorities.values())].sort((a, b) => a - b).flatMap((rank) => {
+      const group = listings.filter((listing: any) => priorities.get(listing.ID) === rank);
+      const after = group.findIndex((listing: any) => listing.ID === scans[`${source}:${rank}`]);
+      return [...group.slice(after + 1), ...group.slice(0, after + 1)];
+    }).slice(0, 40);
     const chosen = new Set<string>();
     for (const task of selected) {
       const cutoff = at.getTime() - task.hours_old * 3_600_000;
@@ -147,10 +174,21 @@ async function reserveEnrichment(tx: any, config: AppConfig, plan: PlannedBatch,
         : Math.min(5, Math.max(0, Math.floor(allowance / 2)));
       task.detail_jobs = [];
       if (!capacity) continue;
-      for (const listing of listings) {
+      for (const listing of scanOrder) {
         if (listingIsClosed(listing, at) || chosen.has(listing.ID)) continue;
-        const job = eligible.get(listing.job_ID)!;
-        const refresh = Boolean(job.description?.trim());
+        const job = jobs.get(listing.job_ID)!;
+        if ((priorities.get(listing.ID) ?? 9) >= 9) continue;
+        scans[`${source}:${priorities.get(listing.ID)}`] = listing.ID;
+        if (!eligible.has(job.ID)) {
+          const start = performance.now();
+          const analysis = analyzeVacancy(config, job);
+          if (analysis.relevance.state === 'unresolved') pending.add(job.ID);
+          eligible.set(job.ID, analysis.relevance.state === 'unresolved' ||
+            prescreen(config, job, analysis).passed && !assessWithRules(config, job, analysis).hardReject);
+          analysisMs += performance.now() - start;
+        }
+        if (!eligible.get(job.ID)) continue;
+        const refresh = Boolean(described.get(job.ID));
         const old = new Date(listing.lastSeenAt).getTime() < cutoff ||
           Boolean(job.datePosted && new Date(job.datePosted).getTime() < cutoff);
         if (refresh) {
@@ -160,6 +198,7 @@ async function reserveEnrichment(tx: any, config: AppConfig, plan: PlannedBatch,
         } else if (old && !pending.has(job.ID)) continue;
         const raw = collectorJobSchema.parse(JSON.parse(listing.rawRecord));
         task.detail_jobs.push({ ...raw, job_url: listing.rawUrl ?? listing.canonicalUrl,
+          ...(!refresh ? { description: null } : {}),
           ...(refresh || old && pending.has(job.ID) ? { activity_refresh: true } : {}) });
         chosen.add(listing.ID);
         await tx.run(UPDATE(db().SourceListings).set({ activityAttemptedAt: at.toISOString(),
@@ -168,6 +207,8 @@ async function reserveEnrichment(tx: any, config: AppConfig, plan: PlannedBatch,
       }
     }
   }
+  timings.enrichmentAnalysis = Math.round(analysisMs);
+  timings.reserveEnrichment = Math.round(performance.now() - began);
 }
 
 /** Persist verified/streamed progress in the transaction that saves its records. */

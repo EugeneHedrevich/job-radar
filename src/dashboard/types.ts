@@ -5,7 +5,7 @@ export const APPLICATION_STATUSES = ['New', 'Interested', 'Applied', 'Ignored', 
 export type ApplicationStatus = typeof APPLICATION_STATUSES[number];
 export type Activity = 'Active' | 'Unknown' | 'Closed';
 export type AssessmentKind = 'ai' | 'rules' | 'ai-fallback';
-export type AssessmentState = AssessmentKind | 'outdated' | 'unassessed';
+export type AssessmentState = AssessmentKind | 'outdated' | 'unassessed' | 'awaiting-description';
 export type JobSort = 'firstSeenAt' | 'lastSeenAt' | 'datePosted' | 'fitScore' | 'title' | 'company';
 
 export interface Tracking {
@@ -95,6 +95,9 @@ export interface FollowUpReminder {
 }
 
 export interface CollectionOperation {
+  weekly?: WeeklyProgress | null;
+  currentSource?: string | null;
+  assessmentRemaining?: number | null;
   ID: string;
   run_ID: string | null;
   stage: 'Preparing' | 'Collecting' | 'Saving' | 'Assessing' | 'Finished' | 'Error';
@@ -123,6 +126,14 @@ export interface CollectionOperation {
   aiBacklog: number;
   aiBudgetExhausted: boolean;
   message: string | null;
+}
+
+export interface WeeklyProgress {
+  failed?: number; cooldown?: number; unsupported?: number;
+  relevantVacancies?: number; pendingDescriptions?: number;
+  start: string; end: string; total: number; checked: number; exhaustive: number;
+  deferred: number; limited: number; canContinue: boolean; cycles: number;
+  limitations: string[];
 }
 
 export interface ImportResult {

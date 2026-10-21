@@ -4,10 +4,11 @@ import path from 'node:path';
 import { PROJECT_ROOT } from '../config/index.js';
 import { ApiError, listJobs, readCollectionStatus, readJob, updateTracking } from './store.js';
 import { startDashboardCollection } from '../pipeline/collection-operation.js';
-import { readOperation } from '../collector/lease.js';
+import { readOperation, readLatestWeeklyOperation } from '../collector/lease.js';
 import { importVacancy } from './import.js';
 import { listReminders, updateReminder } from './reminders.js';
 import { requeueAssessment } from './assessment-retry.js';
+import { exportCollectionDiagnostics } from './diagnostics.js';
 
 function json(response: ServerResponse, status: number, data: unknown): void {
   response.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
@@ -80,10 +81,18 @@ export function createDashboardServer(frontendDirectory = path.join(PROJECT_ROOT
         json(response, 200, await readCollectionStatus()); return;
       }
       if (url.pathname === '/api/collection' && request.method === 'POST') {
-        json(response, 202, await startDashboardCollection()); return;
+        json(response, 202, await startDashboardCollection(request.headers['content-type'] ? await body(request) : {})); return;
       }
       if (url.pathname === '/api/collection' && request.method === 'GET') {
-        json(response, 200, { operation: await readOperation() }); return;
+        json(response, 200, { operation: await readOperation(), weeklyOperation: await readLatestWeeklyOperation() }); return;
+      }
+      const report = /^\/api\/collection\/([^/]+)\/diagnostics$/.exec(url.pathname);
+      if (report && request.method === 'GET') {
+        const id = decodeURIComponent(report[1]!);
+        if (!/^[\da-f-]{36}$/i.test(id)) throw new ApiError(400, 'Invalid operation ID');
+        const data = await exportCollectionDiagnostics(id);
+        response.setHeader('Content-Disposition', `attachment; filename="vacancy-diagnostics-${id}.json"`);
+        json(response, 200, data); return;
       }
       const operation = /^\/api\/collection\/([^/]+)$/.exec(url.pathname);
       if (operation && request.method === 'GET') {

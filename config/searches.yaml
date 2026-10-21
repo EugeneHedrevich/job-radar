@@ -80,6 +80,11 @@ keywords:
   - "SAP BTP AI contract"
   - "SAP AI Core B2B"
 
+# Only six broad SAP families use the country group. Cities use one SAP query.
+geography_groups:
+  gcc: [ae, sa, qa, kw, bh, om]
+  gulf-cities: [dubai, abu-dhabi, riyadh, jeddah, eastern-province]
+
 sources:
   linkedin:
     enabled: true
@@ -109,6 +114,15 @@ sources:
       africa: { id: africa, location: "Africa" }
       ae: { id: ae, location: "United Arab Emirates" }
       dubai: { id: dubai, location: "Dubai, United Arab Emirates" }
+      abu-dhabi: { id: abu-dhabi, location: "Abu Dhabi, United Arab Emirates" }
+      sa: { id: sa, location: "Saudi Arabia" }
+      riyadh: { id: riyadh, location: "Riyadh, Saudi Arabia" }
+      jeddah: { id: jeddah, location: "Jeddah, Saudi Arabia" }
+      eastern-province: { id: eastern-province, location: "Eastern Province, Saudi Arabia" }
+      qa: { id: qa, location: "Qatar" }
+      kw: { id: kw, location: "Kuwait" }
+      bh: { id: bh, location: "Bahrain" }
+      om: { id: om, location: "Oman" }
     results_wanted: 25
     # LinkedIn rate limits aggressively; keep requests slow and few.
     delay_between_tasks_seconds: 8
@@ -135,6 +149,15 @@ sources:
       ie: { id: ie, country_indeed: "Ireland", location: "Ireland" }
       ae: { id: ae, country_indeed: "United Arab Emirates", location: "United Arab Emirates" }
       dubai: { id: dubai, country_indeed: "United Arab Emirates", location: "Dubai" }
+      abu-dhabi: { id: abu-dhabi, country_indeed: "United Arab Emirates", location: "Abu Dhabi" }
+      sa: { id: sa, country_indeed: "Saudi Arabia", location: "Saudi Arabia" }
+      riyadh: { id: riyadh, country_indeed: "Saudi Arabia", location: "Riyadh" }
+      jeddah: { id: jeddah, country_indeed: "Saudi Arabia", location: "Jeddah" }
+      eastern-province: { id: eastern-province, country_indeed: "Saudi Arabia", location: "Eastern Province" }
+      qa: { id: qa, country_indeed: "Qatar", location: "Qatar" }
+      kw: { id: kw, country_indeed: "Kuwait", location: "Kuwait" }
+      bh: { id: bh, country_indeed: "Bahrain", location: "Bahrain" }
+      om: { id: om, country_indeed: "Oman", location: "Oman" }
       za: { id: za, country_indeed: "South Africa", location: "South Africa" }
       eg: { id: eg, country_indeed: "Egypt", location: "Egypt" }
     results_wanted: 30
@@ -273,8 +296,8 @@ sources:
 # Priority batches interleave four directions across the original six sources.
 # Public catalogue scans cover six more providers, including seven Michael Page markets.
 # Each uses at most 3 queries x 6 geographies = 18 tasks, without tail truncation.
-# Broad priority and catalogue scans recur every 36h; the 36-slot sequence
-# takes 108h at the current schedule, inside the 120h board freshness window.
+# Broad priority/catalogue scans recur within 57h. The 43-slot sequence takes
+# 129h; late head visits widen lookback within the existing 72h catch-up bound.
 rotation:
   interval_hours: 3
   sequence:
@@ -314,6 +337,13 @@ rotation:
     - architect-ai
     - sap-specialists
     - uae-frontend
+    - gcc-btp
+    - gcc-cap
+    - gcc-integration
+    - gcc-cpi
+    - gcc-ui5
+    - gcc-fiori
+    - gulf-cities
   batches:
     - key: "cap-broad"
       keywords: ["SAP CAP", "SAP CAPM", "SAP Cloud Application Programming Model"]
@@ -454,6 +484,33 @@ rotation:
       targets:
         linkedin: [ae, dubai]
         indeed: [ae, dubai]
+
+    - key: gcc-btp
+      keywords: ["SAP BTP"]
+      targets: &gcc_targets
+        linkedin: ["@gcc"]
+        indeed: ["@gcc"]
+        glassdoor: ["@gcc"] # pinned adapter has no GCC country domains; report unsupported
+    - key: gcc-cap
+      keywords: ["SAP CAP"]
+      targets: *gcc_targets
+    - key: gcc-integration
+      keywords: ["SAP Integration Suite"]
+      targets: *gcc_targets
+    - key: gcc-cpi
+      keywords: ["SAP CPI"]
+      targets: *gcc_targets
+    - key: gcc-ui5
+      keywords: ["SAPUI5"]
+      targets: *gcc_targets
+    - key: gcc-fiori
+      keywords: ["SAP Fiori"]
+      targets: *gcc_targets
+    - key: gulf-cities
+      keywords: ["SAP"]
+      targets:
+        linkedin: ["@gulf-cities"]
+        indeed: ["@gulf-cities"]
 
 # Descriptions cost one extra HTTP request per job and are the fastest way to
 # get blocked. They are therefore budgeted per run.

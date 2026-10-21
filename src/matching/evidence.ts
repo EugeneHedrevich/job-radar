@@ -7,7 +7,7 @@ import { constraintRequirementMatches, nonSkillConstraintClause } from './constr
 import { analyzeVacancy, type VacancyAnalysis } from './analysis.js';
 
 function sourceText(value: string): string {
-  return normalizeText(value.replace(/<[^>]*>/g, ' ').replace(/&nbsp;/g, ' '));
+  return normalizeText(value.replace(/<[^>]*>/g, ' ').replace(/\*\*|__|`/g, '').replace(/&nbsp;/g, ' '));
 }
 
 const unknown = (value: unknown) => value === undefined || value === null ||
@@ -125,7 +125,7 @@ export function capabilityRequirements(config: AppConfig, job: MatchableJob): Ca
 export function deterministicGapEvidence(config: AppConfig, job: MatchableJob): MandatoryGapEvidence[] {
   const evidence: MandatoryGapEvidence[] = [];
   const text = jobText(job).all;
-  const source = `${job.title}\n${(job.description ?? '').replace(/<\/?(?:li|p|div|h[1-6])\b[^>]*>|<br\s*\/?\s*>/gi, '\n').replace(/<[^>]+>/g, '')}`;
+  const source = requirementSource(job);
   for (const [index, claim] of config.profile.not_claimed.entries()) {
     const terms = [claim, ...(config.profile.not_claimed_aliases[claim] ?? [])];
     if (!unclaimedMentions(config, text, claim).some((mention) => mention.kind === 'mandatory')) continue;

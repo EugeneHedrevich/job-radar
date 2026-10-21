@@ -12,10 +12,12 @@ import Reminders from './Reminders';
 const assessmentLabels: Record<AssessmentState, string> = {
   ai: 'AI assessment', rules: 'Deterministic rules', 'ai-fallback': 'AI-request fallback (rules)',
   outdated: 'Outdated assessment', unassessed: 'Not assessed',
+  'awaiting-description': 'Awaiting description',
 };
 
 const compactAssessmentLabels: Record<AssessmentState, string> = {
   ai: 'AI', rules: 'Rules', 'ai-fallback': 'Rules · AI unavailable', outdated: 'Needs refresh', unassessed: 'Awaiting assessment',
+  'awaiting-description': 'Awaiting description',
 };
 
 const sourceFactLabels: Record<string, string> = { description: 'Description', jobType: 'Employment type',
@@ -71,7 +73,7 @@ function Fit({ job }: { job: JobSummary }) {
         {job.fitScore !== null && <small>/100</small>}</strong>
       {job.recommendation && <Badge value={job.recommendation} />}
     </div>
-    <span className="muted small" title={assessmentLabels[job.assessmentState]}>{job.aiPending ? 'Rules · AI queued' : compactAssessmentLabels[job.assessmentState]}</span>
+    <span className="muted small" title={assessmentLabels[job.assessmentState]}>{job.assessmentState === 'awaiting-description' ? 'Awaiting description' : job.aiPending ? 'Rules · AI queued' : compactAssessmentLabels[job.assessmentState]}</span>
     {Boolean(job.mainBlockers?.length) && <div className="fit-blockers">
       {job.mainBlockers.slice(0, 2).map((reason) => <span className="warning small" key={reason}>{reason}</span>)}
     </div>}
@@ -408,18 +410,23 @@ export default function App() {
     <main>
       <div className="page-heading"><div><h1 id="vacancies-heading">Job Radar <span className="count">{data?.storedTotal ?? '—'}</span></h1>
         <p className="muted">Vacancies, applications and your next steps.</p></div>
-        <div className="primary-actions"><button className="primary" onClick={collection.start} disabled={collection.starting || collection.running}>
+        <div className="primary-actions"><button className="primary" onClick={() => void collection.start()} disabled={collection.starting || collection.running}>
           {collection.running ? 'Collecting…' : collection.starting ? 'Starting…' : 'Collect vacancies'}</button>
+          <button onClick={() => void collection.start('weekly')} disabled={collection.starting || collection.running}>Last 7 days</button>
           <button onClick={() => { if (guard()) setAddOpen(true); }} disabled={saving}>Add vacancy</button></div>
       </div>
       {notice && <div className="notice" role="status">{notice}<button className="text-button" onClick={() => setNotice(null)} aria-label="Dismiss import result">×</button></div>}
       {linkedin?.cooldownUntil && new Date(linkedin.cooldownUntil).getTime() > Date.now() && <p className="warning small">
         LinkedIn paused until {date(linkedin.cooldownUntil, true)} · {linkedin.lastMessage ?? linkedin.lastStatus}
         {' '}· {linkedin.searchRequests} search / {linkedin.detailRequests} detail requests in the shared window.</p>}
-      <CollectionProgress operation={collection.operation} error={collection.error}>
+      <CollectionProgress operation={collection.operation} error={collection.error} starting={collection.starting}
+        onContinue={() => { if (collection.operation) void collection.start('weekly', collection.operation.ID); }}>
         <CollectionArea data={diagnostics.data} loading={diagnostics.loading} error={diagnostics.error} retry={refresh} />
         <button className="text-button" onClick={refresh}>Refresh saved data</button>
       </CollectionProgress>
+      {collection.weeklyOperation && collection.weeklyOperation.ID !== collection.operation?.ID &&
+        <CollectionProgress operation={collection.weeklyOperation} error={null} starting={collection.starting || collection.running}
+          onContinue={() => void collection.start('weekly', collection.weeklyOperation!.ID)} />}
       {reminders.error ? <p className="error" role="alert">Follow-ups: {reminders.error} <button onClick={refresh}>Retry</button></p>
         : reminders.data && <Reminders items={reminders.data} select={select} changed={refresh} />}
       <nav className="view-tabs" aria-label="Vacancy views">{[['vacancies', 'Vacancies'], ['viewed', 'Viewed'], ['applications', 'My applications'], ['imports', 'Added manually']].map(([key, label]) =>

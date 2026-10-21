@@ -15,6 +15,7 @@ import { hasPersonalTracking, vacancyRelevance } from '../matching/relevance.js'
 import { detectWorkMode, jobText } from '../matching/signals.js';
 import { normalizeJob } from '../normalize/index.js';
 import { conflictingFacts } from '../persist/ingest.js';
+import { analyzeVacancy } from '../matching/analysis.js';
 
 export { ApiError } from './errors.js';
 
@@ -88,13 +89,15 @@ function savedAssessment(config: AppConfig, job: any, row: any, current: boolean
 
 async function summarize(config: AppConfig, job: any, listings: any[], assessments: any[], queue: any[], at: Date): Promise<JobSummary> {
   const current = await findCurrentAssessment(config, job, assessments);
+  const text = jobText(job);
+  const awaiting = !text.hasDescription && analyzeVacancy(config, job).awaitingDescription;
   const activity = jobActivity(listings, at);
   const aiKey = assessmentCacheKey(config, job, 'llm');
   const pending = job.status !== 'Ignored' && activity !== 'Closed' && queue.find((row) =>
     ['Pending', 'RetryPending', 'Attempting'].includes(row.status) && row.cacheKey === aiKey &&
     (row.status !== 'Pending' || !assessments.some((saved) => saved.cacheKey === aiKey)));
   return { ID: job.ID, title: job.title, company: job.company, location: job.location,
-    workMode: detectWorkMode(config, job, jobText(job)), mainBlockers: current ? (
+    workMode: detectWorkMode(config, job, text), mainBlockers: current ? (
       rowToAssessment(current).mandatoryGaps.length ? rowToAssessment(current).mandatoryGaps : rowToAssessment(current).missingInformation.filter((item) =>
         /required capability|unclear whether|alternatives|requirement needs confirmation|onsite attendance|Employment format|Work mode and attendance/.test(item))).slice(0, 3) : [],
     isRemote: job.isRemote ?? null, manuallyImportedAt: job.manuallyImportedAt ?? null, nextFollowUp: null,
@@ -102,9 +105,9 @@ async function summarize(config: AppConfig, job: any, listings: any[], assessmen
     salaryCurrency: job.salaryCurrency, salaryInterval: job.salaryInterval,
     sources: [...new Set<string>(listings.map((row) => row.source))].sort(), activity,
     datePosted: job.datePosted, firstSeenAt: job.firstSeenAt, lastSeenAt: job.lastSeenAt,
-    fitScore: current ? score(current.fitScore) : null,
-    recommendation: current?.recommendation ?? null,
-    assessmentState: current ? assessmentKind(config, job, current) : assessments.length ? 'outdated' : 'unassessed',
+    fitScore: !awaiting && current ? score(current.fitScore) : null,
+    recommendation: awaiting ? null : current?.recommendation ?? null,
+    assessmentState: awaiting ? 'awaiting-description' : current ? assessmentKind(config, job, current) : assessments.length ? 'outdated' : 'unassessed',
     assessedAt: current?.createdAt ?? null, aiPending: Boolean(pending), aiQueuedAt: pending?.queuedAt ?? null,
     isDemo: Boolean(job.isDemo), ...tracking(job) };
 }
@@ -157,7 +160,7 @@ export async function listJobs(params = new URLSearchParams()): Promise<JobList>
     (input.view !== 'imports' || Boolean(job.manuallyImportedAt)) &&
     (!needle || [job.title, job.company, job.location, job.personalNotes].some((value) => value?.toLocaleLowerCase().includes(needle))) &&
     (!input.source.length || job.sources.some((source) => input.source.includes(source))) &&
-    (input.view !== 'vacancies' || input.minScore === undefined || job.fitScore !== null && job.fitScore >= input.minScore ||
+    (input.view !== 'vacancies' || input.minScore === undefined || job.assessmentState === 'awaiting-description' || job.fitScore !== null && job.fitScore >= input.minScore ||
       Boolean(job.manuallyImportedAt) && (job.assessmentState === 'unassessed' || job.assessmentState === 'outdated' || job.aiPending)) &&
     (!input.status || job.status === input.status) && (input.view === 'applications' || !input.activity || job.activity === input.activity));
   filtered.sort((a, b) => {
@@ -261,7 +264,7 @@ export async function readCollectionStatus(): Promise<CollectionStatus> {
   const cutoff = Date.now() - coverage.freshnessHours * 3_600_000;
   const config = loadConfig();
   const pendingJobs = (await query<any>(SELECT.from(db().Jobs).where({ isDemo: false }))).filter((job) =>
-    job.status !== 'Ignored' && !job.description?.trim() && vacancyRelevance(config, job).state !== 'irrelevant');
+    job.status !== 'Ignored' && !jobText(job).hasDescription && vacancyRelevance(config, job).state !== 'irrelevant');
   const pendingListings = pendingJobs.length ? await query<any>(SELECT.from(db().SourceListings)
     .where({ job_ID: { in: pendingJobs.map((job) => job.ID) } })) : [];
   const sourceNames = [...new Set([...sources.map((row) => row.source), ...pendingListings.map((row) => row.source)])].sort();

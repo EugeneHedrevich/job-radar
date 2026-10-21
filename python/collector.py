@@ -32,10 +32,11 @@ import time
 from threading import Lock
 from contextlib import contextmanager
 from unittest.mock import patch
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from typing import Any
 from types import SimpleNamespace
 from transport import LinkedInTransport, RequestBudgetExhausted, linkedin_client, network_config, retry_after, safe_message, use_transport
+from progress import observed_request, request_kind, detail_phase, measure_requests, current_measurements
 
 EMIT_LOCK = Lock()
 
@@ -85,6 +86,8 @@ ALLOWED_TASK_PARAMS = {
     "enrich_only",
     "head_only",
     "detail_request_limit", "search_request_limit", "search_cursor",
+    "requested_start", "requested_end",
+    "detail_title_patterns",
 }
 
 
@@ -149,13 +152,18 @@ def classify_error(exc: BaseException) -> str:
     return "error"
 
 
-def build_kwargs(task: dict[str, Any]) -> dict[str, Any]:
+def build_kwargs(task: dict[str, Any], timeout_seconds: int = 0) -> dict[str, Any]:
     kwargs: dict[str, Any] = {"site_name": [task["source"]], "verbose": 1}
     for key, value in task.items():
         if key in ALLOWED_TASK_PARAMS and value is not None:
             kwargs[key] = value
     if task.get("fetch_description") and task.get("detail_jobs"):
         kwargs["detail_jobs"] = task["detail_jobs"]
+    if task.get('requested_start'):
+        start = datetime.fromisoformat(task['requested_start'].replace('Z', '+00:00'))
+        # Include the task's full deadline so a later pagination request cannot
+        # move the relative lower bound beyond the frozen start.
+        kwargs['hours_old'] = max(1, math.ceil((datetime.now(timezone.utc) - start).total_seconds() / 3600)) + math.ceil(timeout_seconds / 3600)
     return kwargs
 
 
@@ -180,6 +188,7 @@ def jobspy_search(source, transport, kwargs):
     create_session = module.create_session
     original_process = scraper_class._process_job
     scrapers = {}
+    measurement = current_measurements()  # JobSpy invokes the source in another thread.
 
     def session_factory(**session_options):
         client = linkedin_client() if source == 'linkedin' else None
@@ -199,7 +208,7 @@ def jobspy_search(source, transport, kwargs):
             if client:
                 options['headers'] = {**session.headers, **(options.get('headers') or {})}
                 options['transport'] = transport
-            response = request(method, url, **options)
+            response = request(method, url, **options) if client else observed_request(request, request_kind.get(), method, url, _measurement=measurement, **options)
             transport.check(response)
             if response.status_code >= 400:
                 response.raise_for_status()
@@ -238,7 +247,8 @@ def jobspy_search(source, transport, kwargs):
             raise ValueError("Glassdoor details require the current search session")
         from urllib.parse import parse_qs, urlparse
         identity = int(parse_qs(urlparse(row["job_url"]).query)["jl"][0])
-        description = scraper._fetch_job_description(identity)
+        with detail_phase():
+            description = scraper._fetch_job_description(identity)
         if not description:
             raise ValueError("Glassdoor search-session detail has no description")
         return {**row, "description": description}
@@ -316,7 +326,7 @@ def scrape_with_failures(kwargs: dict[str, Any]) -> tuple[Any, tuple[str, str, f
         # A backlog reuses this task's description request allowance rather
         # than requesting full search details plus a second set of URLs.
         search_kwargs = {key: value for key, value in kwargs.items() if key in ALLOWED_TASK_PARAMS or key in {"site_name", "verbose"}}
-        for key in {"enrich_only", "detail_request_limit", "search_request_limit", "search_cursor", "head_only"}:
+        for key in {"enrich_only", "detail_request_limit", "search_request_limit", "search_cursor", "head_only", "requested_start", "requested_end", "detail_title_patterns"}:
             search_kwargs.pop(key, None)
         # All JobSpy searches disable its silently failing internal enrichment.
         search_kwargs["fetch_description"] = False
@@ -393,7 +403,7 @@ def run_task(task: dict[str, Any], timeout_seconds: int, detail_cache=None) -> d
     task_id = task["task_id"]
     source = task["source"]
     started = time.monotonic()
-    kwargs = build_kwargs(task)
+    kwargs = build_kwargs(task, timeout_seconds)
     kwargs['coverage'] = 'unknown' if task.get('enrich_only') else 'incomplete'
     kwargs['detail_cache'] = detail_cache if detail_cache is not None else {}
     log(f"[task {task_id}] {source} :: {kwargs.get('search_term')!r} @ {kwargs.get('location')!r}")
@@ -441,19 +451,25 @@ def run_task(task: dict[str, Any], timeout_seconds: int, detail_cache=None) -> d
         kwargs['head_checked'] = True
         emit({'type': 'search_head_checked', 'task_id': task_id})
     kwargs['on_head_checked'] = checked_head
-    transport = LinkedInTransport(int(kwargs.get("detail_request_limit", 5)), int(kwargs.get("search_request_limit", 3)), stats)
+    def candidate_error(row, reason):
+        emit({'type': 'candidate_rejected', 'task_id': task_id, 'source': source,
+              'job': {key: clean_value(value) for key, value in row.items() if key in FORWARDED_COLUMNS},
+              'reason': safe_message(reason)[:1000]})
+    kwargs['on_candidate_error'] = candidate_error
+    transport = LinkedInTransport(int(kwargs.get("detail_request_limit", 5)), int(kwargs.get("search_request_limit", 3)), stats if source == 'linkedin' else None)
     kwargs["transport"] = transport
     # Synchronous source work: the Node parent kills this entire process at
     # the task deadline and waits for close before starting any retry.
     emit({"type": "task_started", "task_id": task_id})
-    try:
-        with use_transport(transport if source == "linkedin" else None):
-            frame, upstream_failure = scrape_with_failures(kwargs)
-        if frame is not None and not frame.empty:
-            for row in frame.to_dict(orient="records"):
-                stream(row)
-    except Exception as exc:
-        upstream_failure = failure_info(exc)
+    with measure_requests(stats if source != 'linkedin' else lambda *_: None) as measured:
+        try:
+            with use_transport(transport if source == "linkedin" else None):
+                frame, upstream_failure = scrape_with_failures(kwargs)
+            if frame is not None and not frame.empty:
+                for row in frame.to_dict(orient="records"):
+                    stream(row)
+        except Exception as exc:
+            upstream_failure = failure_info(exc)
     if kwargs.get("next_cursor"):
         kwargs["on_progress"](kwargs["next_cursor"])
 
@@ -468,10 +484,11 @@ def run_task(task: dict[str, Any], timeout_seconds: int, detail_cache=None) -> d
         "count": len(collected_urls),
         "head_checked": bool(kwargs.get('head_checked')),
         "coverage": kwargs['coverage'],
+        "candidate_errors": kwargs.get('candidate_errors', 0),
         **({'coverage_reason': kwargs['coverage_reason']} if kwargs.get('coverage_reason') else {}),
         "duration_ms": int((time.monotonic() - started) * 1000),
-        "search_requests": transport.search_requests if source == "linkedin" else None,
-        "detail_requests": transport.detail_requests if source == "linkedin" else None,
+        "search_requests": transport.search_requests if source == "linkedin" else measured['search'],
+        "detail_requests": transport.detail_requests if source == "linkedin" else measured['detail'],
     }
 
 

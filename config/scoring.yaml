@@ -189,9 +189,9 @@ relevance:
   target_role_families:
     cap: ['\bsap\s+(?:capm?|cloud application programming model)\b', '\bcloud application programming model\b']
     ui5: ['\b(?:sap\s*ui5|ui5|openui5|fiori(?: elements)?)\b']
-    btp: ['\b(?:sap\s+btp|business technology platform)\b']
+    btp: ['\b(?:sap\s+btp|business technology platform)\b', '\bsap\b.*\b(?:btp|work\s?zone)\b']
     ai: ['\b(?:sap\s+(?:joule|business ai|ai core|ai (?:developer|architect|engineer)|generative ai hub)|joule(?: studio)?)\b']
-    integration: ['\b(?:sap\s+(?:cpi|hci|integration (?:suite|expert|developer|architect|engineer|specialist))|cloud platform integration|integration suite)\b']
+    integration: ['\b(?:sap\s+(?:cpi|hci|integration (?:suite|expert|developer|architect|engineer|specialist|consultant)|integratie consultant|integrationsberater\w*)|cloud platform integration|integration suite)\b']
   hard_title_exclusions:
     Internship, student or apprenticeship:
       - '\b(?:intern(?:ship)?|working[- ]student|student assistant|werkstudent\w*|praktik\w*|auszubild\w*|apprentice\w*)\b'
@@ -199,6 +199,8 @@ relevance:
       - '\b(?:recruiter|account executive|sales (?:manager|executive)|financial (?:controller|analyst)|accountant|buchhalter\w*|finance manager|administrative assistant|office administrator)\b'
       - '\b(?:finance|financial|administrative)\s+(?:administrator|assistant|officer|specialist)\b'
       - '\b(?:finance|financial|fi/co|fi[- ]co)\s+(?:functional\s+)?consultant\b'
+    Functional-only SAP role:
+      - '^(?!.*\b(?:btp|capm?|cpi|ui5|fiori|integration|integratie)\b).*\bsap\s+(?:fi/?co|fi[- ]co|sd/mm|payroll)\s+(?:functional\s+)?(?:consultant|berater)\b'
 
 # These technologies are not claimed absent: requirements need profile confirmation.
 # Keep aliases here so a known CPI skill in the same sentence cannot hide them.
@@ -231,10 +233,12 @@ signals:
     - '\bunbefristet\w*\b'
     - "full[- ]time employee"
     - "cdi\\b"
-    - "payroll"
+    - '\b(?:on (?:the |our )?payroll|payroll employment)\b'
+    - '\b(?:contract(?: type)?|type|employment(?: type)?)\s*:\s*permanent\b'
     - "annual salary"
     - "13th salary"
   fully_remote:
+    - '\b(?:location|work(?:ing)? mode|workplace)\s*:\s*remote\b'
     - "fully remote"
     - "100\\s*%\\s*remote"
     - "remote[- ]first"
@@ -252,6 +256,7 @@ signals:
     - '(?:max\.?|maximal|bis zu|hochstens)\s*(\d+(?:\.\d+)?)\s*tage?\s*(?:pro|je|/)\s*woche\b'
     - '(?:maximum|max\.?|at most|up to)\s*(\d+(?:\.\d+)?)\s*days?\s*(?:per|a|/)\s*week\b'
   technical_contract_context:
+    - '\b(?:contract[- ]testing|contract[- ]tests?|smart contracts?|api contracts?)\b'
     - '\b(?:integrat\w*|edi|a2a|b2g|interface\w*|schnittstell\w*|kunden|lieferanten|customer|supplier|smart contract\w*)\b'
   employment_context:
     - '\b(?:employment|engagement|freelanc\w*|contractor|day rate|hourly rate|tagessatz|vergutung|anstellung|arbeitsvertrag|cooperation|basis)\b'
@@ -274,7 +279,7 @@ signals:
     - "\\b(?:erforderlich|zwingend|unverzichtbar)\\b"
     - "\\b(?:obligatoire|requis|indispensable|vereist)\\b"
   preferred_markers:
-    - "nice to have"
+    - "nice[- ]to[- ]haves?"
     - "preferred"
     - "a plus"
     - "beneficial"
@@ -291,7 +296,7 @@ signals:
     - '^(?:das bringst du mit|was du mitbringst|das zeichnet dich aus|was dich auszeichnet|deine qualifikationen)$'
     - "^(?:profil recherche|votre profil|jouw profiel|functie-eisen)$"
   preferred_sections:
-    - "^(?:nice to have|preferred (?:skills|qualifications)|desirable skills)$"
+    - "^(?:nice[- ]to[- ]haves?|preferred (?:skills|qualifications)|desirable skills)$"
     - "^(?:mile widziane|dodatkowe atuty|wunschenswert|von vorteil)$"
   non_requirement_sections:
     - "^(?:responsibilities|(?:your |the )?role|job description|about (?:us|the (?:company|client))|(?:what )?we offer|benefits)$"
@@ -302,6 +307,12 @@ signals:
 
 # Countries considered inside the preferred working region.
 preferred_countries:
+  - "United Arab Emirates"
+  - "Saudi Arabia"
+  - "Qatar"
+  - "Kuwait"
+  - "Bahrain"
+  - "Oman"
   - "Bulgaria"
   - "Germany"
   - "Netherlands"

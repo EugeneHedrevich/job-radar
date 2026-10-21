@@ -50,9 +50,7 @@ function scoreTechnical(config: AppConfig, analysis: VacancyAnalysis): Technical
     total += Math.min(groupScore, weights.cap);
   }
 
-  const titleIsRelevant =
-    /\b(?:sap|sapui5|fiori)\b/.test(text.all) &&
-    /\b(btp|cap|capm|cpi|integration suite|sapui5|ui5|fiori|joule|architect|ai|cloud)\b/.test(text.title);
+  const titleIsRelevant = analysis.relevance.accepted;
   if (titleIsRelevant) total = Math.max(total, config.scoring.technical.relevant_title_floor);
 
   let focus: string | null = null;
@@ -189,7 +187,7 @@ export function assessWithRules(config: AppConfig, job: MatchableJob, analysis =
   const policy = finalAssessmentPolicy(config, analysis,
     technical.score * weights.technical + commercial.score * weights.commercial + location.score * weights.location);
   const missingInformation = [...new Set([...analysis.missingInformation, ...commercial.missing, ...location.missing])];
-  const explanation = buildExplanation({
+  const explanation = (analysis.awaitingDescription ? 'Awaiting description. ' : '') + buildExplanation({
     hardRejectReason: policy.hardRejectReason, needsReview: analysis.requiresReview,
     commercialNotes: commercial.notes, locationNotes: location.notes, missing: missingInformation,
   });

@@ -1,5 +1,5 @@
 import type { AppConfig } from '../config/index.js';
-import { normalizeText } from '../util/text.js';
+import { normalizeText, sha256 } from '../util/text.js';
 import { abapUncertainty, proficiencyLevels, requiredProficiency } from './capabilities.js';
 import { matchingConstraints, type MatchingConstraints } from './constraints.js';
 import { capabilityRequirements, deterministicGapEvidence, educationUncertainty, requirementUncertainty,
@@ -23,6 +23,7 @@ export interface HardRejectHit { id: string; reason: string }
 
 /** Facts and uncertainty shared by rules scoring and model validation. */
 export interface VacancyAnalysis {
+  awaitingDescription: boolean;
   text: JobText;
   relevance: Relevance;
   engagement: Engagement;
@@ -41,7 +42,25 @@ export interface VacancyAnalysis {
   requiresReview: boolean;
 }
 
+export const ANALYSIS_REVISION = 22;
+const analysisCache = new Map<string, VacancyAnalysis>();
+export const analysisCacheStats = { hits: 0, misses: 0 };
+
 export function analyzeVacancy(config: AppConfig, job: MatchableJob): VacancyAnalysis {
+  const key = sha256(JSON.stringify({ revision: ANALYSIS_REVISION, profile: config.profile, scoring: config.scoring,
+    title: job.title, description: job.description, location: job.location, country: job.locationCountry,
+    jobType: job.jobType, remote: job.isRemote, min: job.salaryMin, max: job.salaryMax,
+    currency: job.salaryCurrency, interval: job.salaryInterval }));
+  const cached = analysisCache.get(key);
+  if (cached) { analysisCacheStats.hits++; return cached; }
+  analysisCacheStats.misses++;
+  const result = analyzeUncached(config, job);
+  if (analysisCache.size >= 256) analysisCache.delete(analysisCache.keys().next().value!);
+  analysisCache.set(key, result);
+  return result;
+}
+
+function analyzeUncached(config: AppConfig, job: MatchableJob): VacancyAnalysis {
   const text = jobText(job);
   const relevance = vacancyRelevance(config, job);
   const engagement = detectEngagement(config, job, text);
@@ -89,6 +108,7 @@ export function analyzeVacancy(config: AppConfig, job: MatchableJob): VacancyAna
   if (unclearAttendance) missingInformation.push('onsite attendance frequency is not stated or unclear');
   if (!text.hasDescription) missingInformation.unshift('full description was not retrieved - assessment is based on the title only');
   return { text, relevance, engagement, workMode, rate, attendance, unclearAttendance, requirements, profileEvidence, constraints,
+    awaitingDescription: !text.hasDescription && relevance.state !== 'irrelevant' && !hardRejects.length,
     hardRejects, mandatoryGaps: [...new Set(mandatoryGaps)],
     mandatoryGapEvidence: [...deterministicGapEvidence(config, job), ...constraints.evidence],
     preferredGaps: [...unclaimed.filter((item) => item.kind === 'preferred').map((item) => `${item.name} is listed as preferred`), ...constraints.preferredGaps],
@@ -109,7 +129,7 @@ export function finalAssessmentPolicy(config: AppConfig, analysis: VacancyAnalys
   const byScore: Recommendation = fitScore >= config.scoring.thresholds.apply ? 'Apply' :
     fitScore >= config.scoring.thresholds.review ? 'Review' : 'Skip';
   const selected = recommendation ?? byScore;
-  return { fitScore, recommendation: hardReject ? 'Skip' as const : selected === 'Apply' && byScore !== 'Apply' ? 'Review' as const : selected,
+  return { fitScore, recommendation: hardReject ? 'Skip' as const : analysis.awaitingDescription ? 'Review' as const : selected === 'Apply' && byScore !== 'Apply' ? 'Review' as const : selected,
     hardReject, hardRejectReason: reasons.length ? [...new Set(reasons)].join(' ') : null };
 }
 

@@ -2,6 +2,8 @@ import { randomUUID } from 'node:crypto';
 import { cds, db, INSERT, SELECT, UPDATE, queryOne } from '../db/index.js';
 import type { CollectionOperation } from '../dashboard/types.js';
 import { log } from '../util/log.js';
+import { readWeeklyState, weeklyAvailability, weeklyProgress, type WeeklyState } from '../pipeline/weekly.js';
+import { activeCooldowns } from './health.js';
 
 const LEASE_MS = 5 * 60_000;
 const NAME = 'collection';
@@ -27,7 +29,7 @@ async function expireLease(tx: any, lease: any, now: Date): Promise<void> {
 }
 
 /** SQLite's writer lock makes repeated clicks and independent processes atomic. */
-export async function claimCollection(trigger: string, now = new Date()): Promise<
+export async function claimCollection(trigger: string, now = new Date(), resumeId?: string): Promise<
   { acquired: true; claim: CollectionClaim } | { acquired: false; operationId: string }> {
   return cds.tx(async (tx: any) => {
     await tx.run('UPDATE sap_jobradar_Jobs SET ID = ID WHERE 0 = 1');
@@ -36,8 +38,18 @@ export async function claimCollection(trigger: string, now = new Date()): Promis
     if (lease?.token && new Date(lease.expiresAt).getTime() > now.getTime()) {
       return { acquired: false as const, operationId: lease.operation_ID };
     }
-    const operationId = randomUUID(), token = randomUUID();
-    await tx.run(INSERT.into(db().CollectionOperations).entries({ ID: operationId, trigger,
+    const operationId = resumeId ?? randomUUID(), token = randomUUID();
+    if (resumeId) {
+      const prior = await tx.run(SELECT.one.from(db().CollectionOperations).where({ ID: resumeId }));
+      if (!prior?.weeklyState || !weeklyProgress(JSON.parse(prior.weeklyState) as WeeklyState).canContinue)
+        throw new Error('No pending weekly search to continue');
+      await tx.run(UPDATE(db().CollectionOperations).set({ stage: 'Preparing', outcome: 'Running', finishedAt: null,
+        updatedAt: now.toISOString(), currentSource: null, tasksDone: 0, tasksTotal: 0, tasksFailed: 0,
+        tasksSkipped: 0, tasksSucceeded: 0, jobsFound: 0, jobsNew: 0, jobsUpdated: 0, jobsAssessed: 0,
+        aiCalls: 0, cachedAssessments: 0, rulesAssessments: 0, aiSucceeded: 0, aiFailures: 0,
+        aiFailureReasons: '[]', jobsAccepted: null, jobsFiltered: null, exclusionReasons: '{}',
+        assessmentRemaining: null, aiBacklog: 0, aiBudgetExhausted: false, message: null }).where({ ID: operationId }));
+    } else await tx.run(INSERT.into(db().CollectionOperations).entries({ ID: operationId, trigger,
       stage: 'Preparing', outcome: 'Running', startedAt: now.toISOString(), updatedAt: now.toISOString() }));
     const values = { operation_ID: operationId, token, expiresAt: new Date(now.getTime() + LEASE_MS).toISOString() };
     await tx.run(lease ? UPDATE(db().CollectionLease).set(values).where({ name: NAME })
@@ -46,7 +58,7 @@ export async function claimCollection(trigger: string, now = new Date()): Promis
   });
 }
 
-export async function updateOperation(claim: CollectionClaim, patch: Partial<CollectionOperation>): Promise<void> {
+export async function updateOperation(claim: CollectionClaim, patch: Partial<CollectionOperation> & { weeklyState?: string }): Promise<void> {
   const now = new Date();
   await cds.tx(async (tx: any) => {
     const renewed = await tx.run(UPDATE(db().CollectionLease)
@@ -97,5 +109,17 @@ export async function readOperation(id?: string): Promise<CollectionOperation | 
     if (value && !Array.isArray(value) && typeof value === 'object') exclusionReasons = Object.fromEntries(
       Object.entries(value).filter(([, count]) => typeof count === 'number' && Number.isFinite(count) && count >= 0)) as Record<string, number>;
   } catch { /* Older runs did not record relevance counts. */ }
-  return { ...row, aiBudgetExhausted: Boolean(row.aiBudgetExhausted), aiFailureReasons: reasons, exclusionReasons };
+  const { weeklyState, ...publicRow } = row;
+  const weekly: WeeklyState | null = weeklyState ? JSON.parse(weeklyState).relevantVacancies === undefined
+    ? await readWeeklyState(row.ID) : weeklyAvailability(JSON.parse(weeklyState), await activeCooldowns(),
+      row.outcome === 'Running' ? row.currentSource : null) : null;
+  return { ...publicRow, weekly: weekly ? weeklyProgress(weekly) : null,
+    aiBudgetExhausted: Boolean(row.aiBudgetExhausted), aiFailureReasons: reasons, exclusionReasons };
+}
+
+/** Keep a weekly continuation reachable after an intervening scheduled cycle. */
+export async function readLatestWeeklyOperation(): Promise<CollectionOperation | null> {
+  const row = await queryOne<any>(SELECT.from(db().CollectionOperations).columns('ID')
+    .where({ weeklyState: { '!=': null } }).orderBy('updatedAt desc', 'ID desc'));
+  return row ? readOperation(row.ID) : null;
 }

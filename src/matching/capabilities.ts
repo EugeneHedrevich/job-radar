@@ -34,7 +34,7 @@ export function unknownCapabilityFragments(config: AppConfig, fragment: string):
   const markers = ['\\bnot\\s+optional\\b', '\\b(?:not|never)\\s+(?:strictly\\s+)?(?:required|mandatory|essential|compulsory|obligatory)\\b',
     ...(config.scoring.signals.mandatory_markers ?? []), ...(config.scoring.signals.preferred_markers ?? []), '\\b(?:optional|voluntary)\\b'];
   return capabilityParts(fragment).flatMap((part) => {
-    let residual = part;
+    let residual = part.replace(/^(?:this (?:role|position) is )?(?:not suitable|unsuitable) for candidates (?:with(?: only)?|without|lacking)\s+/, '');
     for (const marker of markers) residual = residual.replace(pattern(marker, 'gi'), ' ');
     // Duration is not a capability. Keep the skill named by an experience
     // requirement, without interpreting undocumented years as proven absence.
@@ -45,7 +45,7 @@ export function unknownCapabilityFragments(config: AppConfig, fragment: string):
       residual = residual.replace(pattern(`(?<![a-z0-9])(?:sap\\s+)?${escaped}(?![a-z0-9])`, 'g'), ' ');
     }
     residual = residual.replace(/^(?:[-*#]+|\d+[.)])\s*/, '')
-      .replace(/\b(?:is|are|be|a|an|skills?|requirements?|qualifications?)\b/g, ' ')
+      .replace(/\b(?:is|are|be|a|an|no|not|skills?|requirements?|qualifications?)\b/g, ' ')
       .replace(/[():.!?]/g, ' ').replace(/\s+/g, ' ').trim();
     if (!certification) residual = residual.replace(/^(?:(?:experience|knowledge|understanding|proficiency|expert|advanced|strong|basic|working|deep|extensive|in|of|with|at|least|either|both|the)\s+)+/, '')
       .replace(/\s+(?:(?:experience|knowledge|understanding|proficiency|development|in|of|with|at|level)\s*)+$/, '').trim();

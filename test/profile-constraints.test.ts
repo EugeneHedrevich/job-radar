@@ -51,6 +51,23 @@ describe('language obligations use the actual profile and local context', () => 
     });
 });
 describe('employment and limited remote work use description evidence', () => {
+    it('keeps technical terms and Gulf employer locations separate from employment and candidate restrictions', async () => {
+        enableReviewAi(config);
+        vi.stubGlobal('fetch', vi.fn(async () => reviewAiResponse()));
+        const technical = reviewJob('', { jobType: null, description: 'SAP CAP and Node.js. Contract testing. SAP Payroll integrations.' });
+        expect(analyzeVacancy(config, technical).engagement).toBe('unknown');
+        const permanent = reviewJob('', { jobType: null, description: 'SAP CAP and Node.js. **Type:** Permanent. **Location:** Remote.' });
+        for (const result of [assessWithRules(config, permanent), await assessWithLlm(config, permanent)])
+            expect(result).toMatchObject({ hardReject: true, recommendation: 'Skip' });
+        expect(analyzeVacancy(config, reviewJob('Build CI/CD pipelines.')).profileEvidence.some((item) => item.name === 'SAP CPI')).toBe(false);
+        const gulf = reviewJob('', { location: 'Dubai', locationCountry: 'United Arab Emirates',
+            description: 'SAP CAP, Node.js, TypeScript. Contract: Freelance. Location: Remote. Our office is in Dubai.' });
+        const analysis = analyzeVacancy(config, gulf);
+        for (const result of [assessWithRules(config, gulf, analysis), await assessWithLlm(config, gulf, analysis)]) {
+            expect(result).toMatchObject({ hardReject: false, recommendation: 'Review' });
+            expect(result.missingInformation.join(' ')).toMatch(/permission.*Bulgaria.*not stated/);
+        }
+    });
     it('does not restore a negated permanent offer from coarse source metadata', () => {
         const job = reviewJob('', { jobType: 'permanent', description: 'SAP CAP and Node.js. Fully remote. No permanent employment.' });
         const analysis = analyzeVacancy(config, job);
@@ -239,6 +256,16 @@ describe('deterministic constraints survive a positive AI answer', () => {
     // One matrix verifies the final policy for both engines. Model output is
     // deliberately optimistic and includes a capability with no profile fact.
     it.each([
+        ['Nice-to-haves:\n- ABAP OO development\n- RAP ownership', 'Apply'],
+        ['No ABAP OO development is required. CAP is mandatory.', 'Apply'],
+        ['This role is not suitable for candidates with only ABAP OO development experience.', 'Apply'],
+        ['This role is unsuitable for candidates without SAP CAP experience.', 'Apply'],
+        ['Contract testing and SAP Payroll integrations.', 'Apply'],
+        ['**Contract:** Freelance\n**Location:** Remote', 'Apply'],
+        ['Candidate required location: Canada', 'Skip'], ['Candidate required location: Mexico', 'Skip'],
+        ['Start ASAP.', 'Review'],
+        ['Privacy policy:\nABAP OO development and German are mandatory for processing personal data.', 'Apply'],
+        ['About us:\nRAP ownership is mandatory for our marketing team.\nRequirements:\nSAP CAP experience.', 'Apply'],
         ['German optional. French is mandatory.', 'Skip'],
         ['### **Requirements**\n* German - Fluent (C1)', 'Skip'],
         ['**Was Dich auszeichnet**\n* Deine Deutschkenntnisse sind sehr gut, Deine Englischkenntnisse gut', 'Skip'],

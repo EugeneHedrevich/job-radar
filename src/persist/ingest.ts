@@ -8,6 +8,8 @@ import { hasPersonalTracking, vacancyRelevance } from '../matching/relevance.js'
 import { closedJobIds } from './activity.js';
 
 export interface IngestResult {
+  decisions: Array<{ key: string; action: 'created' | 'updated' | 'unchanged' | 'merged' | 'filtered'; jobId?: string; reason?: string }>;
+  uniqueListings: number;
   created: number;
   updated: number;
   mergedAcrossSources: number;
@@ -68,6 +70,7 @@ async function ingestWithin(normalized: NormalizedJob[],
   context: { runId: string | null; seenAt?: Date; demo?: boolean; automatic?: boolean }, connection: any): Promise<IngestResult> {
   const seenAt = (context.seenAt ?? new Date()).toISOString();
   const result: IngestResult = {
+    decisions: [], uniqueListings: 0,
     created: 0,
     updated: 0,
     mergedAcrossSources: 0,
@@ -117,6 +120,7 @@ async function ingestWithin(normalized: NormalizedJob[],
     combined.set(key, merged);
   }
 
+  result.uniqueListings = combined.size;
   for (const [key, job] of combined) {
 
     const existingListing = await findListing(job, connection);
@@ -126,6 +130,7 @@ async function ingestWithin(normalized: NormalizedJob[],
       if (enriched) await refreshPending(existingListing.job_ID!);
       if (enriched) { result.updated += 1; result.updatedJobIds.push(existingListing.job_ID); }
       if (existingListing.job_ID) result.jobIds.push(existingListing.job_ID);
+      result.decisions.push({ key, action: enriched ? 'updated' : 'unchanged', jobId: existingListing.job_ID });
       continue;
     }
 
@@ -137,6 +142,7 @@ async function ingestWithin(normalized: NormalizedJob[],
       result.mergedAcrossSources += 1;
       result.updatedJobIds.push(duplicate.ID);
       result.jobIds.push(duplicate.ID);
+      result.decisions.push({ key, action: 'merged', jobId: duplicate.ID });
       continue;
     }
 
@@ -149,6 +155,7 @@ async function ingestWithin(normalized: NormalizedJob[],
       result.accepted -= count;
       const reason = waiting ? 'Pending enrichment capacity reached' : relevance!.reason!;
       result.exclusionReasons[reason] = (result.exclusionReasons[reason] ?? 0) + count;
+      result.decisions.push({ key, action: 'filtered', reason });
       continue;
     }
     const jobId = randomUUID();
@@ -182,6 +189,7 @@ async function ingestWithin(normalized: NormalizedJob[],
     result.created += 1;
     result.jobIds.push(jobId);
     result.newJobIds.push(jobId);
+    result.decisions.push({ key, action: 'created', jobId });
   }
 
   result.jobIds = [...new Set(result.jobIds)];

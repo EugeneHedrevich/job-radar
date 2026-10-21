@@ -245,6 +245,9 @@ blockquote p { margin: 6px 0; }
 .terminal-diagnostics .collection-card { margin: 12px 0 0; }
 .failure-reasons { padding-left: 18px; color: #9a682a; font-size: 12px; overflow-wrap: anywhere; }
 .collection-idle { margin-bottom: 12px; }
+.weekly-progress { margin: 12px 0; padding: 12px 16px; border-left: 3px solid var(--accent); background: #edf4ef; border-radius: 6px; }
+.weekly-progress p + p, .weekly-progress button { margin-top: 6px; }
+.weekly-progress time { overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
 .reminder-indicator { display: flex; flex-wrap: wrap; align-items: baseline; gap: 16px; padding: 2px 0 8px; }
 .reminder-indicator details { flex: 1; }
 .reminders-panel { border-left: 3px solid #b38045; }

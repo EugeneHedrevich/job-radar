@@ -61,6 +61,11 @@ async function createLegacyTemplate(): Promise<string> {
       ALTER TABLE sap_jobradar_CollectionTasks DROP COLUMN detailRequests;
       ALTER TABLE sap_jobradar_CollectionTasks DROP COLUMN coverage;
       ALTER TABLE sap_jobradar_CollectionTasks DROP COLUMN coverageReason;
+      ALTER TABLE sap_jobradar_CollectionRuns DROP COLUMN operationId;
+      ALTER TABLE sap_jobradar_CollectionRuns DROP COLUMN diagnostics;
+      ALTER TABLE sap_jobradar_CollectionOperations DROP COLUMN weeklyState;
+      ALTER TABLE sap_jobradar_CollectionOperations DROP COLUMN currentSource;
+      ALTER TABLE sap_jobradar_CollectionOperations DROP COLUMN assessmentRemaining;
       ALTER TABLE sap_jobradar_SourceHealth DROP COLUMN rateLimitStreak;
       DROP TABLE sap_jobradar_AiAssessmentQueue;
       DROP TABLE sap_jobradar_ListingActivityEvents;

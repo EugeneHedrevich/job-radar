@@ -18,7 +18,7 @@ import requests
 from bs4 import BeautifulSoup
 from markdownify import markdownify
 from activity import http_closure, observe, page_closure
-from progress import SearchProgress
+from progress import SearchProgress, observed_request, selected_detail
 from transport import request_kwargs
 
 SOURCES = {
@@ -123,7 +123,7 @@ def search_html(source: str, keyword: str, page: int) -> str:
     root = SOURCES[source][0]
     if source == "eursap":
         # Eursap's public browser search is POST, and GET ?keywords= is ignored.
-        response = requests.post(root + "/jobs/search", data={"keywords": keyword, "languages": "",
+        response = observed_request(requests.post, 'search', root + "/jobs/search", data={"keywords": keyword, "languages": "",
                                  "type": "", "locations": "", "sort": ""},
                                  headers={"X-Requested-With": "XMLHttpRequest"}, timeout=REQUEST_TIMEOUT_SECONDS, **request_kwargs())
         response.raise_for_status()
@@ -140,14 +140,14 @@ def search_html(source: str, keyword: str, page: int) -> str:
     else:
         path = "/sap-jobs/" if page == 1 else f"/sap-jobs/page/{page}/"
         url = root + path + "?" + urlencode({"search": keyword})
-    response = requests.get(url, timeout=REQUEST_TIMEOUT_SECONDS, **request_kwargs())
+    response = observed_request(requests.get, 'search', url, timeout=REQUEST_TIMEOUT_SECONDS, **request_kwargs())
     response.raise_for_status()
     return response.text
 
 
 @lru_cache(maxsize=128)
 def detail_html(url: str) -> str:
-    response = requests.get(url, timeout=REQUEST_TIMEOUT_SECONDS, **request_kwargs())
+    response = observed_request(requests.get, 'detail', url, timeout=REQUEST_TIMEOUT_SECONDS, **request_kwargs())
     response.raise_for_status()
     return response.text
 
@@ -320,6 +320,8 @@ def scrape_agency(kwargs: dict[str, Any]) -> tuple[list[dict[str, Any]], BaseExc
             kwargs["on_record"](row)
     wanted = max(1, int(kwargs.get("results_wanted", 25)))
     cutoff = (datetime.now(timezone.utc) - timedelta(hours=int(kwargs.get("hours_old", 96)))).date()
+    if kwargs.get('requested_start'):
+        cutoff = date.fromisoformat(kwargs['requested_start'][:10])
     rows: list[dict[str, Any]] = []
     seen: set[str] = set()
     failure: BaseException | None = None
@@ -366,7 +368,7 @@ def scrape_agency(kwargs: dict[str, Any]) -> tuple[list[dict[str, Any]], BaseExc
                 continue
             # Keep the search identity if its detail request later hangs.
             stream(row)
-            if fetch_description:
+            if fetch_description and selected_detail(row.get('title'), kwargs):
                 if detail_requests >= MAX_DETAIL_REQUESTS_PER_TASK:
                     rows.append(row)
                     stream(row)

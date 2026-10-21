@@ -6,6 +6,7 @@ import { assessWithRules, suggestCvVariant } from './rules.js';
 import { validateGapEvidence } from './evidence.js';
 import type { AssessmentResult, MatchableJob } from './types.js';
 import { analyzeVacancy, finalAssessmentPolicy, type VacancyAnalysis } from './analysis.js';
+import { vacancyContent } from './signals.js';
 
 const llmResponseSchema = z.object({
   fit_score: z.number().min(0).max(100),
@@ -143,7 +144,7 @@ export async function assessWithLlm(config: AppConfig, job: MatchableJob, analys
   if (!config.llmAvailable || !config.secrets.openaiApiKey) {
     throw new LlmUnavailableError('OPENAI_API_KEY is not configured');
   }
-  if (config.scoring.uncertainty.require_description_for_llm && !job.description) {
+  if (config.scoring.uncertainty.require_description_for_llm && !analysis.text.hasDescription) {
     throw new LlmUnavailableError('job has no description; refusing to produce an invented assessment');
   }
 
@@ -159,7 +160,7 @@ export async function assessWithLlm(config: AppConfig, job: MatchableJob, analys
     `published: ${job.datePosted ?? 'unknown'}`,
     '',
     'description:',
-    truncate(job.description ?? '(not retrieved)', llm.max_description_chars),
+    truncate(vacancyContent(job.description ?? '') || '(not retrieved)', llm.max_description_chars),
   ].join('\n');
 
   const body = {

@@ -7,6 +7,11 @@ const minimal = {
     job_url: 'https://www.linkedin.com/jobs/view/1?trk=x',
 };
 describe('normalizeJob', () => {
+    it.each([['Remote - Canada', 'Canada'], ['Mexico only', 'Mexico'], ['Canada, Mexico', null],
+        ['Dubai', 'United Arab Emirates'], ['Riyadh, Saudi Arabia', 'Saudi Arabia'], ['San Francisco, CA', null]])
+        ('normalizes explicit countries while retaining ambiguous scopes: %s', (location, country) => {
+            expect(extractCountry(location)).toBe(country);
+        });
     it('keeps absent fields as null instead of inventing values', () => {
         const job = normalizeJob(minimal, 'linkedin')!;
         expect(job.company).toBeNull();

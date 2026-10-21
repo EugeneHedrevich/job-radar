@@ -1,7 +1,7 @@
 # SAP Job Radar - candidate profile.
 # Bump `version` whenever you change anything here: cached assessments are keyed
 # on it, so a bump forces re-evaluation of all jobs.
-version: "2026-10-10.1"
+version: "2026-10-19.1"
 
 identity:
   name: "Yauhen Hedrevich"
@@ -45,7 +45,7 @@ engagement:
   rejected_types: ["permanent_only", "internship"]
   preferred_work_mode: "fully_remote"
   acceptable_work_modes: ["fully_remote", "remote_first_hybrid"]
-  preferred_regions: ["Europe", "EEA", "EU", "UK"]
+  preferred_regions: ["Europe", "EEA", "EU", "UK", "United Arab Emirates", "Saudi Arabia", "Qatar", "Kuwait", "Bahrain", "Oman"]
 
 compensation:
   target_hourly_rate: 50
@@ -83,7 +83,7 @@ skills:
     - { name: "S/4HANA integration", proficiency: strong, aliases: ["S4HANA", "S/4"] }
   integration:
     - { name: "SAP Integration Suite", proficiency: strong }
-    - { name: "SAP CPI", proficiency: strong, aliases: ["Cloud Platform Integration", "CI", "HCI"] }
+    - { name: "SAP CPI", proficiency: strong, aliases: ["Cloud Platform Integration", "SAP Cloud Integration", "CPI", "HCI"] }
     - { name: "Destinations", proficiency: strong }
     - { name: "OAuth", proficiency: strong, aliases: ["OAuth2", "OAuth 2.0"] }
     - { name: "Principal Propagation", proficiency: strong }
@@ -92,7 +92,7 @@ skills:
     - { name: "Cloud Foundry", proficiency: strong, aliases: ["CF"] }
     - { name: "XSUAA", proficiency: strong }
     - { name: "SAP IAS", proficiency: strong, aliases: ["Identity Authentication Service", "IAS"] }
-    - { name: "SAP Build Work Zone", proficiency: working, aliases: ["Work Zone", "Launchpad Service"] }
+    - { name: "SAP Build Work Zone", proficiency: working, aliases: ["Work Zone", "WorkZone", "Launchpad Service"] }
     - { name: "SAP Build Process Automation", proficiency: working, aliases: ["BPA", "Workflow Management"] }
   ai:
     - { name: "SAP AI Core", proficiency: strong }

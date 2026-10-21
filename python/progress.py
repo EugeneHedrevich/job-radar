@@ -1,5 +1,60 @@
 """Bounded page and within-page cursors for the existing public adapters."""
 from __future__ import annotations
+from contextlib import contextmanager
+from contextvars import ContextVar
+import re
+
+
+_measurements = ContextVar('request_measurements', default=None)
+request_kind = ContextVar('request_kind', default='search')
+
+
+def selected_detail(title, kwargs):
+    patterns = kwargs.get('detail_title_patterns')
+    return not patterns or any(re.search(pattern, title or '', re.I) for pattern in patterns)
+
+
+@contextmanager
+def measure_requests(report):
+    counts = {'search': 0, 'detail': 0}
+    token = _measurements.set((counts, report))
+    try:
+        yield counts
+    finally:
+        _measurements.reset(token)
+
+
+@contextmanager
+def detail_phase():
+    token = request_kind.set('detail')
+    try:
+        yield
+    finally:
+        request_kind.reset(token)
+
+
+def current_measurements():
+    return _measurements.get()
+
+
+def observed_request(call, kind, *args, _measurement=None, **kwargs):
+    """Count at the existing HTTP call sites, including requests redirects.
+
+    This does not change sessions, TLS, retries, proxies or LinkedIn transport.
+    An attempt is streamed before I/O so termination preserves the measurement.
+    """
+    measurement = _measurement or _measurements.get()
+    def count(amount):
+        if measurement:
+            counts, report = measurement
+            counts[kind] += amount
+            report(counts['search'], counts['detail'])
+    count(1)
+    response = call(*args, **kwargs)
+    redirects = getattr(response, 'history', None)
+    if isinstance(redirects, (list, tuple)) and redirects:
+        count(len(redirects))
+    return response
 
 
 class SearchProgress:
@@ -53,5 +108,5 @@ class SearchProgress:
 
     def finish_page(self, page, more):
         if not self.fresh:
-            self.kwargs['coverage'] = 'incomplete' if more else 'exhausted'
+            self.kwargs['coverage'] = 'incomplete' if more or self.kwargs.get('candidate_errors') else 'exhausted'
         self.save(page + 1 if more and page < 100 else 1)

@@ -114,6 +114,8 @@ async function ensureLocalControls(connection: any): Promise<void> {
 
 async function ensureRecoveryFields(connection: any): Promise<void> {
   for (const [table, fields] of [
+    ['CollectionRuns', [['operationId', 'VARCHAR(36)'], ['diagnostics', 'TEXT']]],
+    ['CollectionOperations', [['weeklyState', 'TEXT'], ['currentSource', 'VARCHAR(50)'], ['assessmentRemaining', 'INTEGER']]],
     ['Assessments', [['aiOutcome', 'VARCHAR(30)'], ['aiReason', 'VARCHAR(2000)']]],
     ['AiAssessmentQueue', [['attempts', 'INTEGER DEFAULT 0'], ['attemptedAt', 'TIMESTAMP'],
       ['retryAfter', 'TIMESTAMP'], ['lastOutcome', 'VARCHAR(30)'], ['lastReason', 'VARCHAR(2000)']]],

@@ -112,6 +112,7 @@ const sourceSchema = z.object({
 });
 
 export const searchesSchema = z.object({
+  geography_groups: z.record(z.string(), z.array(z.string()).min(1)).default({}),
   linkedin_limits: z.object({
     max_search_tasks_per_run: z.number().int().min(0).max(18).default(2),
     max_detail_requests_per_run: z.number().int().nonnegative().default(5),
@@ -332,7 +333,9 @@ export function loadConfig(options: { reload?: boolean } = {}): AppConfig {
     throw new Error(`cv-variants.yaml: default "${cvVariants.default}" is not a configured variant`);
   }
   for (const batch of searches.rotation.batches) {
-    const taskCount = Object.values(batch.targets).reduce((count, geos) => count + geos.length * batch.keywords.length, 0);
+    const taskCount = Object.entries(batch.targets).reduce((count, [source, geos]) => count +
+      geos.flatMap((geo) => geo.startsWith('@') ? searches.geography_groups[geo.slice(1)] ?? [] : [geo])
+        .filter((geo) => searches.sources[source]?.geos[geo]).length * batch.keywords.length, 0);
     if (taskCount > searches.resilience.max_tasks_per_run) {
       throw new Error(`searches.yaml: batch "${batch.key}" has ${taskCount} tasks; split it into smaller batches`);
     }
@@ -340,6 +343,10 @@ export function loadConfig(options: { reload?: boolean } = {}): AppConfig {
       const sourceConfig = searches.sources[source];
       if (!sourceConfig) throw new Error(`searches.yaml: batch "${batch.key}" targets unknown source "${source}"`);
       for (const geoId of geoIds) {
+        if (geoId.startsWith('@')) {
+          if (!searches.geography_groups[geoId.slice(1)]) throw new Error(`Unknown geography group ${geoId}`);
+          continue; // Unsupported source/group members are reported by planning.
+        }
         if (!sourceConfig.geos[geoId]) {
           throw new Error(`searches.yaml: batch "${batch.key}" targets unknown geo "${geoId}" for source "${source}"`);
         }

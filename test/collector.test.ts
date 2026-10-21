@@ -6,7 +6,7 @@ import { promisify } from "node:util";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { activeCooldowns, recordOutcomes } from "../src/collector/health.js";
 import { recoverInterruptedRuns, startRunHeartbeat } from "../src/collector/lifecycle.js";
-import { linkedinCoverage, planBatch, selectBatchIndex, sourceQuery, type DescriptionRotation } from "../src/collector/plan.js";
+import { catalogueLimitations, linkedinCoverage, planBatch, searchCatalogue, searchRequestKey, selectBatchIndex, sourceGeographies, sourceQuery, type DescriptionRotation } from "../src/collector/plan.js";
 import { recordQueryRotation, recordSearchProgress, reserveBatchPlan } from "../src/collector/rotation.js";
 import { CollectorStartupError, runCollector } from "../src/collector/run.js";
 import { type CollectorTask } from "../src/collector/types.js";
@@ -207,10 +207,10 @@ describe("priority-coverage", () => {
             salaryInterval: null, salaryCurrency: null, primaryUrl: 'https://example.com/job', datePosted: null };
     }
     describe('priority search coverage within operational limits', () => {
-        it('covers distinct source queries fairly across the configured 66-slot/108h sequence', () => {
+        it('covers distinct source queries fairly within each bounded cycle', () => {
             const config = loadConfig();
             const coverage = linkedinCoverage(config);
-            expect(coverage).toMatchObject({ slotsPerSequence: 66, sequenceHours: 108 });
+            expect(coverage.sequenceHours).toBe(config.searches.rotation.sequence!.length * config.searches.rotation.interval_hours);
             expect(coverage.combinations).toBeGreaterThan(91); // Broad and explicit role searches remain distinct.
             let state: ReturnType<typeof planBatch>['descriptionRotation'] | undefined;
             const seen = new Set<string>();
@@ -225,9 +225,9 @@ describe("priority-coverage", () => {
                 expect(tasks.filter(task => task.fetch_description).length).toBeLessThanOrEqual(2);
                 expect(tasks.filter(task => task.source === 'linkedin').length).toBeLessThanOrEqual(2);
                 for (const [source, geos] of Object.entries(batch.targets)) if (source !== 'linkedin')
-                    expect(plan.tasksBySource.get(source)).toHaveLength(geos.length * batch.keywords.length);
+                    expect(plan.tasksBySource.get(source) ?? []).toHaveLength(sourceGeographies(config, source, geos).length * batch.keywords.length);
                 for (const task of tasks) if (task.source === 'linkedin') seen.add(task.task_id);
-                if (slot === count - 1) expect(seen.size).toBe(66);
+                if (slot === count - 1) expect(seen.size).toBe(coverage.slotsPerSequence);
             }
             expect(seen.size).toBe(coverage.combinations);
         });
@@ -246,15 +246,30 @@ describe("priority-coverage", () => {
             batch.keywords.push('sap cap');
             expect(planBatch(config, { batchKey: batch.key, onlySources: ['indeed'] }).tasksBySource.get('indeed')).toHaveLength(before);
         });
-        it('revisits every broad priority group and public catalogue within 36 hours', () => {
+        it('revisits every broad priority group and public catalogue within the freshness window', () => {
             const config = loadConfig();
             const sequence = config.searches.rotation.sequence!;
             for (const key of ['cap-broad', 'ui5-broad', 'joule-broad', 'btp-ai-broad', 'sap-public']) {
                 const positions = sequence.flatMap((item, index) => item === key ? [index] : []);
                 expect(positions).toHaveLength(3);
                 const wrapped = [...positions, positions[0]! + sequence.length];
-                expect(Math.max(...positions.map((position, i) => (wrapped[i + 1]! - position) * config.searches.rotation.interval_hours))).toBe(36);
+                expect(Math.max(...positions.map((position, i) => (wrapped[i + 1]! - position) * config.searches.rotation.interval_hours)))
+                    .toBeLessThanOrEqual(config.searches.defaults.hours_old);
             }
+        });
+        it('covers the GCC families and selected cities with supported country IDs and distinct cursors', () => {
+            const config = loadConfig(), tasks = searchCatalogue(config);
+            for (const country of ['Saudi Arabia', 'United Arab Emirates', 'Qatar', 'Kuwait', 'Bahrain', 'Oman'])
+                for (const term of ['SAP BTP', 'SAP CAP', 'SAP CPI', 'SAP Integration Suite', 'SAPUI5', 'SAP Fiori'])
+                    expect(tasks.some((t) => t.source === 'indeed' && t.country_indeed === country && t.search_term.includes(term))).toBe(true);
+            for (const city of ['Dubai', 'Abu Dhabi', 'Riyadh', 'Jeddah', 'Eastern Province'])
+                expect(tasks.some((t) => t.location?.startsWith(city))).toBe(true);
+            expect(catalogueLimitations(config)).toHaveLength(6);
+            const first = { ...tasks[0]!, offset: 10 }, same = { ...first, task_id: 'alias', search_term: first.search_term.toLowerCase() };
+            expect(searchRequestKey(first)).toBe(searchRequestKey(same));
+            expect(searchRequestKey(first)).not.toBe(searchRequestKey({ ...first, offset: 20 }));
+            expect(planBatch(config, { searchTasks: [first, same, { ...first, task_id: 'page2', offset: 20 }] })
+                .tasksBySource.get(first.source)).toHaveLength(2);
         });
         it('covers broad technologies, roles and engagement variants on all six sources', () => {
             const config = loadConfig();
@@ -320,7 +335,8 @@ describe("priority-coverage", () => {
                 .some((task) => task.location === 'United Arab Emirates' && task.search_term === 'SAP')).toBe(true);
             expect(config.searches.sources.glassdoor!.geos.ae).toBeUndefined();
         });
-        it.each(['SAP Joule Developer', 'SAP Joule Architect', 'SAPUI5 Developer', 'SAP BTP AI Consultant'])('retains relevant SAP titles: %s', (title) => {
+        it.each(['SAP Joule Developer', 'SAP Joule Architect', 'SAPUI5 Developer', 'SAP BTP AI Consultant',
+            'SAP Integration Consultant', 'SAP Integratie Consultant', 'SAP Berater – Basis, BTP & S/4HANA'])('retains relevant SAP titles: %s', (title) => {
             const config = loadConfig();
             const vacancy = job(title);
             expect(prescreen(config, vacancy).passed).toBe(true);
