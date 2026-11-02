@@ -36,6 +36,6 @@ telegram:
 
 scheduler:
   # Matches searches.yaml rotation.interval_hours.
-  cron: "0 */3 * * *"
+  cron: "0 * * * *"
   timezone: "Europe/Sofia"
   run_on_start: true

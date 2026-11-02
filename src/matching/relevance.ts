@@ -17,7 +17,7 @@ export function vacancyRelevance(config: AppConfig, job: { title: string; descri
   for (const [family, patterns] of Object.entries(settings.target_role_families)) {
     if (matchesAny(text.title, patterns)) return { accepted: true, state: 'confirmed', reason: null, family };
   }
-  const sap = /\b(?:sap|sapui5|s\/4hana)\b/.test(text.title);
+  const sap = /\b(?:sap|sapui5|abap|s\/4hana)\b/.test(text.title);
   const technical = /\b(?:develop\w*|engineer\w*|architect\w*|technical|technisch\w*|entwickl\w*|berater\w*|consultant\w*|integrat\w*)\b/.test(text.title);
   if (sap && technical) {
     const alias = /\b(btp|capm?|cpi|hci|work\s?zone|integratie|integration\w*)\b/.exec(text.title)?.[1];
@@ -47,6 +47,13 @@ export function vacancyRelevance(config: AppConfig, job: { title: string; descri
 export function descriptionPriority(config: AppConfig, job: { title: string; description?: string | null }): number {
   const relevance = vacancyRelevance(config, job);
   return relevance.state === 'irrelevant' ? 9 : relevance.accepted ? 0 : /\bsap\b/i.test(job.title) ? 1 : 2;
+}
+
+/** Enrichment also resolves broad SAP technical titles, which cannot be
+ * confirmed as target roles until their description has been retrieved. */
+export function descriptionTitlePatterns(config: AppConfig): string[] {
+  return [...Object.values(config.scoring.relevance.target_role_families).flat(),
+    '\\bsap\\b.*\\b(?:develop\\w*|engineer\\w*|architect\\w*|technical|technisch\\w*|entwickl\\w*)\\b'];
 }
 
 /** Personal records stay accessible even when their vacancy is outside the target. */

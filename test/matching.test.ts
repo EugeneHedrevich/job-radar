@@ -23,6 +23,37 @@ describe('deterministic matching (no LLM key required)', () => {
         expect(result.hardReject).toBe(false);
     });
 });
+describe('focused SAP roles', () => {
+    const cases = [
+        ['SAP CAP Developer', 'Develop SAP CAP applications using Node.js and TypeScript.'],
+        ['SAP CPI Developer', 'Develop SAP CPI integration flows using SAP Integration Suite, REST and OAuth.'],
+        ['SAP BTP Architect', 'Design SAP BTP solutions with Cloud Foundry, XSUAA and Destinations.'],
+        ['SAP AI Developer', 'Build SAP AI Core applications with Generative AI Hub, Node.js and TypeScript.'],
+    ];
+    it.each(cases)('recognizes a focused match without requiring unrelated skill groups: %s', (title, description) => {
+        const result = assessWithRules(config, job({ title: title!,
+            description: `${description} Fully remote freelance contract within Europe. English.` }));
+        expect(result.technicalFit).toBeGreaterThanOrEqual(75);
+        expect(result.fitScore).toBeGreaterThanOrEqual(config.scoring.thresholds.apply);
+        expect(result.recommendation).toBe('Apply');
+        expect(result.mandatoryGaps).toEqual([]);
+    });
+    it.each(cases)('preserves a mandatory language mismatch for a focused match: %s', (title, description) => {
+        const result = assessWithRules(config, job({ title: title!,
+            description: `${description} Fully remote freelance contract. German language is mandatory.` }));
+        expect(result.hardReject).toBe(true);
+        expect(result.fitScore).toBeLessThanOrEqual(config.scoring.hard_rejects.score_cap);
+        expect(result.recommendation).toBe('Skip');
+    });
+    it('does not turn a CAP-only mention or missing description into a strong match', () => {
+        for (const description of [null, 'Maintain SAP CAP applications. Fully remote freelance contract.']) {
+            const result = assessWithRules(config, job({ title: 'SAP CAP Developer', description }));
+            expect(result.technicalFit).toBeLessThan(75);
+            expect(result.recommendation).not.toBe('Apply');
+        }
+    });
+});
+
 describe('focused SAPUI5 frontend scoring', () => {
     const frontendDescription = 'Develop SAPUI5 and SAP Fiori applications with JavaScript, TypeScript and OData. Fully remote freelance contract, English-speaking team.';
     it.each(['SAPUI5 Developer', 'SAP UI5 Developer', 'SAP Fiori Developer'])('recognizes a strong frontend match without requiring BTP or CAP: %s', (title) => {

@@ -47,6 +47,23 @@ afterEach(() => {
     resetConfigCache();
 });
 describe('malformed collector output', () => {
+    it('does not spend new-description slots on API searches that already supply descriptions', () => {
+        const config = loadConfig();
+        const tasks = searchCatalogue(config).filter(task => ['hays', 'remotive', 'arbeitnow'].includes(task.source));
+        const plan = planBatch(config, { searchTasks: tasks, descriptionBacklogSources: [] });
+        for (const source of ['remotive', 'arbeitnow'])
+            expect(plan.tasksBySource.get(source)!.some(task => task.fetch_description)).toBe(false);
+        expect(plan.tasksBySource.get('hays')!.some(task => task.fetch_description)).toBe(true);
+    });
+    it('reserves details for broad SAP technical titles and carries the shared junk exclusions', () => {
+        const plan = planBatch(loadConfig(), { batchKey: 'contract-ai', onlySources: ['hays'] });
+        const selected = plan.tasksBySource.get('hays')!.filter(task => task.fetch_description);
+        expect(selected.length).toBeGreaterThan(0);
+        for (const task of selected) {
+            expect(task.detail_title_patterns!.some(pattern => new RegExp(pattern, 'i').test('SAP Cloud Developer'))).toBe(true);
+            expect(task.detail_title_exclusions!.some(pattern => new RegExp(pattern, 'i').test('SAP BTP Working Student'))).toBe(true);
+        }
+    });
     it.each(['freelancermap', 'jobserve', 'freelancede', 'hays', 'justjoin', 'nofluffjobs'])('selects %s in the bounded rotation and frozen catalogue', (source) => {
         const config = loadConfig();
         const sequence = config.searches.rotation.sequence!;
@@ -226,6 +243,9 @@ describe("priority-coverage", () => {
             const coverage = linkedinCoverage(config);
             expect(coverage.sequenceHours).toBe(config.searches.rotation.sequence!.length * config.searches.rotation.interval_hours);
             expect(coverage.combinations).toBeGreaterThan(91); // Broad and explicit role searches remain distinct.
+            // Necessary head capacity must fit inside the freshness window,
+            // before considering unavoidable upstream blocks or pagination.
+            expect(coverage.combinations * coverage.sequenceHours / coverage.slotsPerSequence).toBeLessThanOrEqual(coverage.freshnessHours);
             let state: ReturnType<typeof planBatch>['descriptionRotation'] | undefined;
             const seen = new Set<string>();
             const count = config.searches.rotation.sequence!.length;

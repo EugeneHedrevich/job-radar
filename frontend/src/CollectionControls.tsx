@@ -66,7 +66,7 @@ export function PeriodSearch({ disabled, onStart }: {
 }) {
   const [length, setLength] = useState('7');
   const [unit, setUnit] = useState('days');
-  const [automatic, setAutomatic] = useState(false);
+  const [automatic, setAutomatic] = useState(true);
   const id = useId();
   const factor = unit === 'weeks' ? 168 : unit === 'days' ? 24 : 1;
   const maximum = Math.floor(MAX_PERIOD_HOURS / factor);
@@ -88,6 +88,7 @@ export function PeriodSearch({ disabled, onStart }: {
     </div>
     <label className="period-auto"><input type="checkbox" checked={automatic} disabled={disabled}
       onChange={event => setAutomatic(event.target.checked)} />Continue automatically in the background</label>
+    <p className="muted small period-hint">Searches run in small batches across sources. Automatic continuation checks the remaining queries; you can pause at any time.</p>
     {!valid && <p id={`${id}-hint`} className="error small period-hint">Use a whole number from 1 to {maximum}.</p>}
   </form>;
 }

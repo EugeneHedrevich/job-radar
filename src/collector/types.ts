@@ -91,6 +91,7 @@ export interface SourceFailure { kind: ErrorKind; message: string; httpStatus?: 
 
 export interface CollectorTask {
   detail_title_patterns?: string[];
+  detail_title_exclusions?: string[];
   requested_start?: string;
   requested_end?: string;
   task_id: string;

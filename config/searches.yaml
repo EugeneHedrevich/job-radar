@@ -9,8 +9,8 @@
 # JobSpy sources verified against python-jobspy 1.2.0.
 
 defaults:
-  hours_old: 120 # freshness window; deliberately wider than the 3h cycle so
-                # cycles overlap and nothing is lost to a failed run
+  hours_old: 120 # freshness window; deliberately wider than the hourly cycle so
+                # hourly cycles overlap and recover after failed runs
   results_wanted: 25
   description_format: markdown
   distance: 50
@@ -338,10 +338,10 @@ sources:
 # Priority batches interleave four directions across the original six sources.
 # Public catalogue scans cover six more providers, including seven Michael Page markets.
 # Each uses at most 3 queries x 6 geographies = 18 tasks, without tail truncation.
-# Broad priority/catalogue scans recur within 72h. The 52-slot sequence takes
-# 156h; late head visits widen lookback within the existing 72h catch-up bound.
+# Broad priority/catalogue scans recur within 24h. The 52-slot sequence takes
+# 52h; late head visits widen lookback within the existing 72h catch-up bound.
 rotation:
-  interval_hours: 3
+  interval_hours: 1
   sequence:
     - contract-priority
     - cap-broad

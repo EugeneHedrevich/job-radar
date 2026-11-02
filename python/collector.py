@@ -89,6 +89,7 @@ ALLOWED_TASK_PARAMS = {
     "detail_request_limit", "search_request_limit", "search_page_limit", "search_cursor",
     "requested_start", "requested_end",
     "detail_title_patterns",
+    "detail_title_exclusions",
 }
 
 

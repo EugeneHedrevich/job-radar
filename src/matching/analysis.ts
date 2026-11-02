@@ -42,7 +42,7 @@ export interface VacancyAnalysis {
   requiresReview: boolean;
 }
 
-export const ANALYSIS_REVISION = 23;
+export const ANALYSIS_REVISION = 24;
 const analysisCache = new Map<string, VacancyAnalysis>();
 export const analysisCacheStats = { hits: 0, misses: 0 };
 

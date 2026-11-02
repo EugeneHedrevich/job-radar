@@ -237,13 +237,28 @@ when the operation starts and stays frozen across continuation cycles. Days and
 weeks mean 24 and 168 hours. Progress displays readable dates in Europe/Sofia and
 the interval duration; exports retain exact UTC timestamps. The resume time only
 schedules the next batch and never shortens the requested period. It walks the enabled, deduplicated query/geography
-catalogue. By default, a click runs one bounded batch and saves continuation for
-**Continue search**. **Continue automatically in the background** is an explicit,
-unchecked option that schedules further bounded cycles of at most 18 search
+catalogue. **Continue automatically in the background** is checked for a new UI search,
+so collecting a period continues through the remaining queries instead of stopping after
+the first batch. Uncheck it for a single bounded batch followed by **Continue search**.
+Existing saved operations keep their chosen mode and explicit pauses. Each cycle uses at most 18 search
 tasks and two description tasks, with the existing LinkedIn allowances, cooldowns
 and source leases. **Five AI calls is a ceiling for the entire period operation**,
 reserved durably before each attempt, including interrupted attempts. Cached AI
 and local rules remain available after that allowance is spent.
+
+Period searches check broad primary role families across all sources before near-duplicate
+role aliases and backfill. Geography balancing treats UAE cities as one country, so Dubai
+and Abu Dhabi do not repeatedly precede an unchecked Saudi search. The full catalogue,
+fixed date interval, request limits and saved continuation remain available.
+
+Rules scoring uses focused profiles for CAP, BTP architecture, CPI/Integration Suite,
+SAP AI and UI5 roles. A focused role needs evidence of at least three relevant held skills
+in a retrieved description; it does not need unrelated skill groups to rank highly.
+Mandatory mismatches, unknown requirements and missing descriptions retain the existing
+final assessment policy. Broad SAP technical titles such as SAP Cloud Developer are eligible
+for description retrieval; shared hard title exclusions prevent spending those lookups on
+internships and unrelated roles. Restarting the dashboard refreshes saved rules assessments
+for the changed scoring configuration without fetching vacancies or calling AI.
 
 The existing scheduler checks persisted continuations each minute in both the
 dashboard and watch processes. It releases execution leases while waiting, records
@@ -516,20 +531,20 @@ through a persisted catalogue cursor on subsequent available cycles, using spare
 capacity instead of waiting for their original batch to return. Broad “SAP CAP” and “SAPUI5”
 queries retain their skill wording; explicit Developer queries run separately. Identical
 effective queries, geographies and filters share a task. The configured sequence allows at most
-**98 LinkedIn search slots per 156 hours** before cooldowns and source contention, so some
+**98 LinkedIn search slots per 52 hours** before cooldowns and source contention, so some
 combinations wait beyond one sequence. Catalogue rotation avoids duplicate queries and repeats
 until the sweep wraps; diagnostics report observed first-page coverage rather than promising
 complete coverage. The LinkedIn freshness window is 168 hours
 to accommodate its slower sweep; other source windows are unchanged. Larger custom batches
 also rotate their postponed tail. Collection outcomes distinguish successful empty searches,
 partial results, all executed tasks failing (even with skipped tasks), and no available sources.
-The explicit **52-cycle / 156-hour** sequence repeats the broad priority and public catalogue
-batches within **72 hours**, inside the 120-hour freshness window. Rate limits and small caps
+The explicit **52-cycle / 52-hour** sequence repeats the broad priority and public catalogue
+batches within **24 hours**, inside the 120-hour freshness window. Rate limits and small caps
 can delay individual combinations and pages; complete vacancy coverage is not guaranteed.
-A global, persisted source cursor gives
-each of the five eligible description sources a slot within three priority cycles
-(up to nine hours), when all are available. Keyword/location progress remains separate
-for each batch. Disabled sources, cooldowns and `--source` restrictions consume no slots.
+A global, persisted source cursor shares description slots across eligible sources.
+Searches that already return full descriptions consume those slots only when stored
+records need a description or an activity refresh. Keyword/location progress remains
+separate for each batch. Disabled sources, cooldowns and `--source` restrictions consume no slots.
 
 Selected public detail tasks also reserve a small share of their existing request
 allowance for stored jobs without descriptions and stale listing activity, independently of the search term.
@@ -635,7 +650,7 @@ description budgets mean a scan cannot guarantee every advertised EMEA vacancy.
 Key behaviours driven by configuration:
 
 * **Rotation** — `searches.rotation` defines small batches. One batch runs per cycle, so a
-  3-hourly schedule walks the whole rotation instead of running every keyword against every
+  hourly schedule walks the whole rotation instead of running every keyword against every
   country every time. The freshness window (`defaults.hours_old`, 120h) deliberately overlaps
   several cycles so a failed run loses nothing.
 * **Per-source geography** — LinkedIn only understands free-text `location`; Indeed and
@@ -707,11 +722,11 @@ Key behaviours driven by configuration:
 
   Five family batches of at most 12 tasks cover BTP, CAP/CAPM, UI5/Fiori, CPI/Integration Suite, SAP AI
   and SAP Cloud Developer. Four extra broad priority visits favour freelancermap/JobServe.
-  Existing rotation entries remain present. With a three-hour scheduler the sequence is
-  **52 slots / 156 hours**: these two sources receive a slot at least every **24 hours**,
-  the other four at least every **42 hours**, before cooldowns/contention. A particular
+  Existing rotation entries remain present. With the hourly scheduler the sequence is
+  **52 slots / 52 hours**: these two sources receive a slot at least every **8 hours**,
+  the other four at least every **14 hours**, before cooldowns/contention. A particular
   family query recurs once per sequence; weekly UI searches use the existing faster bounded
-  continuation. Existing broad priority/public batches recur within **72 hours**. All
+  continuation. Existing broad priority/public batches recur within **24 hours**. All
   cycles retain the 18 search-task, two description-task, five AI-call and three Telegram-call
   ceilings. HTTP requests include pagination/redirects and are counted separately from tasks.
 
@@ -798,7 +813,7 @@ history. Legacy fallback caches are recognised without invalidating successful c
 ### Expanded public SAP coverage
 
 The `sap-public` batch searches six additional providers with a broad `SAP` query.
-It recurs within 72 hours in the rotation and uses 12 of the 18 allowed tasks.
+It recurs within 24 hours in the rotation and uses 12 of the 18 allowed tasks.
 
 | Provider | Coverage | Descriptions |
 | -------- | -------- | ------------ |

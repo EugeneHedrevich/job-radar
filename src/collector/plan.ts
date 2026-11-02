@@ -1,6 +1,7 @@
 import type { AppConfig } from '../config/index.js';
 import type { CollectorTask } from './types.js';
 import { normalizeText } from '../util/text.js';
+import { descriptionTitlePatterns } from '../matching/relevance.js';
 
 export interface PlannedBatch {
   batchKey: string;
@@ -24,7 +25,7 @@ export interface DescriptionRotation {
 
 /**
  * Pick the rotating batch for a point in time. Batches advance every
- * `rotation.interval_hours`, so a 3-hourly schedule walks the whole rotation
+ * `rotation.interval_hours`, so the hourly schedule walks the whole rotation
  * instead of hammering every keyword against every country each cycle.
  */
 export function selectBatchIndex(config: AppConfig, at: Date = new Date()): number {
@@ -37,6 +38,8 @@ export function selectBatchIndex(config: AppConfig, at: Date = new Date()): numb
 
 export interface PlanOptions {
   preparationTimings?: Record<string, number>;
+  /** Known API sources with incomplete listings or a due activity refresh. */
+  descriptionBacklogSources?: string[];
   /** Frozen weekly catalogue slice; selected outside the ordinary rotation. */
   searchTasks?: CollectorTask[];
   /** Enrich/refresh stored listings without issuing searches. */
@@ -130,7 +133,7 @@ export function planBatch(config: AppConfig, options: PlanOptions = {}): Planned
       tasksBySource.set(task.source, group);
     }
   } else if (!options.enrichOnly) applySearchBudget(config, batch.key, tasksBySource, searchCursors, skipped, linkedinPending, options, searchRotation);
-  const descriptionRotation = applyDescriptionBudget(config, tasksBySource, options.descriptionRotation);
+  const descriptionRotation = applyDescriptionBudget(config, tasksBySource, options.descriptionRotation, options.descriptionBacklogSources);
   descriptionRotation.lastSearchByScope = searchCursors;
   descriptionRotation.linkedinPending = linkedinPending;
   const details = (tasksBySource.get('linkedin') ?? []).filter((task) => task.fetch_description);
@@ -139,8 +142,10 @@ export function planBatch(config: AppConfig, options: PlanOptions = {}): Planned
     task.detail_request_limit = Math.ceil(remainingDetails / (details.length - index));
     remainingDetails -= task.detail_request_limit;
   });
-  for (const tasks of tasksBySource.values()) for (const task of tasks) if (task.fetch_description)
-    task.detail_title_patterns = Object.values(config.scoring.relevance.target_role_families).flat();
+  for (const tasks of tasksBySource.values()) for (const task of tasks) if (task.fetch_description) {
+    task.detail_title_patterns = descriptionTitlePatterns(config);
+    task.detail_title_exclusions = Object.values(config.scoring.relevance.hard_title_exclusions).flat();
+  }
   if (options.enrichOnly) {
     for (const [source, tasks] of tasksBySource) {
       const selected = tasks.filter((task) => task.fetch_description);
@@ -202,7 +207,7 @@ function applySearchBudget(config: AppConfig, batchKey: string, tasksBySource: M
  * Jobs collected without a description stay incomplete on purpose.
  */
 function applyDescriptionBudget(
-  config: AppConfig, tasksBySource: Map<string, CollectorTask[]>, previous?: DescriptionRotation,
+  config: AppConfig, tasksBySource: Map<string, CollectorTask[]>, previous?: DescriptionRotation, backlogSources?: string[],
 ): DescriptionRotation {
   const state: DescriptionRotation = {
     ...(previous?.enrichmentScanByScope ? { enrichmentScanByScope: { ...previous.enrichmentScanByScope } } : {}),
@@ -221,6 +226,10 @@ function applyDescriptionBudget(
     if (!sourceConfig.supports_description_fetch) continue;
     if (source === 'linkedin' && config.searches.linkedin_limits.max_detail_requests_per_run === 0) continue;
     if (sourceConfig.search_results_include_description && !sourceConfig.supports_backlog_enrichment) continue;
+    // API searches already include descriptions. Keep a slot only for real
+    // stored work, preserving due activity refreshes and incomplete records.
+    if (sourceConfig.search_results_include_description && backlogSources &&
+      !backlogSources.includes(source) && !tasks.some((task) => task.enrich_only)) continue;
     eligible.set(source, tasks);
   }
   let sourceIndex = state.lastSource ? order.indexOf(state.lastSource) : -1;

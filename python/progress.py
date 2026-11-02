@@ -11,6 +11,8 @@ request_kind = ContextVar('request_kind', default='search')
 
 
 def selected_detail(title, kwargs):
+    if any(re.search(pattern, title or '', re.I) for pattern in kwargs.get('detail_title_exclusions', [])):
+        return False
     patterns = kwargs.get('detail_title_patterns')
     return not patterns or any(re.search(pattern, title or '', re.I) for pattern in patterns)
 

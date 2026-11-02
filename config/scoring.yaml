@@ -6,7 +6,7 @@
 # The output is a FIT SCORE (0-100): how well the vacancy matches the profile.
 # It is NOT a probability of being hired.
 
-version: "2026-10-13.2"
+version: "2026-11-02.1"
 
 # Final score = sum(dimension score x weight). Weights must sum to 1.0.
 weights:
@@ -43,6 +43,68 @@ technical:
   # CAP/Node.js/BTP skills must not be needed to clear the Apply threshold.
   # This only uses skills actually held in the profile and found in a full ad.
   role_profiles:
+    cap:
+      label: "SAP CAP development"
+      title_any: ['\b(?:capm?|cloud application programming|sap cloud develop\w*)\b']
+      title_none: ['\b(?:functional|basis)\b']
+      required_skills: ["CAP", "Node.js"]
+      min_matches: 3
+      skills:
+        "CAP": 40
+        "Node.js": 25
+        "TypeScript": 20
+        "CDS": 10
+        "OData": 5
+    btp:
+      label: "SAP BTP architecture and development"
+      title_any: ['\b(?:btp|business technology platform)\b']
+      title_none: ['\b(?:functional|basis)\b']
+      required_skills: ["SAP BTP"]
+      min_matches: 3
+      skills:
+        "SAP BTP": 40
+        "Cloud Foundry": 20
+        "XSUAA": 20
+        "Destinations": 10
+        "SAP IAS": 10
+    cpi:
+      label: "SAP CPI integration"
+      title_any: ['\b(?:cpi|hci|integration|integratie|integrationsberater\w*)\b']
+      title_none: ['\bfunctional\b']
+      required_skills: ["SAP CPI"]
+      min_matches: 3
+      skills:
+        "SAP CPI": 40
+        "SAP Integration Suite": 25
+        "REST": 10
+        "OAuth": 10
+        "OData": 10
+        "Destinations": 5
+    integration_suite:
+      label: "SAP Integration Suite"
+      title_any: ['\b(?:integration|integratie|integrationsberater\w*)\b']
+      title_none: ['\bfunctional\b']
+      required_skills: ["SAP Integration Suite"]
+      min_matches: 3
+      skills:
+        "SAP Integration Suite": 40
+        "SAP CPI": 25
+        "REST": 10
+        "OAuth": 10
+        "OData": 10
+        "Destinations": 5
+    sap_ai:
+      label: "SAP AI development"
+      title_any: ['\b(?:sap (?:business ai|ai|joule|generative ai)|joule)\b']
+      title_none: ['\bfunctional\b']
+      required_skills: ["SAP AI Core"]
+      min_matches: 3
+      skills:
+        "SAP AI Core": 35
+        "Generative AI Hub": 25
+        "Node.js": 15
+        "TypeScript": 15
+        "RAG": 10
     ui5:
       label: "SAPUI5 frontend"
       title_any: ["\\b(?:sapui5|ui5|fiori)\\b"]

@@ -8,6 +8,7 @@ import { activeCooldowns, sourceResumeTimes } from '../collector/health.js';
 import { vacancyRelevance } from '../matching/relevance.js';
 import { jobText } from '../matching/signals.js';
 import { loadConfig } from '../config/index.js';
+import { extractCountry } from '../normalize/index.js';
 
 export interface WeeklySearch {
   task: CollectorTask;
@@ -117,7 +118,7 @@ export function weeklyTasks(config: AppConfig, state: WeeklyState, skip: Map<str
   for (const search of pending.sort((a, b) => a.visits - b.visits)) {
     const group = groups.get(search.task.source) ?? []; group.push(search); groups.set(search.task.source, group);
   }
-  if (groups.has('linkedin')) groups.set('linkedin', prioritizeLinkedin(state.searches, groups.get('linkedin')!));
+  for (const [source, group] of groups) groups.set(source, prioritizeSearches(state.searches, group));
   const selected: CollectorTask[] = [];
   const capacity = Math.min(18, config.searches.resilience.max_tasks_per_run);
   let linkedin = 0;
@@ -141,19 +142,40 @@ export function weeklyTasks(config: AppConfig, state: WeeklyState, skip: Map<str
 }
 
 /** Primary family/region heads precede aliases and backfill. Count only verified visits. */
-function prioritizeLinkedin(all: WeeklySearch[], pending: WeeklySearch[]): WeeklySearch[] {
+function prioritizeSearches(all: WeeklySearch[], pending: WeeklySearch[]): WeeklySearch[] {
   const family = (s: WeeklySearch) => /\bbtp\b/i.test(s.task.search_term) ? 'btp' : /\bcapm?\b|cloud application programming/i.test(s.task.search_term) ? 'cap' :
     /ui5|fiori/i.test(s.task.search_term) ? 'ui5' : /cpi|integration/i.test(s.task.search_term) ? 'integration' : 'other';
   const region = (s: WeeklySearch) => /emirates|dubai|abu dhabi|saudi|riyadh|jeddah|eastern province|qatar|kuwait|bahrain|oman/i.test(s.task.location ?? '') ? 'gcc' : 'eu-other';
   const bucket = (s: WeeklySearch) => `${family(s)}:${region(s)}`;
-  const primary = (s: WeeklySearch) => /^(?:"?sap (?:cap|btp|cpi|integration suite|fiori)"?|"?sapui5"?)(?:\s+(?:NOT|-).*)?$/i.test(s.task.search_term);
-  const tier = (s: WeeklySearch) => s.checked ? 2 : primary(s) ? 0 : 1;
+  const primary = (s: WeeklySearch) => /^(?:"?sap(?: (?:cap|btp|cpi|integration suite|fiori|business ai|ai core|joule))?"?|"?sapui5"?)(?:\s+(?:NOT|-).*)?$/i.test(s.task.search_term);
+  // Sorting revisits each query many times. Resolve geography and patterns once
+  // per query instead of reparsing country names in every comparison.
+  const metadata = new Map<WeeklySearch, { bucket: string; geography: string; tier: number }>();
+  const info = (s: WeeklySearch) => {
+    let value = metadata.get(s);
+    if (!value) {
+      value = { bucket: bucket(s), geography: s.task.country_indeed ?? extractCountry(s.task.location) ?? s.task.location ?? 'all',
+        tier: s.checked ? 2 : primary(s) ? 0 : 1 };
+      metadata.set(s, value);
+    }
+    return value;
+  };
   const counts = new Map<string, number>();
-  for (const s of all.filter((s) => s.task.source === 'linkedin' && s.checked)) counts.set(bucket(s), (counts.get(bucket(s)) ?? 0) + 1);
+  const geographies = new Map<string, number>();
+  const checked = (s: WeeklySearch) => {
+    const value = info(s);
+    counts.set(value.bucket, (counts.get(value.bucket) ?? 0) + 1);
+    geographies.set(value.geography, (geographies.get(value.geography) ?? 0) + 1);
+  };
+  for (const s of all.filter((s) => s.task.source === pending[0]?.task.source && s.checked)) checked(s);
   const remaining = [...pending], result: WeeklySearch[] = [];
   while (remaining.length) {
-    remaining.sort((a, b) => tier(a) - tier(b) || (counts.get(bucket(a)) ?? 0) - (counts.get(bucket(b)) ?? 0) || a.visits - b.visits);
-    const next = remaining.shift()!; result.push(next); counts.set(bucket(next), (counts.get(bucket(next)) ?? 0) + 1);
+    remaining.sort((a, b) => {
+      const left = info(a), right = info(b);
+      return left.tier - right.tier || (counts.get(left.bucket) ?? 0) - (counts.get(right.bucket) ?? 0) ||
+        (geographies.get(left.geography) ?? 0) - (geographies.get(right.geography) ?? 0) || a.visits - b.visits;
+    });
+    const next = remaining.shift()!; result.push(next); checked(next);
   }
   return result;
 }

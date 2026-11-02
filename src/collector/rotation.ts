@@ -12,6 +12,12 @@ import { jobText } from '../matching/signals.js';
 
 const ACTIVITY_REFRESH_MS = 24 * 3_600_000;
 
+function activityRefreshDue(listing: any, at: Date): boolean {
+  const lastCheck = Math.max(...[listing.activityAttemptedAt, listing.activityCheckedAt, listing.firstSeenAt]
+    .filter(Boolean).map((value: string) => new Date(value).getTime()));
+  return at.getTime() - lastCheck >= ACTIVITY_REFRESH_MS;
+}
+
 const stateSchema = z.object({
   enrichmentScanByScope: z.record(z.string(), z.string()).optional(),
   lastSource: z.string().nullable(),
@@ -48,7 +54,16 @@ export async function reserveBatchPlan(config: AppConfig, options: PlanOptions =
       }
     }
     timings.readRotation = Math.round(performance.now() - checkpoint); checkpoint = performance.now();
-    const plan = planBatch(config, { ...options, ...(!options.searchTasks ? { batchKey } : {}), descriptionRotation: previous,
+    const apiSources = Object.entries(config.searches.sources).filter(([, source]) =>
+      source.search_results_include_description && source.supports_backlog_enrichment).map(([source]) => source);
+    const at = options.at ?? new Date();
+    const apiListings = apiSources.length ? await tx.run(SELECT.from(db().SourceListings)
+      .columns('source', 'hasDescription', 'firstSeenAt', 'activityAttemptedAt', 'activityCheckedAt', 'activityState', 'validThrough')
+      .where({ source: { in: apiSources } })) : [];
+    const descriptionBacklogSources = [...new Set<string>(apiListings.filter((listing: any) => {
+      return !listingIsClosed(listing, at) && (!listing.hasDescription || activityRefreshDue(listing, at));
+    }).map((listing: any) => listing.source))];
+    const plan = planBatch(config, { ...options, descriptionBacklogSources, ...(!options.searchTasks ? { batchKey } : {}), descriptionRotation: previous,
       globalLinkedin: options.globalLinkedin ?? (!options.batchKey && !options.onlySources?.length) });
     timings.plan = Math.round(performance.now() - checkpoint); checkpoint = performance.now();
     for (const tasks of plan.tasksBySource.values()) for (const task of tasks) {
@@ -193,11 +208,7 @@ async function reserveEnrichment(tx: any, config: AppConfig, plan: PlannedBatch,
         const refresh = Boolean(described.get(job.ID));
         const old = new Date(listing.lastSeenAt).getTime() < cutoff ||
           Boolean(job.datePosted && new Date(job.datePosted).getTime() < cutoff);
-        if (refresh) {
-          const lastCheck = Math.max(...[listing.activityAttemptedAt, listing.activityCheckedAt, listing.firstSeenAt]
-            .filter(Boolean).map((value) => new Date(value).getTime()));
-          if (at.getTime() - lastCheck < ACTIVITY_REFRESH_MS) continue;
-        } else if (old && !pending.has(job.ID)) continue;
+        if (refresh ? !activityRefreshDue(listing, at) : old && !pending.has(job.ID)) continue;
         const raw = collectorJobSchema.parse(JSON.parse(listing.rawRecord));
         task.detail_jobs.push({ ...raw, job_url: listing.rawUrl ?? listing.canonicalUrl,
           ...(!refresh ? { description: null } : {}),

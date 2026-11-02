@@ -150,6 +150,20 @@ describe('local dashboard controls', () => {
     expect(await queryOne(SELECT.from(db().SourceHealth).where({ source: 'linkedin' }))).toMatchObject({ lastHttpStatus: 200,
       lastRequestAt: new Date(at.getTime() + 8 * 3_600_000).toISOString() });
   });
+  it('keeps fresh API descriptions out of the detail budget while retaining due activity refreshes', async () => {
+    await ingestReview({ id: 'api-description', job_url: 'https://remotive.com/remote-jobs/software-dev/sap-btp-123' }, 'remotive');
+    const options = { batchKey: 'sap-public', onlySources: ['remotive'] };
+    const fresh = await reserveBatchPlan(loadConfig(), options);
+    expect(fresh.tasksBySource.get('remotive')!.some(task => task.fetch_description)).toBe(false);
+    const old = new Date(Date.now() - 2 * 24 * 3_600_000).toISOString();
+    await cds.run(UPDATE(db().SourceListings).set({ firstSeenAt: old, activityCheckedAt: old }).where({ source: 'remotive' }));
+    const stale = await reserveBatchPlan(loadConfig(), options);
+    expect(stale.tasksBySource.get('remotive')!.some(task => task.fetch_description)).toBe(true);
+    expect(stale.tasksBySource.get('remotive')!.flatMap(task => task.detail_jobs ?? []))
+      .toEqual([expect.objectContaining({ activity_refresh: true })]);
+    expect(runCollector).not.toHaveBeenCalled(); expect(fetch).not.toHaveBeenCalled();
+  });
+
   it('shows missing descriptions separately from negative recommendations and enriches target roles first', async () => {
     const ids = [];
     for (const [index, title] of ['SAP BTP Architect', 'SAP BTP / WorkZone / Fiori Developer - IT Contracting',
@@ -163,6 +177,25 @@ describe('local dashboard controls', () => {
     expect(plan.tasksBySource.get('linkedin')!.flatMap((task) => task.detail_jobs ?? []).every((row) => /SAP/.test(row.title!))).toBe(true);
     expect(fetch).not.toHaveBeenCalled();
   });
+  it('checks distinct primary families before contract-board aliases without losing later queries', () => {
+    const config = structuredClone(loadConfig());
+    config.searches.resilience.max_tasks_per_run = 1;
+    const state = createWeeklyState(config);
+    state.searches = state.searches.filter(search => search.task.source === 'hays');
+    const terms: string[] = [];
+    for (let cycle = 0; cycle < state.searches.length; cycle++) {
+      const tasks = weeklyTasks(config, state, new Map());
+      expect(tasks).toHaveLength(1);
+      terms.push(tasks[0]!.search_term);
+      const search = state.searches.find(search => search.task.task_id === tasks[0]!.task_id)!;
+      search.checked = true; search.visits++; search.state = 'exhausted';
+    }
+    expect(terms.slice(0, 5)).toEqual(expect.arrayContaining(['SAP CAP', 'SAP BTP', 'SAPUI5', 'SAP CPI', 'SAP Business AI']));
+    expect(new Set(terms).size).toBe(state.searches.length);
+    expect(terms).toContain('SAP Cloud Developer');
+    expect(weeklyTasks(config, state, new Map())).toEqual([]);
+  });
+
   it('plans the full weekly catalogue in bounded cycles with fixed dates and explicit date uncertainty', () => {
     const config = loadConfig(), began = new Date('2026-10-19T12:00:00Z');
     const weekly = createWeeklyState(config, began);

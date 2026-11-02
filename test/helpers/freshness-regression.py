@@ -38,6 +38,15 @@ class Frame:
 
 
 class FreshnessRegression(unittest.TestCase):
+    def test_description_selection_resolves_sap_titles_without_spending_on_excluded_titles(self):
+        from progress import selected_detail
+        options = {'detail_title_patterns': [r'\bsap\b.*\bdeveloper\b'],
+                   'detail_title_exclusions': [r'\b(?:intern|working student)\b']}
+        self.assertTrue(selected_detail('SAP Cloud Developer', options))
+        self.assertFalse(selected_detail('SAP BTP Developer Intern', options))
+        self.assertFalse(selected_detail('Finance Chapter Intern', options))
+        self.assertFalse(selected_detail('Salesforce Developer', options))
+
     def collect(self, blocked=False, source='linkedin', request_limit=3, head_only=None):
         events, requests, enrichment = [], [], []
 
