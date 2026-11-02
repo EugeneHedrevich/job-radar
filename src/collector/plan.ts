@@ -80,7 +80,7 @@ export function planBatch(config: AppConfig, options: PlanOptions = {}): Planned
 
   const skipped: PlannedBatch['skipped'] = [];
   for (const source of options.onlySources ?? []) {
-    if (!batch.targets[source]?.length) {
+    if (!options.searchTasks && !batch.targets[source]?.length) {
       const available = batches.filter((candidate) => candidate.targets[source]?.length).map((candidate) => candidate.key);
       skipped.push({ source, reason: `not in batch "${batch.key}"; use --batch ${available.join(' or ')}` });
     }

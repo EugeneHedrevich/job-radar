@@ -3,6 +3,7 @@ import sys
 import types
 import unittest
 import importlib.util
+import json
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -419,6 +420,111 @@ class LinkedInHttpRegression(unittest.TestCase):
                 self.assertEqual(counts['requests'], 1)
                 response.iter_content.assert_called_once_with(None)
                 response.close.assert_called_once()
+
+
+class ContractBoardRegression(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        from pathlib import Path
+        cls.pages = json.loads((Path(__file__).parents[1] / 'fixtures/market-pages.json').read_text())
+
+    def test_search_parsing_and_public_pagination(self):
+        from public_sources import parse_search, search_url, PUBLIC_SOURCES
+        self.assertEqual(search_url('nofluffjobs', 'SAP', None, 1), 'https://nofluffjobs.com/pl/sap')
+        for source, count in [('hays', 2), ('freelancede', 2), ('justjoin', 1)]:
+            with self.subTest(source=source):
+                rows, more = parse_search(source, self.pages[source]['search'], PUBLIC_SOURCES[source][0])
+                self.assertEqual(len(rows), count)
+                self.assertTrue(more)
+                self.assertTrue(all(row['id'] and row['job_url'].startswith('https://') for row in rows))
+        from market_sources import jobserve_form
+        with self.assertRaisesRegex(RuntimeError, 'blocked'):
+            jobserve_form(self.pages['jobserve']['search'], 'SAP')
+        with self.assertRaisesRegex(ValueError, 'pagination'):
+            parse_search('freelancede', self.pages['freelancede']['search'], PUBLIC_SOURCES['freelancede'][0], 2)
+
+    def test_original_pay_and_contract_variants(self):
+        from market_sources import join_row, engagement, date_value
+        self.assertEqual(date_value('2026-10-27T10:25:00Z'), '2026-10-27T10:25:00Z')
+        self.assertEqual(date_value('Tue Oct 27 11:25:00 CET 2026'), '2026-10-27T11:25:00+01:00')
+        row = join_row(self.pages['justjoin']['record'])
+        self.assertEqual((row['job_type'], row['min_amount'], row['max_amount'], row['currency'], row['interval']),
+                         ('contract', 180, 220, 'PLN', 'hourly'))
+        self.assertEqual(row['source_facts']['salary_basis'], 'net')
+        self.assertEqual(len(row['source_facts']['employment_terms']), 2)
+        from market_sources import polish_card_pay
+        for card, interval, basis in [('B2B 150 – 175 PLN / godz.', 'hourly', 'net'),
+                                      ('B2B 1 400 – 1 550 PLN / dzień', 'daily', 'net'),
+                                      ('UoP 13 000 – 18 000 PLN / mies.', 'monthly', 'gross')]:
+            with self.subTest(card=card):
+                stated = {}; polish_card_pay(stated, card)
+                self.assertEqual(stated['interval'], interval)
+                self.assertEqual(stated['source_facts']['salary_basis'], basis)
+        for label, expected in [('freiberuflich für ein Projekt', 'contract'),
+                                ('Festanstellung durch unseren Kunden', 'fulltime'),
+                                ('Arbeitnehmerüberlassung', 'employee_leasing'),
+                                ('Freiberuflich/in temporärer Festanstellung für ein Projekt', None)]:
+            with self.subTest(label=label):
+                self.assertEqual(engagement(label), expected)
+
+    def test_shared_detail_parser_and_restricted_excerpt(self):
+        from public_sources import hydrate, PUBLIC_SOURCES
+        for source in ('freelancermap', 'jobserve', 'freelancede', 'hays', 'justjoin', 'nofluffjobs'):
+            with self.subTest(source=source):
+                posting = {'@type': 'JobPosting', 'title': 'SAP Cloud Developer', 'datePosted': '2026-10-20',
+                           'description': 'SAP CAP and Node.js development. English required. Remote within Poland only.',
+                           'employmentType': 'CONTRACTOR', 'jobLocationType': 'TELECOMMUTE',
+                           'applicantLocationRequirements': {'name': 'Poland'}}
+                body = '<h1>SAP Cloud Developer</h1><script type="application/ld+json">'+json.dumps(posting)+'</script>'
+                row = hydrate(source, {'job_url': PUBLIC_SOURCES[source][0]+'/job/example-123'}, body, 'markdown')
+                self.assertIn('Candidate required location: Poland', row['description'])
+                self.assertEqual(row['job_type'], 'contract')
+                self.assertEqual(row['date_posted'], '2026-10-20')
+                if source == 'nofluffjobs':
+                    from market_sources import polish_card_pay
+                    card = {'job_url': PUBLIC_SOURCES[source][0]+'/pl/job/example-123'}
+                    polish_card_pay(card, 'B2B 150 – 175 PLN / godz.')
+                    changed = hydrate(source, card, body.replace('CONTRACTOR', 'FULL_TIME'), 'markdown')
+                    self.assertEqual((changed['job_type'], changed['interval'], changed['min_amount']), ('contract', 'hourly', 150))
+                if source == 'freelancede':
+                    row = hydrate(source, {'job_url': PUBLIC_SOURCES[source][0]+'/projekte/projekt-123-SAP'},
+                                  body+'<div class="panel-body"><div class="teaser">Public excerpt</div></div>', 'markdown')
+                    self.assertIsNone(row['description'])
+                    self.assertEqual(row['source_facts']['description_status'], 'partial_requires_account')
+
+    def test_shared_resume_and_stop_on_http_failure(self):
+        from pathlib import Path
+        from unittest.mock import patch
+        import requests
+        from public_sources import scrape_public
+        cards = self.pages['hays']['search']
+        kwargs = {'site_name': ['hays'], 'search_term': 'SAP BTP', 'results_wanted': 1,
+                  'hours_old': 2160, 'fetch_description': False, 'search_page_limit': 1}
+        with patch('public_sources.search_page', return_value=cards) as fetch:
+            first, error = scrape_public(kwargs)
+            self.assertIsNone(error)
+            self.assertEqual(len(first), 1)
+            cursor = kwargs['next_cursor']
+            resumed, error = scrape_public({**kwargs, 'search_cursor': cursor})
+            self.assertIsNone(error)
+            self.assertEqual(len(resumed), 2)  # Fresh head and saved within-page tail share one response.
+            self.assertEqual(fetch.call_count, 2)
+        for code in (403, 429, 503):
+            with self.subTest(status=code):
+                response = requests.Response(); response.status_code = code
+                failure = requests.HTTPError(f'HTTP {code}', response=response)
+                with patch('public_sources.search_page', side_effect=failure) as fetch:
+                    rows, error = scrape_public(dict(kwargs))
+                self.assertIs(error, failure)
+                self.assertEqual(rows, [])
+                self.assertEqual(fetch.call_count, 1)
+        streamed = []
+        with patch('public_sources.search_page', return_value=cards), patch('public_sources.fetch', side_effect=AssertionError('Excluded records must not fetch details')):
+            rows, error = scrape_public({**kwargs, 'fetch_description': True, 'results_wanted': 25,
+                'requested_start': '2026-10-21T10:00:00Z', 'requested_end': '2026-10-22T10:00:00Z', 'on_record': streamed.append})
+        self.assertIsNone(error)
+        self.assertEqual(rows, [])
+        self.assertEqual(len(streamed), 2)
 
 
 if __name__ == '__main__':

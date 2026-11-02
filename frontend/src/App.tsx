@@ -121,7 +121,7 @@ function CollectionArea({ data, loading, error, retry }: {
         {source.lastSuccessfulCheck && <span className="muted small">Last verified check {date(source.lastSuccessfulCheck, true)}</span>}
         {source.cooldownUntil && <span className="small">Cooldown {new Date(source.cooldownUntil).getTime() > Date.now() ? 'until' : 'ended'} {date(source.cooldownUntil, true)}</span>}
         {source.lastMessage && <span className="muted small">{source.lastMessage}</span>}
-        {source.source === 'linkedin' && <span className="small">Shared window: {source.searchRequests} search / {source.detailRequests} detail requests
+        {source.source === 'linkedin' && <span className="small">Accounting window: {source.searchRequests} search / {source.detailRequests} detail requests · No search quota
           {source.reservedSearch + source.reservedDetail > 0 ? ` · ${source.reservedSearch + source.reservedDetail} reserved` : ''}
           {source.lastRequestAt ? ` · Latest request ${source.lastHttpStatus ? `HTTP ${source.lastHttpStatus}` : 'without a verified response'} at ${date(source.lastRequestAt, true)}` : ''}
           {source.recoveryPending ? ' · Cautious recovery' : ''}
@@ -132,7 +132,7 @@ function CollectionArea({ data, loading, error, retry }: {
       {data?.linkedinCoverage && <p className="muted small">LinkedIn: {data.linkedinCoverage.combinations} configured combinations ·
         up to {data.linkedinCoverage.slotsPerSequence} slots per {data.linkedinCoverage.sequenceHours} hours before cooldowns ·
         {data.linkedinCoverage.checkedWithinWindow}/{data.linkedinCoverage.combinations} had first-page checks in the last {data.linkedinCoverage.freshnessHours} hours.
-        {data.linkedinCoverage.combinations > data.linkedinCoverage.slotsPerSequence ? ' A single sequence cannot cover every combination.' : ' Shared limits and cooldowns can reduce these slots.'}</p>}
+        {data.linkedinCoverage.combinations > data.linkedinCoverage.slotsPerSequence ? ' A single sequence cannot cover every combination.' : ' Source locks and cooldowns can reduce these slots.'}</p>}
       </div>
     </details>
   </section>;
@@ -429,7 +429,7 @@ export default function App() {
       {notice && <div className="notice" role="status">{notice}<button className="text-button" onClick={() => setNotice(null)} aria-label="Dismiss import result">×</button></div>}
       {linkedin?.cooldownUntil && new Date(linkedin.cooldownUntil).getTime() > Date.now() && <p className="warning small">
         LinkedIn paused until {date(linkedin.cooldownUntil, true)} · {linkedin.lastMessage ?? linkedin.lastStatus}
-        {' '}· {linkedin.searchRequests} search / {linkedin.detailRequests} detail requests in the shared window.</p>}
+        {' '}· {linkedin.searchRequests} search / {linkedin.detailRequests} detail requests in the accounting window.</p>}
       <CollectionProgress operation={progressOperation} error={collection.error} starting={collection.starting}
         onContinue={() => { if (progressOperation) void collection.start('weekly', progressOperation.ID); }}>
         <CollectionArea data={diagnostics.data} loading={diagnostics.loading} error={diagnostics.error} retry={refresh} />

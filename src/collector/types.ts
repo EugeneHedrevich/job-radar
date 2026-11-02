@@ -22,6 +22,7 @@ export const collectorJobSchema = z.object({
   description: z.string().nullable().optional(),
   company_industry: z.string().nullable().optional(),
   company_url: z.string().nullable().optional(),
+  source_facts: z.record(z.string(), z.unknown()).nullable().optional(),
 });
 export type CollectorJob = z.infer<typeof collectorJobSchema>;
 
@@ -68,6 +69,8 @@ export const collectorLineSchema = z.discriminatedUnion('type', [
     error_kind: z.enum(['rate_limit', 'blocked', 'timeout', 'network', 'error', 'parse']).optional(),
     message: z.string().optional(),
     count: z.number(),
+    parsed_candidates: z.number().int().nonnegative().optional(),
+    duplicate_candidates: z.number().int().nonnegative().optional(),
     head_checked: z.boolean().optional(),
     coverage: z.enum(['exhausted', 'incomplete', 'unknown']).optional(),
     coverage_reason: z.string().optional(),
@@ -106,6 +109,8 @@ export interface CollectorTask {
   search_cursor?: SearchCursor;
   detail_request_limit?: number;
   search_request_limit?: number;
+  /** Public adapter page slots; redirects are additional measured HTTP requests. */
+  search_page_limit?: number;
   /** Stored listings for enrichment or activity refresh within the same budget. */
   detail_jobs?: Array<CollectorJob & { activity_refresh?: boolean }>;
   enrich_only?: boolean;
@@ -126,6 +131,8 @@ export interface TaskOutcome {
   /** False when the source worker never started this task. */
   executed?: boolean;
   resultCount: number;
+  parsedCandidates?: number;
+  duplicateCandidates?: number;
   durationMs: number;
   errorKind?: ErrorKind;
   message?: string;

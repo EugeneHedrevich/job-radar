@@ -16,7 +16,8 @@ import requests
 from markdownify import markdownify
 from activity import expired, http_closure, observe, page_closure
 from progress import SearchProgress, observed_request, request_kind, detail_phase, selected_detail
-from transport import request_kwargs
+from transport import request_kwargs, safe_message
+from market_sources import MARKET_SOURCES
 
 from sap_sources import (MAX_DETAIL_REQUESTS_PER_TASK, MAX_SEARCH_PAGES, REQUEST_TIMEOUT_SECONDS,
                          applicant_location, job_posting, job_type, location, page_soup, published_date, text)
@@ -31,6 +32,7 @@ MICHAEL_MARKETS = {
     "United Arab Emirates": "https://www.michaelpage.ae",
 }
 PUBLIC_SOURCES = {
+    **MARKET_SOURCES,
     "michaelpage": (MICHAEL_MARKETS["Poland"], "Michael Page"),
     "nextventures": ("https://next-ventures.com", "Next Ventures"),
     "remotive": ("https://remotive.com", "Remotive"),
@@ -48,20 +50,29 @@ def safe_public_url(source: str, href: str, base: str | None = None) -> str:
     if source == "arbeitnow":
         allowed |= {"www.arbeitnow.co.uk", "www.arbeitnow.ch", "www.arbeitnow.fr"}
         allowed |= {host.removeprefix('www.') for host in tuple(allowed)}
+    if source == 'jobserve':
+        allowed.add('it.jobserve.com')
     if parsed.scheme != "https" or parsed.hostname not in allowed or parsed.username or parsed.password or parsed.port not in {None, 443}:
         raise ValueError(f"Unexpected {source} listing URL (host={parsed.hostname}, path={parsed.path})")
     if source == 'arbeitnow' and not parsed.path.startswith('/jobs/'):
         raise ValueError('Unexpected arbeitnow listing path; API pagination URLs are not listing URLs')
-    query = urlencode([(key, value) for key, value in parse_qsl(parsed.query)
+    query = urlencode([(key, value) for key, value in parse_qsl(parsed.query, keep_blank_values=True)
                        if not key.lower().startswith("utm_") and key.lower() not in {"tracking", "trk", "newsletter", "source"}])
     return urlunparse(parsed._replace(query=query, fragment=""))
 
 
 @lru_cache(maxsize=64)
 def fetch(url: str) -> str:
-    response = observed_request(requests.get, request_kind.get(), url, timeout=REQUEST_TIMEOUT_SECONDS, **request_kwargs())
+    response = observed_request(public_session(urlparse(url).hostname).get, request_kind.get(), url, timeout=REQUEST_TIMEOUT_SECONDS, **request_kwargs())
     response.raise_for_status()
     return response.text
+
+
+@lru_cache(maxsize=16)
+def public_session(host: str) -> requests.Session:
+    # Ephemeral public cookies, never account cookies. Verification/proxy options
+    # still come from the same request_kwargs at each existing HTTP call site.
+    return requests.Session()
 
 
 def market_root(market: str | None) -> str:
@@ -70,7 +81,40 @@ def market_root(market: str | None) -> str:
     return MICHAEL_MARKETS[market]
 
 
+def search_page(source: str, keyword: str, market: str | None, page: int) -> str:
+    if source == 'jobserve':
+        from market_sources import jobserve_form
+        head = search_url(source, keyword, market, 1)
+        if page > 1:
+            raise ValueError('JobServe continuation unavailable without a verified public next-page link')
+        url, method, fields = jobserve_form(fetch(head), keyword)
+        session = public_session(urlparse(head).hostname)
+        response = observed_request(session.post if method == 'post' else session.get, 'search', url,
+            **({'data': fields} if method == 'post' else {'params': fields}), timeout=REQUEST_TIMEOUT_SECONDS, **request_kwargs())
+        response.raise_for_status()
+        return response.text
+    if source == 'freelancede' and page > 1:
+        # The page number alone is not a reusable search endpoint. Get the
+        # current public search ID from the already-budgeted/cached head page.
+        soup = page_soup(fetch(search_url(source, keyword, market, 1)))
+        links = soup.select('.pagination a[href]')
+        link = next((link for link in links if text(link) == str(page)), None)
+        if link is None:
+            link = next((link for link in links if '_offset=' in link['href']), None)
+        if link is None:
+            raise ValueError('freelance.de has no verified continuation link')
+        url = safe_public_url(source, link['href'])
+        parsed = urlparse(url)
+        params = dict(parse_qsl(parsed.query, keep_blank_values=True))
+        params['_offset'] = str((page - 1) * 20)
+        return fetch(urlunparse(parsed._replace(query=urlencode(params))))
+    return fetch(search_url(source, keyword, market, page))
+
+
 def search_url(source: str, keyword: str, market: str | None, page: int) -> str:
+    if source in MARKET_SOURCES:
+        from market_sources import search_url as market_search_url
+        return market_search_url(source, keyword, market, page)
     if source == "michaelpage":
         return market_root(market) + "/jobs?" + urlencode({"search": keyword, "page": page - 1})
     path = "/jobs/" if page == 1 else f"/jobs/page/{page}/"
@@ -112,7 +156,10 @@ def stated_type(value: Any) -> str | None:
                  and (found := job_type(item) or mapping.get(item.strip().lower()))), None)
 
 
-def parse_search(source: str, html: str, root: str) -> tuple[list[dict[str, Any]], bool]:
+def parse_search(source: str, html: str, root: str, page: int = 1) -> tuple[list[dict[str, Any]], bool | None]:
+    if source in MARKET_SOURCES:
+        from market_sources import parse_search as parse_market
+        return parse_market(source, html, root, page)
     soup = page_soup(html)
     if source == "michaelpage":
         # The same card markup is reused for unrelated recommendations below
@@ -188,6 +235,9 @@ def apply_posting(row: dict[str, Any], posting: dict[str, Any]) -> None:
 
 
 def hydrate(source: str, row: dict[str, Any], html: str, description_format: str) -> dict[str, Any]:
+    if source in MARKET_SOURCES:
+        from market_sources import hydrate as hydrate_market
+        return hydrate_market(source, row, html, description_format)
     soup = page_soup(html)
     posting = job_posting(soup) or {}
     closure = page_closure(row, soup, posting)
@@ -314,6 +364,7 @@ def scrape_public(kwargs: dict[str, Any]) -> tuple[list[dict[str, Any]], BaseExc
     import json
     source = kwargs["site_name"][0]
     progress = SearchProgress(kwargs)
+    kwargs['coverage_reason'] = 'Bounded page/request allowance reached; continuation retained'
     wanted = max(1, int(kwargs.get("results_wanted", 25)))
     cutoff = (datetime.now(timezone.utc) - timedelta(hours=int(kwargs.get("hours_old", 96)))).date().isoformat()
     if kwargs.get('requested_start'):
@@ -322,6 +373,7 @@ def scrape_public(kwargs: dict[str, Any]) -> tuple[list[dict[str, Any]], BaseExc
     rows: list[dict[str, Any]] = []
     seen: set[str] = set()
     detail_requests = 0
+    detail_limit = max(0, min(MAX_DETAIL_REQUESTS_PER_TASK, int(kwargs.get('detail_request_limit', MAX_DETAIL_REQUESTS_PER_TASK))))
     failure: BaseException | None = None
     def invalid(row, reason):
         kwargs['candidate_errors'] = kwargs.get('candidate_errors', 0) + 1
@@ -329,6 +381,10 @@ def scrape_public(kwargs: dict[str, Any]) -> tuple[list[dict[str, Any]], BaseExc
         if kwargs.get('on_candidate_error'):
             kwargs['on_candidate_error'](row, reason)
     closures: list[dict[str, Any]] = []
+    def stopped(exc):
+        kwargs['coverage'] = 'incomplete'
+        kwargs['coverage_reason'] = 'Collection stopped: ' + safe_message(exc)[:1400]
+        return rows + closures, exc
     def stream(row):
         if kwargs.get("on_record"):
             kwargs["on_record"](row)
@@ -350,7 +406,7 @@ def scrape_public(kwargs: dict[str, Any]) -> tuple[list[dict[str, Any]], BaseExc
             if closure:
                 return closure
             raise
-    for row in kwargs.get("detail_jobs", [])[:min(wanted, MAX_DETAIL_REQUESTS_PER_TASK)]:
+    for row in kwargs.get("detail_jobs", [])[:min(wanted, detail_limit)]:
         try:
             updated = detail(row)
             seen.add(updated["job_url"])
@@ -360,28 +416,46 @@ def scrape_public(kwargs: dict[str, Any]) -> tuple[list[dict[str, Any]], BaseExc
         except ValueError as exc:
             failure = failure or exc
         except Exception as exc:
-            return rows + closures, exc
+            return stopped(exc)
     if kwargs.get("enrich_only"):
         return rows + closures, failure
     keyword = kwargs.get("search_term", "SAP")
     root = market_root(kwargs.get("location")) if source == "michaelpage" else PUBLIC_SOURCES[source][0]
     backfill_count = 0
-    for page in progress.pages(MAX_SEARCH_PAGES):
+    for page in progress.pages(max(1, min(MAX_SEARCH_PAGES, int(kwargs.get('search_page_limit', MAX_SEARCH_PAGES))))):
         try:
             if source in API_SOURCES:
                 candidates, more = parse_api(source, json.loads(fetch(api_url(source, keyword, page))), keyword, fmt, invalid)
             else:
-                candidates, more = parse_search(source, fetch(search_url(source, keyword, kwargs.get("location"), page)), root)
+                candidates, more = parse_search(source, search_page(source, keyword, kwargs.get("location"), page), root, page)
         except Exception as exc:
-            return rows + closures, exc
+            return stopped(exc)
+        kwargs['parsed_candidates'] = kwargs.get('parsed_candidates', 0) + len(candidates)
         progress.checked_head(page)
         for row in progress.candidates(candidates, page):
             if row["job_url"] in seen:
+                kwargs['duplicate_candidates'] = kwargs.get('duplicate_candidates', 0) + 1
                 continue
             seen.add(row["job_url"])
-            if row.get("activity_status") != "closed" and not (row.get("date_posted") and row["date_posted"] < cutoff):
+            outside = row.get('date_posted') and row['date_posted'] < cutoff and not row.get('activity_refresh')
+            if row.get('date_posted') and kwargs.get('requested_start') and not row.get('activity_refresh'):
+                # Only skip details for provable exclusions. Date-only boundary
+                # days remain uncertain; Node applies the final frozen range.
+                posted = row['date_posted']
+                if kwargs.get('requested_end') and posted[:10] > kwargs['requested_end'][:10]:
+                    outside = True
+                try:
+                    instant = datetime.fromisoformat(posted.replace('Z', '+00:00'))
+                    if instant.tzinfo:
+                        outside = instant < datetime.fromisoformat(kwargs['requested_start'].replace('Z', '+00:00')) or bool(
+                            kwargs.get('requested_end') and instant > datetime.fromisoformat(kwargs['requested_end'].replace('Z', '+00:00')))
+                except ValueError:
+                    pass
+            if row.get("activity_status") != "closed" and (kwargs.get('requested_start') or not outside):
                 stream(row)
-            if kwargs.get("fetch_description") and source not in API_SOURCES and detail_requests < MAX_DETAIL_REQUESTS_PER_TASK and selected_detail(row.get('title'), kwargs):
+            if outside:
+                continue  # Keep frozen-range exclusions in diagnostics; do not buy their details.
+            if kwargs.get("fetch_description") and source not in API_SOURCES and detail_requests < detail_limit and selected_detail(row.get('title'), kwargs):
                 try:
                     row = detail(row)
                 except ValueError as exc:
@@ -389,7 +463,7 @@ def scrape_public(kwargs: dict[str, Any]) -> tuple[list[dict[str, Any]], BaseExc
                 except Exception as exc:
                     rows.append(row)
                     stream(row)
-                    return rows + closures, exc
+                    return stopped(exc)
                 stream(row)
             if keep(row):
                 rows.append(row)
@@ -397,8 +471,15 @@ def scrape_public(kwargs: dict[str, Any]) -> tuple[list[dict[str, Any]], BaseExc
                 if not progress.fresh:
                     backfill_count += 1
             if not progress.fresh and backfill_count >= wanted:
+                kwargs['coverage_reason'] = 'Result budget reached; remaining cards retained in the page cursor'
                 return rows + closures, failure
+        if more is None:
+            kwargs['coverage'] = 'unknown'
+            kwargs['coverage_reason'] = 'Public cards parsed, but anonymous continuation/exhaustion could not be verified'
+            progress.save(1)
+            return rows + closures, failure
         progress.finish_page(page, more)
         if not more and not progress.fresh:
+            kwargs['coverage_reason'] = 'Verified final results page'
             break
     return rows + closures, failure

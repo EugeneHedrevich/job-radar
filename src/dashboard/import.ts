@@ -22,11 +22,15 @@ const inputSchema = z.object({ url: z.string().url().max(1000), title: z.string(
 const metadataSchema = z.object({ job: collectorJobSchema.nullable(), activity: listingActivitySchema.nullable(), message: z.string().max(2000),
   requests: z.number().int().min(0).max(3).nullable().optional(),
   failure: z.object({ kind: z.enum(['rate_limit', 'blocked', 'timeout', 'network', 'error', 'parse']),
-    message: z.string().max(2000), httpStatus: z.number().int().optional(), retryAfterSeconds: z.number().nonnegative().optional() }).nullable().optional() });
+    message: z.string().max(2000), httpStatus: z.number().int().optional(), httpStatusAt: z.string().datetime({ offset: true }).optional(),
+    retryAfterSeconds: z.number().nonnegative().optional() }).nullable().optional() });
 export type ImportMetadata = z.infer<typeof metadataSchema>;
 const pendingDetails = new Map<string, { url: string; metadata: ImportMetadata; expiresAt: number }>();
 
 const hosts: Record<string, string> = {
+  'freelancermap.com': 'freelancermap', 'jobserve.com': 'jobserve', 'freelance.de': 'freelancede',
+  'it.jobserve.com': 'jobserve',
+  'hays.de': 'hays', 'justjoin.it': 'justjoin', 'nofluffjobs.com': 'nofluffjobs',
   'redglobal.com': 'redglobal', 'eursap.eu': 'eursap', 'whitehallresources.com': 'whitehall',
   'next-ventures.com': 'nextventures', 'remotive.com': 'remotive', 'arbeitnow.com': 'arbeitnow',
   'arbeitnow.co.uk': 'arbeitnow', 'arbeitnow.ch': 'arbeitnow', 'arbeitnow.fr': 'arbeitnow',
@@ -45,7 +49,8 @@ function importUrl(value: string): { url: string; source: string } {
   if (/^(?:[a-z]{2}\.)?linkedin\.com$/.test(host)) source = 'linkedin';
   if (/^michaelpage\.(?:pl|de|nl|co\.uk|ch|fr|ae)$/.test(host)) source = 'michaelpage';
   // Use each adapter's configured public hostname; validation is repeated in Python.
-  if (['redglobal', 'whitehall', 'arbeitnow', 'michaelpage'].includes(source)) url.hostname = `www.${host}`;
+  if (['redglobal', 'whitehall', 'arbeitnow', 'michaelpage', 'freelancermap', 'jobserve', 'freelancede', 'hays'].includes(source) && host !== 'it.jobserve.com') url.hostname = `www.${host}`;
+  if (['justjoin', 'nofluffjobs'].includes(source)) url.hostname = host;
   url.hash = '';
   return { url: url.href, source };
 }
@@ -96,8 +101,8 @@ async function lookupWithHealth(source: string, url: string, lookup: (source: st
         countryIndeed: undefined, status: metadata.failure ? 'Failed' : 'Succeeded', resultCount: metadata.job ? 1 : 0,
         durationMs: Date.now() - startedAt.getTime(), errorKind: metadata.failure?.kind,
         message: metadata.failure?.message, retryAfterSeconds: metadata.failure?.retryAfterSeconds,
-        httpStatus: metadata.failure?.httpStatus,
-        detailRequests: metadata.requests ?? undefined }], new Date(), startedAt);
+        httpStatus: metadata.failure?.httpStatus, httpStatusAt: metadata.failure?.httpStatusAt,
+        searchRequests: 0, detailRequests: metadata.requests ?? undefined }], new Date(), startedAt);
     }
     return metadata;
   } finally { await settleSourceRequests(source, claim.token, 0, used); }

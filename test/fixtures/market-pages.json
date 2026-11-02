@@ -1,0 +1,64 @@
+{
+  "hays": {
+    "search": "<div class=\"search__result border-radius-10\"> <a class=\"search__result__link\" href=\"https://www.hays.de/jobsuche/stellenangebote-jobs-detail-sap-inhouse-consultant-baden-wuerttemberg-898889/1\" target=\"_blank\"></a> <div class=\"search__result__prospectnumber d-none\"> Referenznummer: 898889/1 </div> <div class=\"search__result__header\"> <h4 class=\"search__result__header__title\"> SAP Inhouse Consultant <span class=\"jospositiononly\"> (m/w/d) </span> </h4> </div> <div class=\"search__result__job__attributes d-md-flex\"> <div class=\"search__result__job__attribute search__result__job__attribute__type d-flex\"> <div class=\"file-icon black-icon\"></div> <div class=\"info-text\"> Festanstellung durch unseren Kunden </div> </div> <div class=\"search__result__job__attribute search__result__job__attribute__location d-flex\"> <div class=\"map-icon black-icon\"></div> <div class=\"info-text\"> Baden-Württemberg </div> </div> </div> <div class=\"search__result__content d-flex\"> <div class=\"col-12\"> <div class=\"row\"> </div> <div class=\"row\"> Online seit: Wed Oct 21 09:14:54 CEST 2026 </div> </div> </div> </div><div class=\"search__result border-radius-10\"> <a class=\"search__result__link\" href=\"https://www.hays.de/jobsuche/stellenangebote-jobs-detail-senior-developer-sap-btp-s-4hana-cloud-integration--muenchen-897473/1\" target=\"_blank\"></a> <div class=\"search__result__prospectnumber d-none\"> Referenznummer: 897473/1 </div> <div class=\"search__result__header\"> <h4 class=\"search__result__header__title\"> (Senior) Developer SAP BTP, S/4HANA &amp; Cloud Integration <span class=\"jospositiononly\"> (m/w/d) </span> </h4> </div> <div class=\"search__result__job__attributes d-md-flex\"> <div class=\"search__result__job__attribute search__result__job__attribute__type d-flex\"> <div class=\"file-icon black-icon\"></div> <div class=\"info-text\"> Freiberuflich für ein Projekt </div> </div> <div class=\"search__result__job__attribute search__result__job__attribute__location d-flex\"> <div class=\"map-icon black-icon\"></div> <div class=\"info-text\"> München </div> </div> </div> <div class=\"search__result__content d-flex\"> <div class=\"col-12\"> <div class=\"row\"> </div> <div class=\"row\"> Online seit: Mon Oct 12 10:50:32 CEST 2026 </div> </div> </div> </div><span id=\"totalJobs\">45 Ergebnisse</span>"
+  },
+  "freelancede": {
+    "search": "<div class=\"list-item-main\"> <h3 class=\"action-icons-overlap\"> <a class=\"\" href=\"/projekte/projekt-1292541-1083583-Integrationspartner-SAP-BTP\" id=\"project_link_1292541\"> 1083583 Integrationspartner SAP BTP </a> </h3> <div class=\"col-sm-8 no-padding-left\"> <div class=\"clearfix\"></div> <ul class=\"tags margin-top-sm\"> <li class=\"tag-primary\"></li> </ul> <div class=\"clearfix\"></div> </div> <div class=\"col-sm-4 no-padding-left overview\"> <ul class=\"icon-list\"> <li><i class=\"far fa-calendar-star fa-fw\"></i>Ab Januar 2027</li> <li><i class=\"far fa-history fa-fw\"></i>21.09.2026 12:17</li> </ul> </div> <div class=\"clearfix\"></div> </div><div class=\"list-item-main\"> <h3 class=\"action-icons-overlap\"> <a class=\"\" href=\"/projekte/projekt-1298134-SAP-Architektur-Berater-S-4HANA-SAP-BTP-SAP-Integration-Suite\" id=\"project_link_1298134\"> SAP-Architektur Berater (S/4HANA, SAP BTP, SAP Integration Sui... </a> </h3> <div class=\"col-sm-8 no-padding-left\"> <div class=\"clearfix\"></div> <ul class=\"tags margin-top-sm\"> <li class=\"tag-primary\"></li> </ul> <div class=\"clearfix\"></div> </div> <div class=\"col-sm-4 no-padding-left overview\"> <ul class=\"icon-list\"> <li><i class=\"far fa-calendar-star fa-fw\"></i>Ab November 2026</li> <li><i class=\"far fa-map-marker-alt fa-fw\"></i>Deutschland</li> <li><i class=\"far fa-laptop-house\" data-container=\"body\" data-original-title=\"Remote-Einsatz möglich\" data-toggle=\"tooltip\"></i>Remote</li> <li><i class=\"far fa-history fa-fw\"></i>23.10.2026 16:11</li> </ul> </div> <div class=\"clearfix\"></div> </div><nav class=\"nav-pagination\"><ul class=\"pagination\"><li class=\"active\">1</li><li><a href=\"/search/project.php?_offset=20&amp;search_id=fixture\">2</a></li></ul></nav>"
+  },
+  "justjoin": {
+    "search": "<script>self.__next_f.push([1, \"1:{\\\"offers\\\": [{\\\"slug\\\": \\\"epam-systems-lead-sap-cap-java-developer-warsaw-java\\\", \\\"guid\\\": \\\"1aadce3e-aa55-4936-b572-c7bdf5d5cd94\\\", \\\"title\\\": \\\"Lead SAP CAP Java Developer\\\", \\\"companyName\\\": \\\"EPAM Systems\\\", \\\"city\\\": \\\"Warsaw\\\", \\\"publishedAt\\\": \\\"2026-10-24T12:05:11.805369Z\\\", \\\"employmentTypes\\\": [{\\\"type\\\": \\\"b2b\\\", \\\"currencySource\\\": \\\"original\\\", \\\"currency\\\": \\\"PLN\\\", \\\"unit\\\": \\\"hour\\\", \\\"from\\\": 180, \\\"to\\\": 220, \\\"gross\\\": false}, {\\\"type\\\": \\\"permanent\\\", \\\"currencySource\\\": \\\"original\\\", \\\"currency\\\": \\\"PLN\\\", \\\"unit\\\": \\\"month\\\", \\\"from\\\": 18000, \\\"to\\\": 24000, \\\"gross\\\": true}, {\\\"type\\\": \\\"b2b\\\", \\\"currencySource\\\": \\\"conversion\\\", \\\"currency\\\": \\\"EUR\\\", \\\"unit\\\": \\\"hour\\\", \\\"from\\\": 42, \\\"to\\\": 52, \\\"gross\\\": false}], \\\"workplaceType\\\": \\\"remote\\\", \\\"requiredSkills\\\": [\\\"Java\\\", \\\"SAP CAP\\\", \\\"Spring Boot\\\", \\\"REST\\\", \\\"SQL\\\", \\\"JUnit\\\", \\\"Jenkins\\\", \\\"Git\\\", \\\"Karate\\\", \\\"Selenium\\\"]}]}\\n\"]);</script><a href=\"?keyword=SAP&amp;page=2\">Next</a>",
+    "record": {
+      "slug": "epam-systems-lead-sap-cap-java-developer-warsaw-java",
+      "guid": "1aadce3e-aa55-4936-b572-c7bdf5d5cd94",
+      "title": "Lead SAP CAP Java Developer",
+      "companyName": "EPAM Systems",
+      "city": "Warsaw",
+      "publishedAt": "2026-10-24T12:05:11.805369Z",
+      "employmentTypes": [
+        {
+          "type": "b2b",
+          "currencySource": "original",
+          "currency": "PLN",
+          "unit": "hour",
+          "from": 180,
+          "to": 220,
+          "gross": false
+        },
+        {
+          "type": "permanent",
+          "currencySource": "original",
+          "currency": "PLN",
+          "unit": "month",
+          "from": 18000,
+          "to": 24000,
+          "gross": true
+        },
+        {
+          "type": "b2b",
+          "currencySource": "conversion",
+          "currency": "EUR",
+          "unit": "hour",
+          "from": 42,
+          "to": 52,
+          "gross": false
+        }
+      ],
+      "workplaceType": "remote",
+      "requiredSkills": [
+        "Java",
+        "SAP CAP",
+        "Spring Boot",
+        "REST",
+        "SQL",
+        "JUnit",
+        "Jenkins",
+        "Git",
+        "Karate",
+        "Selenium"
+      ]
+    }
+  },
+  "jobserve": {
+    "search": "<html><head><title></title></head><body></body></html>"
+  }
+}

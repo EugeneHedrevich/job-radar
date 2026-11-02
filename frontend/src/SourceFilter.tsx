@@ -1,6 +1,8 @@
 import { useEffect, useId, useRef, useState, type KeyboardEvent } from 'react';
 
 const sourceNames: Record<string, string> = {
+  freelancermap: 'freelancermap', jobserve: 'JobServe', freelancede: 'freelance.de',
+  hays: 'Hays', justjoin: 'Just Join IT', nofluffjobs: 'No Fluff Jobs',
   linkedin: 'LinkedIn', indeed: 'Indeed', glassdoor: 'Glassdoor', redglobal: 'RED Global',
   eursap: 'Eursap', whitehall: 'Whitehall', michaelpage: 'Michael Page',
   nextventures: 'Next Ventures', remotive: 'Remotive', arbeitnow: 'Arbeitnow',

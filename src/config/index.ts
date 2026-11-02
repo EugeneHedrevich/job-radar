@@ -118,7 +118,6 @@ export const searchesSchema = z.object({
     max_detail_requests_per_run: z.number().int().nonnegative().default(5),
     max_search_requests_per_task: z.number().int().positive().default(3),
     window_minutes: z.number().positive().default(180),
-    max_search_requests_per_window: z.number().int().min(0).max(6).default(6),
     max_detail_requests_per_window: z.number().int().min(0).max(5).default(5),
   }).prefault({}),
   coverage: z.object({

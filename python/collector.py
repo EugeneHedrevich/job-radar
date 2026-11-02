@@ -63,6 +63,7 @@ FORWARDED_COLUMNS = [
     "description",
     "company_industry",
     "company_url",
+    "source_facts",
     "activity_status", "activity_reason", "activity_evidence", "activity_checked_at",
     "valid_through",
 ]
@@ -85,7 +86,7 @@ ALLOWED_TASK_PARAMS = {
     "enforce_annual_salary",
     "enrich_only",
     "head_only",
-    "detail_request_limit", "search_request_limit", "search_cursor",
+    "detail_request_limit", "search_request_limit", "search_page_limit", "search_cursor",
     "requested_start", "requested_end",
     "detail_title_patterns",
 }
@@ -114,6 +115,8 @@ def clean_value(value: Any) -> Any:
         return None
     if isinstance(value, (bool, int, str)):
         return value
+    if isinstance(value, dict):
+        return {str(key): clean_value(item) for key, item in value.items()}
     if isinstance(value, datetime):
         return value.isoformat()
     if isinstance(value, date):
@@ -484,6 +487,7 @@ def run_task(task: dict[str, Any], timeout_seconds: int, detail_cache=None) -> d
             **({"retry_after_seconds": upstream_failure[2]} if len(upstream_failure) > 2 and upstream_failure[2] is not None else {})}
            if upstream_failure else {}),
         "count": len(collected_urls),
+        **({key: kwargs[key] for key in ('parsed_candidates', 'duplicate_candidates') if key in kwargs}),
         "head_checked": bool(kwargs.get('head_checked')),
         "coverage": kwargs['coverage'],
         "candidate_errors": kwargs.get('candidate_errors', 0),

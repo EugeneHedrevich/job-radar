@@ -161,6 +161,8 @@ export async function runCollector(config: AppConfig, options: RunCollectorOptio
         status: record.status === 'succeeded' ? 'Succeeded' : record.status === 'skipped' ? 'Skipped' : 'Failed',
         executed: record.status !== 'skipped',
         resultCount: record.count,
+        parsedCandidates: record.parsed_candidates,
+        duplicateCandidates: record.duplicate_candidates,
         headChecked: Boolean(record.head_checked || checkedHeads.has(record.task_id)),
         coverage: record.coverage ?? 'unknown',
         quarantinedCandidates: record.candidate_errors ?? 0,

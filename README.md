@@ -293,7 +293,7 @@ actual client calls, response statuses and timestamps; unrelated titles alone do
 not establish that the provider ignored a query. Browser transport is unchanged.
 Latest request status is separate from historical failures. After a rate limit,
 one successful probe retains the streak and cautious one-request recovery mode;
-reset requires two successful visits and a full shared window since the last 429.
+reset requires two verified successful visits, without waiting for a request window.
 Retry-After and immediate stopping on 429/403/challenges still apply.
 
 Relevant cards without enough description evidence show **Awaiting description**
@@ -516,15 +516,15 @@ through a persisted catalogue cursor on subsequent available cycles, using spare
 capacity instead of waiting for their original batch to return. Broad “SAP CAP” and “SAPUI5”
 queries retain their skill wording; explicit Developer queries run separately. Identical
 effective queries, geographies and filters share a task. The configured sequence allows at most
-**80 LinkedIn search slots per 129 hours** before cooldowns/shared allowances, so some
+**98 LinkedIn search slots per 156 hours** before cooldowns and source contention, so some
 combinations wait beyond one sequence. Catalogue rotation avoids duplicate queries and repeats
 until the sweep wraps; diagnostics report observed first-page coverage rather than promising
 complete coverage. The LinkedIn freshness window is 168 hours
 to accommodate its slower sweep; other source windows are unchanged. Larger custom batches
 also rotate their postponed tail. Collection outcomes distinguish successful empty searches,
 partial results, all executed tasks failing (even with skipped tasks), and no available sources.
-The explicit **43-cycle / 129-hour** sequence repeats the broad priority and public catalogue
-batches within **57 hours**, inside the 120-hour freshness window. Rate limits and small caps
+The explicit **52-cycle / 156-hour** sequence repeats the broad priority and public catalogue
+batches within **72 hours**, inside the 120-hour freshness window. Rate limits and small caps
 can delay individual combinations and pages; complete vacancy coverage is not guaranteed.
 A global, persisted source cursor gives
 each of the five eligible description sources a slot within three priority cycles
@@ -660,18 +660,70 @@ Key behaviours driven by configuration:
   Manual additions remain allowed with a relevance warning. Runs record received,
   accepted and filtered records, with exclusion reasons; duplicate records are counted as
   received/accepted records while new/updated counts refer to distinct jobs.
-* **Shared LinkedIn allowance** — SQLite records six search and five detail requests in a
-  rolling three-hour window, configurable downwards in `linkedin_limits`. Collection,
-  CLI/enrichment and manual imports reserve the same allowance and source lease. Repeated
-  runs do not reset it. Actual usage releases unused reservations; interrupted/unknown
-  requests remain charged conservatively. Structured 429/403 failures and Retry-After
-  persist in source health. After cooldown, a recovery task uses one HTTP request total:
+* **Shared LinkedIn health** — Search has no time-window quota; accumulated search counters
+  are diagnostic only. The former `max_search_requests_per_window` setting is removed and
+  ignored in older configuration files. SQLite still counts searches and details in the
+  accounting window. `linkedin_limits.window_minutes` (180) and
+  `max_detail_requests_per_window` (5) now limit details only, across collection,
+  CLI/enrichment and manual imports. All entry points share the source lease and persisted
+  cooldown. Repeated runs do not reset detail usage; interrupted/unknown detail requests
+  remain charged conservatively. A 429 immediately stops LinkedIn I/O and defers saved
+  searches without exhausting or capping them. Other sources continue. Valid `Retry-After`
+  seconds or HTTP-date set the cooldown deadline, even when shorter than 120 minutes;
+  missing/invalid headers use configurable exponential backoff. A later existing deadline
+  is never shortened. Workers do not sleep through cooldowns. After cooldown, a recovery
+  task uses one HTTP request total:
   a search for collection or a detail for enrichment/imports. Another 429 pauses LinkedIn while other
   sources continue. Diagnostics show the pause, last failure and shared request counts.
   Proxy secrets remain in the environment. Public access is not guaranteed.
   Collection and manual lookups share the existing source lease for every provider,
   including retries. Query rotation advances only through tasks that actually execute;
   skipped combinations remain eligible for the next run.
+* **Contract boards** — `freelancermap`, `jobserve`, `freelancede`, `hays`, `justjoin` and
+  `nofluffjobs` use the existing public-source collector, source leases/cooldowns, page and
+  within-page cursors, normalizer, deduplication, enrichment and shared assessment policy.
+  They are also available in the source picker and manual URL import. No account sessions,
+  private APIs or challenge bypass are used. The adapters live in `python/market_sources.py`;
+  automatic and manual collection share the same detail parser. Raw `source_facts` retain
+  project references, contract alternatives, original pay units/currencies/net/gross basis,
+  work mode, location restrictions and public description excerpts. Remote alone never
+  establishes permission to work from Bulgaria.
+
+  Public endpoint verification on 27 October 2026:
+
+  | Source | Public collection path | Observed limitation |
+  | --- | --- | --- |
+  | [freelancermap](https://www.freelancermap.com/project-search) | HTML project search (`query`, `pagenr`); original project links/structured details | HTTP 403 in the collection environment; live parsing/pagination and default country filters unverified |
+  | [JobServe](https://www.jobserve.com/gb/en/Job-Search/) | Reads the UK public form's actual action/fields; structured public vacancy details | Empty HTTP 200 page without a usable form; collection unavailable. International country controls and continuation remain unverified. Saved RSS alerts require an account |
+  | [freelance.de](https://www.freelance.de/SAP%20BTP-Projekte) | Public skill-search cards and JSON-LD detail; follows published `_offset`/search-ID links | First page works; anonymous continuation redirects to the homepage, including with a public session/form. Coverage stays incomplete. Some descriptions are account-gated teasers |
+  | [Hays](https://www.hays.de/jobsuche/stellenangebote-jobs?q=SAP&page=1) | Public `q`/`page` HTML searches and JobPosting/DOM details | Different page-two records verified. Contracting, permanent employment and employee leasing remain distinct; project reference retained |
+  | [Just Join IT](https://justjoin.it/job-offers/all-locations?keyword=SAP&page=1) | Public numbered HTML pages, embedded offer JSON and JobPosting | Different page-two records verified. Original pay offers retained; converted display currencies excluded from scalar pay selection |
+  | [No Fluff Jobs](https://nofluffjobs.com/pl/sap) | Verified public SAP catalogue route; structured detail/card parsing | HTTP 403 in this environment; live parsing/pagination unverified. All aliases map to the broad SAP route and are deduplicated; no invented API/full-text filter |
+
+  Blocked or unexpected pages are reported as errors/unable to verify, never empty successful
+  searches or proof of closure. Partial records and cursors commit together. A public teaser
+  remains an incomplete description; it cannot become a confident assessment. Publication
+  timestamps and stated restrictions are retained when supplied; unknown fields stay unknown.
+
+  Five family batches of at most 12 tasks cover BTP, CAP/CAPM, UI5/Fiori, CPI/Integration Suite, SAP AI
+  and SAP Cloud Developer. Four extra broad priority visits favour freelancermap/JobServe.
+  Existing rotation entries remain present. With a three-hour scheduler the sequence is
+  **52 slots / 156 hours**: these two sources receive a slot at least every **24 hours**,
+  the other four at least every **42 hours**, before cooldowns/contention. A particular
+  family query recurs once per sequence; weekly UI searches use the existing faster bounded
+  continuation. Existing broad priority/public batches recur within **72 hours**. All
+  cycles retain the 18 search-task, two description-task, five AI-call and three Telegram-call
+  ceilings. HTTP requests include pagination/redirects and are counted separately from tasks.
+
+  Explicit live validation: `node --import tsx scripts/smoke-contract-sources.ts`.
+  It freezes a seven-day interval, spends at most two search-page slots and one detail lookup
+  per source (redirects count as additional HTTP requests), reuses normal ingestion and
+  health, and runs rules-only assessment. It never calls AI or notifications. The non-secret
+  report is saved to `data/contract-source-smoke.json`, including per-source requests,
+  parsed/emitted records, date/relevance exclusions, duplicates, new records and capacity
+  deferrals. Replayed previously saved candidates are reported separately. Existing
+  backlogs are preserved; inspection requests are separate from this collector smoke report.
+
 * **Description budget** — `description_budget.max_tasks_per_run` caps how many searches may
   fetch full descriptions (one extra HTTP request per job, and the fastest way to get
   blocked). A job without a description stays incomplete: it is shown and can be reviewed,
@@ -746,7 +798,7 @@ history. Legacy fallback caches are recognised without invalidating successful c
 ### Expanded public SAP coverage
 
 The `sap-public` batch searches six additional providers with a broad `SAP` query.
-It recurs within 57 hours in the rotation and uses 12 of the 18 allowed tasks.
+It recurs within 72 hours in the rotation and uses 12 of the 18 allowed tasks.
 
 | Provider | Coverage | Descriptions |
 | -------- | -------- | ------------ |
@@ -1007,9 +1059,15 @@ marked to prevent live delivery.
 * Timeouts, rate limits, blocks and network errors are classified separately. Other sources'
   transient failures get one retry when global search/description slots remain. LinkedIn
   never adds retry tasks beyond its cycle allowance. **Rate limits and blocks are never retried** — the
-  source goes on cooldown (`resilience.cooldown_minutes`) and is reported in `npm run status`.
-  Rate-limit cooldowns grow 120 → 240 → 480 minutes, up to the configured 2,880-minute cap;
-  a longer `Retry-After` takes precedence. A successful recovery cycle resets the streak.
+  source goes on cooldown and is reported in `npm run status`. Valid rate-limit `Retry-After`
+  seconds or HTTP-date determine the deadline. Only missing/invalid headers use
+  `resilience.cooldown_minutes.rate_limit`: 120 → 240 → 480 minutes, capped by
+  `max_rate_limit_cooldown_minutes` (2,880). Two verified recovery visits reset the streak.
+  Existing later deadlines are retained; 403/access-challenge cooldowns are unchanged.
+  LinkedIn still has two search tasks per cycle, up to three HTTP requests per task,
+  eight-second task pacing and its existing task/process deadlines. Description and AI
+  budgets are separate. Automatic period searches resume on the existing minute scheduler
+  after batch pacing/cooldowns/leases allow; paused or manual searches require explicit continuation.
 * No account login, cookie harvesting, CAPTCHA solving or proxy rotation is implemented. If a
   board blocks you, the tool reports it and backs off.
 * Collector output is schema-validated line by line; malformed lines are counted and discarded

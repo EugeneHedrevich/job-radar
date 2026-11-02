@@ -37,14 +37,14 @@ export async function readHealth(): Promise<SourceHealthRow[]> {
 }
 
 /** Structured availability for the existing continuation scheduler; no reservations. */
-export async function sourceResumeTimes(config: AppConfig, at = new Date()): Promise<Map<string, number>> {
-  return new Map((await readHealth()).map((row) => {
-    const limits = config.searches.linkedin_limits;
-    const windowEnd = Date.parse(row.windowStartedAt ?? '') + limits.window_minutes * 60_000;
-    return [row.source, Math.max(at.getTime(), Date.parse(row.cooldownUntil ?? '') || 0,
-      row.importToken ? Date.parse(row.importUntil ?? '') || 0 : 0,
-      row.source === 'linkedin' && (row.searchRequests ?? 0) + (row.reservedSearch ?? 0) >= limits.max_search_requests_per_window ? windowEnd || 0 : 0)];
-  }));
+export async function sourceResumeTimes(at = new Date()): Promise<Map<string, number>> {
+  return new Map((await readHealth()).map((row) => [row.source,
+    Math.max(at.getTime(), Date.parse(row.cooldownUntil ?? '') || 0,
+      row.importToken ? Date.parse(row.importUntil ?? '') || 0 : 0)]));
+}
+
+function cooldownReason(row: SourceHealthRow): string {
+  return `Source is on cooldown until ${row.cooldownUntil} (${row.lastStatus ?? 'unknown'}${row.lastMessage ? `: ${row.lastMessage}` : ''})`;
 }
 
 /** Sources that must not be queried right now, with the reason why. */
@@ -53,20 +53,18 @@ export async function activeCooldowns(now: Date = new Date(), enrichOnly = false
   const result = new Map<string, string>();
   for (const row of rows) {
     if (row.cooldownUntil && new Date(row.cooldownUntil) > now) {
-      const until = new Date(row.cooldownUntil);
-      result.set(row.source, `on cooldown until ${until.toISOString()} (${row.lastStatus ?? 'unknown'})`);
+      result.set(row.source, cooldownReason(row));
       continue;
     }
     if (row.importToken && row.importUntil && new Date(row.importUntil) > now) {
       result.set(row.source, 'A shared source request is already running');
       continue;
     }
-    if (row.source === 'linkedin') {
+    if (row.source === 'linkedin' && enrichOnly) {
       const limits = loadConfig().searches.linkedin_limits;
       if (row.windowStartedAt && now.getTime() < new Date(row.windowStartedAt).getTime() + limits.window_minutes * 60_000 &&
-        (enrichOnly ? (row.detailRequests ?? 0) + (row.reservedDetail ?? 0) >= limits.max_detail_requests_per_window
-          : (row.searchRequests ?? 0) + (row.reservedSearch ?? 0) >= limits.max_search_requests_per_window)) {
-        result.set(row.source, `Shared LinkedIn request allowance used until ${new Date(new Date(row.windowStartedAt).getTime() + limits.window_minutes * 60_000).toISOString()}`);
+        (row.detailRequests ?? 0) + (row.reservedDetail ?? 0) >= limits.max_detail_requests_per_window) {
+        result.set(row.source, `Shared LinkedIn detail allowance used until ${new Date(new Date(row.windowStartedAt).getTime() + limits.window_minutes * 60_000).toISOString()}`);
       }
     }
   }
@@ -100,8 +98,9 @@ export async function recordOutcomes(config: AppConfig, outcomes: TaskOutcome[],
         outcome.searchRequests === undefined || outcome.detailRequests === undefined || outcome.searchRequests + outcome.detailRequests > 0);
       const succeeded = sourceOutcomes.some((outcome) => outcome.status === 'Succeeded');
       const recovered = succeeded && !failures.length;
-      // A collection started before an import was blocked must not clear that newer failure.
-      if (recovered && previous?.updatedAt && new Date(previous.updatedAt) > startedAt && previous.lastStatus !== 'ok') continue;
+      // Success from another visit cannot clear a still-active or newer cooldown.
+      if (recovered && (Date.parse(previous?.cooldownUntil ?? '') > now.getTime() ||
+        previous?.updatedAt && new Date(previous.updatedAt) > startedAt && previous.lastStatus !== 'ok')) continue;
       const limited = failures.some((outcome) => outcome.errorKind === 'rate_limit');
       const validResponse = source !== 'linkedin' || sourceOutcomes.some(outcome => outcome.status === 'Succeeded' &&
         (outcome.resultCount > 0 || outcome.coverage === 'exhausted'));
@@ -110,9 +109,8 @@ export async function recordOutcomes(config: AppConfig, outcomes: TaskOutcome[],
       const recoverySuccesses = recovered ? (previous?.recoverySuccesses ?? 0) + Number(verifiedVisit) : 0;
       const lastRateLimitAt = previous?.lastRateLimitAt ?? (previous?.lastStatus === 'rate_limit' ? previous.updatedAt : null);
       // One probe demonstrates availability, not sustained recovery. Retain the
-      // streak until two visits succeed and a full shared window has passed.
-      const stable = recovered && (source !== 'linkedin' || verifiedVisit && recoverySuccesses >= 2 &&
-        now.getTime() - Date.parse(lastRateLimitAt ?? '1970-01-01') >= config.searches.linkedin_limits.window_minutes * 60_000);
+      // streak until two verified visits succeed, independent of request counters.
+      const stable = recovered && (source !== 'linkedin' || verifiedVisit && recoverySuccesses >= 2);
       const rateLimitStreak = limited ? Math.max(previous?.rateLimitStreak ?? 0,
         previous?.lastStatus === 'rate_limit' ? 1 : 0) + 1
         : stable ? 0 : previous?.rateLimitStreak ?? 0;
@@ -128,12 +126,16 @@ export async function recordOutcomes(config: AppConfig, outcomes: TaskOutcome[],
         // Blocking is not transient: stop retrying immediately, do not wait for
         // the failure threshold, and never attempt to work around the block.
         blocked = blocked || worstKind === 'blocked';
-        const base = cooldown_minutes[worstKind] ?? 60;
-        const minutes = worstKind === 'rate_limit' ? Math.min(config.searches.resilience.max_rate_limit_cooldown_minutes,
-          base * 2 ** Math.min(10, Math.max(0, rateLimitStreak - 1))) : base;
-        const retryAfterMinutes = Math.max(0, ...failures.map((outcome) => Math.min(31_536_000, outcome.retryAfterSeconds ?? 0) / 60));
-        cooldownUntil = new Date(Math.max(addMinutes(now, Math.max(minutes, retryAfterMinutes)).getTime(),
-          new Date(previous?.cooldownUntil ?? 0).getTime())).toISOString();
+        const deadlines = failures.filter((outcome) => ['rate_limit', 'blocked'].includes(outcome.errorKind ?? '')).map((outcome) => {
+          const headerDeadline = retryAfterDeadline(outcome, now);
+          if (outcome.errorKind === 'rate_limit' && headerDeadline !== undefined) return headerDeadline;
+          const base = cooldown_minutes[outcome.errorKind === 'rate_limit' ? 'rate_limit' : 'blocked'] ?? 60;
+          const minutes = outcome.errorKind === 'rate_limit' ? Math.min(config.searches.resilience.max_rate_limit_cooldown_minutes,
+            base * 2 ** Math.min(10, Math.max(0, rateLimitStreak - 1))) : base;
+          // Access challenges/403 retain their existing minimum cooldown.
+          return Math.max(addMinutes(now, minutes).getTime(), headerDeadline ?? 0);
+        });
+        cooldownUntil = new Date(Math.max(...deadlines, Date.parse(previous?.cooldownUntil ?? '') || 0)).toISOString();
         lastStatus = worstKind;
         consecutiveFailures = Math.max(consecutiveFailures, failure_threshold);
         log.warn(`Source "${source}" reported ${worstKind}; pausing it until ${cooldownUntil}`);
@@ -165,7 +167,7 @@ export async function recordOutcomes(config: AppConfig, outcomes: TaskOutcome[],
         ...(failures.length ? { lastFailureStatus: failures.at(-1)?.httpStatus ?? null,
           lastFailureAt: failures.at(-1)?.httpStatusAt ?? now.toISOString(), lastFailureKind: worstKind ?? 'error',
           lastFailureMessage: failures.at(-1)?.message?.slice(0, 1900) ?? null } : {}),
-        lastRetryAfterSeconds: failures.find((outcome) => outcome.retryAfterSeconds !== undefined)?.retryAfterSeconds ?? previous?.lastRetryAfterSeconds ?? null,
+        lastRetryAfterSeconds: failures.length ? failures.at(-1)?.retryAfterSeconds ?? null : previous?.lastRetryAfterSeconds ?? null,
       };
       if (previous) {
         await tx.run(UPDATE(db().SourceHealth).set(row).where({ source }));
@@ -198,6 +200,14 @@ function addMinutes(date: Date, minutes: number): Date {
   return new Date(date.getTime() + minutes * 60_000);
 }
 
+/** Retry-After was parsed at the response, not when the worker finally exits. */
+function retryAfterDeadline(outcome: TaskOutcome, now: Date): number | undefined {
+  const seconds = outcome.retryAfterSeconds;
+  if (seconds === undefined || !Number.isFinite(seconds) || seconds < 0) return undefined;
+  const deadline = (Date.parse(outcome.httpStatusAt ?? '') || now.getTime()) + seconds * 1000;
+  return Number.isFinite(new Date(deadline).getTime()) ? deadline : undefined;
+}
+
 /** Serialize metadata lookups per source, across local processes, without holding a DB transaction during I/O. */
 export async function claimImportSource(source: string): Promise<SourceRequestClaim> {
   return claimSourceRequests(source, 0, 3, 45_000);
@@ -205,7 +215,8 @@ export async function claimImportSource(source: string): Promise<SourceRequestCl
 
 export interface SourceRequestClaim { token?: string; reason?: string; searchLimit: number; detailLimit: number; recovery: boolean }
 
-/** Reserve a persistent allowance before I/O. Expired reservations remain charged because their result is unknown. */
+/** Acquire the shared source lease and detail allowance. Search counters are diagnostic only.
+ * Expired reservations remain charged because their result is unknown. */
 export async function claimSourceRequests(source: string, searchWanted: number, detailWanted: number, leaseMs = 45_000): Promise<SourceRequestClaim> {
   const config = loadConfig();
   return cds.tx(async (tx: any) => {
@@ -213,7 +224,7 @@ export async function claimSourceRequests(source: string, searchWanted: number, 
     const row = await tx.run(SELECT.one.from(db().SourceHealth).where({ source }));
     const unavailable = (reason: string): SourceRequestClaim => ({ reason, searchLimit: 0, detailLimit: 0, recovery: false });
     const now = new Date();
-    if (row?.cooldownUntil && new Date(row.cooldownUntil) > now) return unavailable(`Source is on cooldown until ${row.cooldownUntil} (${row.lastStatus})`);
+    if (row?.cooldownUntil && new Date(row.cooldownUntil) > now) return unavailable(cooldownReason(row));
     if (row?.importToken && row.importUntil && new Date(row.importUntil) > now) return unavailable('A request for this source is already running. Try again later.');
     const limits = config.searches.linkedin_limits;
     const reset = !row?.windowStartedAt || now.getTime() - new Date(row.windowStartedAt).getTime() >= limits.window_minutes * 60_000;
@@ -221,12 +232,11 @@ export async function claimSourceRequests(source: string, searchWanted: number, 
     const usedSearch = reset ? 0 : (row.searchRequests ?? 0) + (row.reservedSearch ?? 0);
     const usedDetail = reset ? 0 : (row.detailRequests ?? 0) + (row.reservedDetail ?? 0);
     const recovery = Boolean(row?.recoveryPending || row?.cooldownUntil && ['rate_limit', 'blocked'].includes(row.lastStatus));
-    const searchLimit = source === 'linkedin' ? Math.min(searchWanted, recovery ? 1 : Infinity,
-      Math.max(0, limits.max_search_requests_per_window - usedSearch)) : searchWanted;
+    const searchLimit = source === 'linkedin' ? Math.min(searchWanted, recovery ? 1 : Infinity) : searchWanted;
     const detailLimit = source === 'linkedin' ? Math.min(detailWanted, recovery ? (searchWanted > 0 ? 0 : 1) : Infinity,
       Math.max(0, limits.max_detail_requests_per_window - usedDetail)) : detailWanted;
-    if (searchWanted > 0 ? searchLimit === 0 : detailWanted > 0 && detailLimit === 0) return unavailable(
-      `LinkedIn request allowance used; available after ${new Date(new Date(windowStartedAt).getTime() + limits.window_minutes * 60_000).toISOString()}`);
+    if (!searchWanted && detailWanted > 0 && detailLimit === 0) return unavailable(
+      `LinkedIn detail allowance used; available after ${new Date(new Date(windowStartedAt).getTime() + limits.window_minutes * 60_000).toISOString()}`);
     const token = randomUUID();
     const values = { importToken: token, importUntil: new Date(now.getTime() + leaseMs).toISOString(),
       windowStartedAt,

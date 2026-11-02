@@ -47,6 +47,20 @@ afterEach(() => {
     resetConfigCache();
 });
 describe('malformed collector output', () => {
+    it.each(['freelancermap', 'jobserve', 'freelancede', 'hays', 'justjoin', 'nofluffjobs'])('selects %s in the bounded rotation and frozen catalogue', (source) => {
+        const config = loadConfig();
+        const sequence = config.searches.rotation.sequence!;
+        const plans = sequence.map(batchKey => planBatch(config, { batchKey, globalLinkedin: true }));
+        const tasks = plans.flatMap(plan => plan.tasksBySource.get(source) ?? []);
+        expect(tasks.length).toBeGreaterThan(0);
+        expect(tasks.map(task => task.search_term)).toEqual(expect.arrayContaining(source === 'nofluffjobs' ? ['SAP'] : ['SAP BTP', 'SAP CAP', 'SAP CAPM', 'SAPUI5', 'SAP Fiori', 'SAP CPI', 'SAP Integration Suite', 'SAP Business AI', 'SAP Cloud Developer', 'SAP Joule']));
+        expect(searchCatalogue(config).some(task => task.source === source)).toBe(true);
+        for (const plan of plans) {
+            const tasks = [...plan.tasksBySource.values()].flat();
+            expect(tasks.length).toBeLessThanOrEqual(18);
+            expect(tasks.filter(task => task.fetch_description).length).toBeLessThanOrEqual(2);
+        }
+    });
     it('checks fresh heads, avoids repeated Indeed pages and shares canonical LinkedIn details offline', async () => {
         await promisify(execFile)(loadConfig().pythonPath, [path.join(here, 'helpers/freshness-regression.py')], { cwd: PROJECT_ROOT });
     });

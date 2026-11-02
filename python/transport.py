@@ -52,17 +52,17 @@ def retry_after(response) -> float | None:
     value = (getattr(response, "headers", None) or {}).get("Retry-After")
     if not isinstance(value, str):
         return None
+    value = value.strip()
     try:
-        seconds = float(value)
-        return max(0, seconds) if math.isfinite(seconds) else None
-    except ValueError:
-        try:
-            at = parsedate_to_datetime(value)
-            if at.tzinfo is None:
-                at = at.replace(tzinfo=timezone.utc)
-            return max(0, (at - datetime.now(timezone.utc)).total_seconds())
-        except (TypeError, ValueError):
-            return None
+        if re.fullmatch(r"[0-9]+", value):
+            seconds = float(value)
+            return seconds if math.isfinite(seconds) else None
+        at = parsedate_to_datetime(value)
+        if at.tzinfo is None:
+            at = at.replace(tzinfo=timezone.utc)
+        return max(0, (at - datetime.now(timezone.utc)).total_seconds())
+    except (TypeError, ValueError, OverflowError):
+        return None
 
 
 class RequestBudgetExhausted(Exception):
@@ -72,6 +72,7 @@ class RequestBudgetExhausted(Exception):
 class SourceStopped(RuntimeError):
     def __init__(self, message: str, response=None):
         super().__init__(message)
+        self.http_status_at = datetime.now(timezone.utc).isoformat()
         self.retry_after_seconds = retry_after(response) if response is not None else None
 
 

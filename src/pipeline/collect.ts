@@ -178,7 +178,8 @@ async function collectOwned(options: CollectOptions, claim: CollectionClaim): Pr
             if (task.enrich_only ? !detailLimit : !searchLimit) {
               outcomeByTask.set(task.task_id, { taskId: task.task_id, source, searchTerm: task.search_term,
                 location: task.location, countryIndeed: task.country_indeed, status: 'Skipped', resultCount: 0, durationMs: 0,
-                message: requestClaim.reason ?? (requestClaim.recovery ? 'LinkedIn recovery probe is limited to one task' : 'LinkedIn shared request allowance exhausted') });
+                message: requestClaim.reason ?? (requestClaim.recovery ? 'LinkedIn recovery probe is limited to one actual HTTP request'
+                  : task.enrich_only ? 'LinkedIn detail allowance exhausted' : 'LinkedIn search batch request limit reached') });
               continue;
             }
             ready.push({ ...task, search_request_limit: searchLimit, detail_request_limit: detailLimit,

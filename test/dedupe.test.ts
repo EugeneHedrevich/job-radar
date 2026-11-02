@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { resetConfigCache } from '../src/config/index.js';
-import { db, query, queryOne, SELECT } from '../src/db/index.js';
+import { cds, db, query, queryOne, SELECT, UPDATE } from '../src/db/index.js';
 import { normalizeJob } from '../src/normalize/index.js';
 import { ingestJobs } from '../src/persist/ingest.js';
 import { rank } from '../src/pipeline/rank.js';
@@ -12,6 +12,20 @@ beforeAll(useTempDb);
 beforeEach(async () => { vi.unstubAllGlobals(); resetConfigCache(); await resetTestDb(); });
 afterAll(async () => { vi.unstubAllGlobals(); resetConfigCache(); await closeTempDb(); });
 describe("vacancy identity and refresh", () => {
+    it.each(['freelancermap', 'jobserve', 'freelancede', 'hays', 'justjoin', 'nofluffjobs'])('replays %s without duplicating or changing personal tracking', async (source) => {
+        const record = { ...strong, id: `board-${source}`, job_url: `https://example.org/${source}/123`,
+            source_facts: { project_reference: '123/1', salary_basis: 'net' } };
+        const first = await ingestJobs([normalizeJob(record, source)!], { runId: null, automatic: true });
+        await cds.run(UPDATE(db().Jobs).set({ status: 'Applied', cvSent: true, personalNotes: 'Keep my notes', applicationDate: '2026-10-20' }).where({ ID: first.jobIds[0] }));
+        const again = await ingestJobs([normalizeJob(record, source)!], { runId: null, automatic: true });
+        expect(again.created).toBe(0);
+        expect(again.jobIds).toEqual(first.jobIds);
+        const job = await queryOne<any>(SELECT.from(db().Jobs).where({ ID: first.jobIds[0] }));
+        expect(job).toMatchObject({ status: 'Applied', personalNotes: 'Keep my notes', applicationDate: '2026-10-20' });
+        expect(job.cvSent).toBeTruthy();
+        const listing = await queryOne<any>(SELECT.from(db().SourceListings).where({ source }));
+        expect(JSON.parse(listing.rawRecord).source_facts).toEqual(record.source_facts);
+    });
     it.each([false, true])('retains same-run description and rates regardless of sparse-result order (%s)', async (reverse) => {
         const sparse = normalizeJob({ ...strong, description: null, currency: null, min_amount: null, max_amount: null }, 'linkedin')!;
         const full = normalizeJob(strong, 'linkedin')!;

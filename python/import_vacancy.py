@@ -99,6 +99,7 @@ def main():
             status = int(str(exc).split()[-1])
         failure = {'kind': kind, 'message': safe_message(message)[:1000],
             **({'httpStatus': status} if status else {}),
+            **({'httpStatusAt': exc.http_status_at} if isinstance(exc, SourceStopped) else {}),
             **({'retryAfterSeconds': delay} if delay is not None else {})}
         print(json.dumps({"job": None, "activity": None, "failure": failure, **counts, "message": failure['message']}))
 

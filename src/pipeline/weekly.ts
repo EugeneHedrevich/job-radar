@@ -79,6 +79,13 @@ const unfinished = (search: WeeklySearch) => !['exhausted', 'limited', 'capped']
 /** Availability is current; committed cursors/history remain unchanged. */
 export function weeklyAvailability(state: WeeklyState, deferrals: Map<string, string>, currentSource?: string | null): WeeklyState {
   return { ...state, searches: state.searches.map((search) => {
+    // Older cycles added a query-local 30-minute delay and eventually capped 429s.
+    // Reopen only those rate-limited searches; shared health owns their deadline.
+    if ((search.state === 'cooldown' || search.state === 'capped' && /^Automatic attempts stopped/.test(search.reason ?? '')) &&
+      /\bHTTP\s*429\b|\brate_limit\b/i.test(search.reason ?? '')) {
+      search = { ...search, state: 'cooldown', failures: 0, reason: 'HTTP 429; saved continuation retained' };
+      delete search.retryAfter;
+    }
     if (!unfinished(search)) return search;
     const reason = deferrals.get(search.task.source);
     if (reason && !(currentSource === search.task.source && /already running/i.test(reason)))
@@ -152,7 +159,7 @@ function prioritizeLinkedin(all: WeeklySearch[], pending: WeeklySearch[]): Weekl
 }
 
 export async function nextWeeklyResume(config: AppConfig, state: WeeklyState, at = new Date()): Promise<string | null> {
-  const times = await sourceResumeTimes(config, at);
+  const times = await sourceResumeTimes(at);
   const eligible = state.searches.filter((s) => unfinished(s) && config.searches.sources[s.task.source]?.enabled)
     .map((s) => Math.max(at.getTime() + 60_000, times.get(s.task.source) ?? 0, Date.parse(s.retryAfter ?? '') || 0));
   return eligible.length ? new Date(Math.min(...eligible)).toISOString() : null;
@@ -203,9 +210,15 @@ export async function commitWeeklyProgress(id: string, state: WeeklyState, outco
       else search.task.search_cursor = outcome.nextCursor;
     }
     if (outcome.status !== 'Succeeded') {
+      if (outcome.errorKind === 'rate_limit') {
+        search.state = 'cooldown';
+        search.reason = deferrals.get(search.task.source) ?? outcome.message ?? 'HTTP 429; saved continuation retained';
+        delete search.retryAfter; // Shared cooldown, including Retry-After: 0, is authoritative.
+        continue;
+      }
       search.failures = (search.failures ?? 0) + 1;
       search.reason = outcome.message ?? 'Search failed; continuation retained';
-      search.state = ['rate_limit', 'blocked'].includes(outcome.errorKind ?? '') ? 'cooldown' : 'failed';
+      search.state = outcome.errorKind === 'blocked' ? 'cooldown' : 'failed';
       search.retryAfter = new Date(Date.now() + 30 * 60_000).toISOString();
       if (search.failures >= loadConfig().searches.resilience.failure_threshold) {
         search.state = 'capped'; search.reason = `Automatic attempts stopped after ${search.failures} failures; cursor retained for review. ${search.reason}`;

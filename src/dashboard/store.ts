@@ -175,7 +175,8 @@ export async function listJobs(params = new URLSearchParams()): Promise<JobList>
   const page = Math.min(input.page, Math.max(1, Math.ceil(filtered.length / input.pageSize)));
   return { items: filtered.slice((page - 1) * input.pageSize, page * input.pageSize),
     total: filtered.length, storedTotal: summaries.length, page, pageSize: input.pageSize,
-    sources: [...new Set(summaries.flatMap((job) => job.sources))].sort() };
+    sources: [...new Set([...Object.keys(config.searches.sources).filter(source => config.searches.sources[source]?.enabled),
+      ...summaries.flatMap((job) => job.sources)])].sort() };
 }
 
 export async function readJob(id: string): Promise<JobDetail> {

@@ -327,6 +327,22 @@ describe('local dashboard controls', () => {
     expect(lookup).toHaveBeenCalledTimes(1);
   });
 
+  it.each([
+    ['freelancermap', 'https://freelancermap.com/project/sap-btp-123'],
+    ['jobserve', 'https://jobserve.com/gb/en/mob/job/123'],
+    ['freelancede', 'https://freelance.de/projekte/projekt-123-SAP'],
+    ['hays', 'https://hays.de/jobsuche/stellenangebote-jobs-detail-sap-123/1'],
+    ['justjoin', 'https://justjoin.it/job-offer/sap-btp-123'],
+    ['nofluffjobs', 'https://nofluffjobs.com/pl/job/sap-btp-123'],
+  ])('routes %s imports to its public adapter and preserves unverified status on blocks', async (source, url) => {
+    const lookup = vi.fn(async (): Promise<ImportMetadata> => ({ job: null, activity: null, requests: 1,
+      message: 'HTTP 403', failure: { kind: 'blocked', message: 'HTTP 403', httpStatus: 403 } }));
+    const result = await importVacancy({ url }, lookup);
+    expect(result).toMatchObject({ availability: 'Could not verify', result: 'Needs details', failure: { httpStatus: 403 } });
+    expect(lookup).toHaveBeenCalledWith(source, expect.stringContaining(new URL(url).hostname), expect.any(Number));
+    expect((await queryOne<any>(SELECT.from(db().SourceHealth).where({ source }))).lastStatus).toBe('blocked');
+  });
+
   it.each([429, 403])('persists import HTTP %s, honours Retry-After and keeps later imports off the source', async (status) => {
     const began = new Date(Date.now() - 1000);
     const delay = 18 * 3600;

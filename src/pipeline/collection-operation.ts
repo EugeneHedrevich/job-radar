@@ -6,7 +6,7 @@ import { collect, outcomeMessage, type CollectOptions, type CollectSummary } fro
 import { rank, emptyRankProgress, type RankOptions, type RankedJob, type RankProgress } from './rank.js';
 import { PENDING_AI_STATUSES } from './ai-queue.js';
 import { log } from '../util/log.js';
-import { createWeeklyState, extendWeeklyCatalogue, nextWeeklyResume, readWeeklyState, weeklyProgress } from './weekly.js';
+import { createWeeklyState, extendWeeklyCatalogue, nextWeeklyResume, readWeeklyState, weeklyAvailability, weeklyProgress } from './weekly.js';
 import { hasPersonalTracking, vacancyRelevance } from '../matching/relevance.js';
 import { jobText } from '../matching/signals.js';
 import { patchRunDiagnostics } from '../dashboard/diagnostics.js';
@@ -158,7 +158,7 @@ export async function pausePeriodCollection(id: string) {
     await tx.run('UPDATE sap_jobradar_Jobs SET ID = ID WHERE 0 = 1');
     const operation = await tx.run(SELECT.one.from(db().CollectionOperations).where({ ID: id }));
     if (!operation?.weeklyState) throw new ApiError(404, 'Period search not found');
-    if (!weeklyProgress(JSON.parse(operation.weeklyState)).canContinue) throw new ApiError(409, 'No remaining searches to pause');
+    if (!weeklyProgress(weeklyAvailability(JSON.parse(operation.weeklyState), new Map())).canContinue) throw new ApiError(409, 'No remaining searches to pause');
     const lease = await tx.run(SELECT.one.from(db().CollectionLease).where({ name: 'collection' }));
     const executing = lease?.operation_ID === id && lease.token && Date.parse(lease.expiresAt) > Date.now();
     const now = new Date().toISOString();
@@ -175,10 +175,16 @@ export async function pausePeriodCollection(id: string) {
 export async function resumePeriodCollection(at = new Date()): Promise<boolean> {
   await readOperation(); // recover an expired execution lease without resetting source reservations
   at = new Date(Math.max(at.getTime(), Date.now())); // recovery may have just made an operation eligible
-  const waiting = await query<any>(SELECT.from(db().CollectionOperations).where({ stage: 'Waiting', outcome: 'Running', pauseRequestedAt: null, resumeAt: { '<=': at.toISOString() } }).orderBy('resumeAt asc'));
+  const waiting = await query<any>(SELECT.from(db().CollectionOperations).where({ stage: 'Waiting', outcome: 'Running', pauseRequestedAt: null }).orderBy('resumeAt asc'));
   for (const operation of waiting) {
     const state = await readWeeklyState(operation.ID);
     if (!state?.automatic) continue;
+    // Recheck observed health, including deadlines saved before the search quota
+    // was removed. Anchor batch pacing to the saved cycle, not to each tick.
+    const resumeAt = await nextWeeklyResume(loadConfig(), state, new Date(operation.updatedAt ?? operation.startedAt));
+    if (resumeAt !== operation.resumeAt) await cds.run(UPDATE(db().CollectionOperations).set({ resumeAt })
+      .where({ ID: operation.ID, stage: 'Waiting', outcome: 'Running', pauseRequestedAt: null, resumeAt: operation.resumeAt }));
+    if (!resumeAt || Date.parse(resumeAt) > at.getTime()) continue;
     const reservation = await claimCollection('period-continuation', at, operation.ID, true);
     if (!reservation.acquired) return false;
     await collectAndAssess(reservation.claim, { weekly: state });

@@ -45,7 +45,7 @@ export async function claimCollection(trigger: string, now = new Date(), resumeI
       const prior = await tx.run(SELECT.one.from(db().CollectionOperations).where({ ID: resumeId }));
       if (dueOnly && (!prior || prior.pauseRequestedAt || prior.stage !== 'Waiting' || !prior.resumeAt || Date.parse(prior.resumeAt) > now.getTime() ||
         !JSON.parse(prior.weeklyState ?? '{}').automatic)) return { acquired: false as const, operationId };
-      if (!prior?.weeklyState || !weeklyProgress(JSON.parse(prior.weeklyState) as WeeklyState).canContinue && !JSON.parse(prior.weeklyState).automatic)
+      if (!prior?.weeklyState || !weeklyProgress(weeklyAvailability(JSON.parse(prior.weeklyState) as WeeklyState, new Map())).canContinue && !JSON.parse(prior.weeklyState).automatic)
         throw new Error('No pending weekly search to continue');
       await tx.run(UPDATE(db().CollectionOperations).set({ stage: 'Preparing', outcome: 'Running', finishedAt: null,
         updatedAt: now.toISOString(), resumeAt: null, pauseRequestedAt: null, currentSource: null, tasksDone: 0, tasksTotal: 0, tasksFailed: 0,
